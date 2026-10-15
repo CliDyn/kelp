@@ -1,0 +1,52 @@
+% =====================================================================
+%  notation.tex — shared mathematical and code-reference macros.
+%  Symbol conventions (see also the front matter and Appendix B):
+%    position  x = (lambda, phi, z)   longitude, latitude, depth (down +)
+%    velocity  u = (u, v, W)           W = vertical velocity (down +)
+%    w_i                                barycentric / interpolation weight
+%    alpha                              interpolation fraction (time or depth)
+%    s_fb = +-1                         integration direction (time_dir)
+% =====================================================================
+
+% ---- calculus ----
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\dt}{\Delta t}
+\newcommand{\pd}[2]{\frac{\partial #1}{\partial #2}}
+
+% ---- position & velocity ----
+\newcommand{\pos}{\mathbf{x}}
+\newcommand{\velvec}{\mathbf{u}}
+\newcommand{\lonx}{\lambda}
+\newcommand{\latx}{\phi}
+\newcommand{\depx}{z}
+\newcommand{\Wvel}{W}
+\newcommand{\tdir}{s_{\mathrm{fb}}}
+
+% ---- spherical metric (metres per degree) ----
+\newcommand{\Mlat}{M_{\latx}}            % metres per degree latitude (111120)
+\newcommand{\zzero}{z_{0}}               % metres per degree longitude = cos(phi) Mlat
+
+% ---- interpolation ----
+\newcommand{\bwt}[1]{w_{#1}}             % barycentric weight i
+\newcommand{\interpfrac}{\alpha}
+
+% ---- code references (typeset, not hyperlinked) ----
+\newcommand{\code}[1]{\texttt{\small #1}}      % inline code token
+\newcommand{\conf}[1]{\texttt{\small #1}}       % YAML config key
+\newcommand{\fn}[1]{\texttt{\small #1}}         % function / symbol name
+\newcommand{\srcfile}[1]{\texttt{\small #1}}    % source file path
+
+% A left-bar "Source." callout that ties prose to the implementation.
+\newcommand{\codeanchor}[1]{%
+  \par\smallskip\noindent
+  {\color{lagblue}\rule[-0.15em]{2.5pt}{1.05em}}\hspace{0.6em}%
+  \begin{minipage}[t]{0.93\linewidth}\small\textbf{Source.}\enspace #1\end{minipage}%
+  \par\smallskip}
+
+% A "Code vs. documentation" note, marking where the engine's documentation
+% diverges from the source. The manual follows the source.
+\newcommand{\codenote}[1]{%
+  \par\smallskip\noindent
+  {\color{lagelem}\rule[-0.15em]{2.5pt}{1.05em}}\hspace{0.6em}%
+  \begin{minipage}[t]{0.93\linewidth}\small\textit{Code vs.\ documentation.}\enspace #1\end{minipage}%
+  \par\smallskip}

@@ -1,0 +1,191 @@
+\chapter{Forcing Input and Time Control}\label{ch:input}
+
+The trajectories are driven by the model's stored velocity fields, which the engine reads on demand from disk
+and places on a time axis. This chapter describes the reader layer and its lazy access to the forcing, the
+requirement that the selected variables share a single time cadence --- the most common configuration error
+on FESOM output --- the decoding of the time axis, the resolution of the integration window, the handling of
+time-averaged forcing, the velocity handed to each step, and the cache through which several processes on a
+node can share one copy of each snapshot. The in-memory read-ahead that serves the reconstruction of
+\cref{ch:temporal} is part of this layer.
+
+\section{The reader layer}\label{sec:input-reader}
+
+A reader is selected by \conf{mesh.type}: \conf{fesom2}, \conf{fesomc}, \conf{nemo} or \conf{healpix}. Each
+provides the mesh, opens the forcing, and reads one snapshot at a time; the NEMO reader builds its mesh with
+the engine's generic builder for structured grids, which turns the wet cell centres of a logically
+rectangular grid into nodes and every four adjacent wet centres into a quadrilateral element. The forcing is opened \emph{lazily}: the dataset is mapped through \code{xarray}
+without loading the field arrays, and a snapshot is materialized only when a step requires it.
+\begin{description}[font=\normalfont\bfseries,style=nextline,leftmargin=1.5em]
+  \item[FESOM2] The mesh comes from a mesh-diagnostics file (three naming conventions are recognised), an
+    ASCII mesh directory or a Zarr store. For the multi-year layout --- one file per variable per year,
+    \code{<var>.fesom.<year>.nc} --- the reader assembles exactly the variables the configuration names
+    (velocities, surface height, sampled scalars, vertical diffusivity) and concatenates the years along time
+    with \code{dask}, so a run may span decades without the files being merged on disk and naming
+    \conf{unod} does not pull in fields that merely share a prefix. A directory in any other layout is
+    assembled from the first matching file per velocity component and the other readable files on the mesh's
+    dimensions.
+  \item[FESOM-C] One NetCDF file carries the mesh and the forcing; separate files for $v$ and $w$ may be
+    merged in.
+  \item[HEALPix] The mesh is derived from the data store itself: its nodes are the wet pixel centres
+    (\conf{mesh.healpix\_geometry: dual}, the default) or, with \conf{pixel}, the pixels are the elements
+    and their corners the nodes (two-dimensional only); wet means finite velocity at the first record on
+    the tracked level. Plain Zarr and NetCDF stores and
+    reference stores (\code{.parq}, \code{.json}) are supported; the sea-surface height may come from a
+    separate store with an identical time axis (\conf{data.ncinput\_eta}), and the vertical levels from
+    \conf{mesh.levels} (\cref{sec:vert-coord}).
+  \item[NEMO] The grid-T file is the input; the grid-U and grid-V files are found by substituting the grid
+    token in its name and must share its time axis exactly. The first version is two-dimensional and requires
+    a grid aligned with east and north.
+\end{description}
+Every reader that reads a vertical velocity converts it to the engine's positive-down convention
+(\cref{sec:vert-wsign}), and with \conf{velocity\_float32} stores the velocity fields in single precision to
+halve their memory, the interpolation arithmetic staying in double precision.
+
+\section{One cadence at a time}\label{sec:input-cadence}
+
+FESOM output stores variables at several temporal cadences, set per variable in the model's configuration,
+that nonetheless share a time-units string. The variables selected for a run must share a single cadence
+(\cref{fig:cadence}): Lagrangian advection typically uses the daily node velocities and vertical velocity
+together with the daily sea-surface height and any daily scalars, and must not mix them with monthly
+element velocities. On the multi-year path the reader merges the selected variables onto a common time axis
+with an exact join; a set that cannot be aligned raises an error with the hint that a mixed cadence is the
+likely cause, the merged axis is checked to be strictly increasing, and a gap between years produces a
+warning. On the other layouts every file attached to the velocity file (a separate $v$ or $w$, the
+remaining files of a directory) is matched to the velocity records by time stamp: a file on another axis is
+refused, and a finer one that contains every velocity stamp is thinned to them with a warning. A
+mixed-cadence selection is easy to write and is caught only when the forcing is opened, not when the
+configuration is read.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.0]
+  \draw[-{Stealth[length=5pt]},gray] (-0.2,0)--(8.4,0) node[right,font=\footnotesize,black]{time (one year)};
+  \foreach \x in {0,0.25,...,8.0} \draw[lagblue,line width=0.6pt] (\x,1.55)--(\x,1.85);
+  \node[font=\footnotesize,left,lagblue!70!black] at (-0.1,1.7) {daily};
+  \node[font=\footnotesize,right] at (8.1,1.7) {\code{unod},\code{vnod},\code{w},\code{temp},\code{salt},\code{ssh}};
+  \foreach \x in {0,0.667,...,8.0} \draw[lagelem,line width=0.9pt] (\x,0.85)--(\x,1.15);
+  \node[font=\footnotesize,left,lagelem!70!black] at (-0.1,1.0) {monthly};
+  \node[font=\footnotesize,right] at (8.1,1.0) {\code{u},\code{v} (element), MLD};
+  \draw[laggreen,line width=1.1pt] (0,0.15)--(0,0.45);
+  \node[font=\footnotesize,left,laggreen!60!black] at (-0.1,0.3) {annual};
+  \node[font=\footnotesize,right] at (8.1,0.3) {\code{N2},\code{bolus}};
+\end{tikzpicture}
+\caption{An example of the cadences of one FESOM2 output configuration: the variables share one time-units
+string but are sampled at different rates. A run must select variables of a single cadence; Lagrangian
+advection uses the daily node-based fields (top). Mixing cadences --- for example the daily
+\code{unod}/\code{vnod} with the monthly element \code{u}/\code{v} --- cannot be aligned on one time axis and
+is rejected when the forcing is opened (a finer attached file that contains every velocity stamp is thinned
+with a warning instead).}
+\label{fig:cadence}
+\end{figure}
+
+\section{The time axis}\label{sec:input-axis}
+
+The snapshot times are converted to seconds from the first record. A datetime axis and a calendar-aware
+(\code{cftime}) axis are converted directly; a numeric axis with units of the form ``\emph{unit} since
+\emph{epoch}'' is decoded with its calendar; a numeric axis with a bare unit (days, hours, minutes, seconds
+and their abbreviations) is scaled by that unit. An index axis $0,1,\dots,N-1$ without units is \emph{not}
+taken as time; any other numeric axis without units is read as seconds. The snapshot spacing is the common difference when all differences agree to $10^{-3}$, and
+\conf{numerics.dt} defaults to it. In the discrete mode \conf{numerics.dt} must equal that spacing, and an
+irregular axis is refused; the interpolated mode accepts both. When the axis cannot be decoded, \conf{numerics.file\_dt} supplies the
+spacing and the axis becomes $t_i=i\,\Delta t_{\text{file}}$; without either, the interpolated mode of
+\cref{sec:temp-modes} is refused before the output file is created.
+
+\section{The integration window}\label{sec:input-window}
+
+The window in time is specified flexibly. The start is an index into the forcing record
+(\conf{time.start\_time\_idx}) or a calendar date (\conf{time.start\_date}), parsed in the calendar of the
+axis. In the interpolated mode the run starts at that instant, whether or not it coincides with a stored
+time; in the discrete mode the date must coincide with a stored time, and the run starts at that record. The length is a number of integration
+steps (\conf{time.n\_steps}, the preferred form), an explicit end index, or a duration in days
+(\conf{time.duration\_days}, only together with \conf{time.start\_date}, converted to
+$\lfloor\text{days}\cdot86400/\dt\rfloor$ steps). When the run reaches
+the end of the available forcing it either stops or wraps to the beginning, according to
+\conf{on\_exhausted}, the latter permitting a periodic forcing to be cycled. Multiple independent realizations
+may be requested (\conf{num\_runs}), each offset in start time by \conf{run\_interval} snapshots, which is the
+basis for ensembles with the stochastic schemes of \cref{ch:diffusion}; each realization writes its own output
+file.
+
+\section{Time-averaged forcing}\label{sec:input-timeavg}
+
+Forcing is often stored as time averages --- daily or monthly means --- and the engine must know this to place
+the snapshots correctly on the time axis. The key \conf{time\_averaging} declares whether the fields are
+averages (\conf{mean}) or instantaneous samples (\conf{instant}). For averaged fields, whose file timestamps
+conventionally mark the \emph{end} of each averaging window, the engine shifts each timestamp to the window
+\emph{midpoint}, $\tilde t_i=(t_{i-1}+t_i)/2$ and $\tilde t_0=t_0-(t_1-t_0)/2$, before it is used for temporal
+reconstruction, so that a daily-mean field is treated as representative of the middle of its day. Instantaneous
+fields are used unshifted. We recommend setting this key explicitly: when it is omitted the engine warns and
+guesses \conf{mean} for FESOM2 and HEALPix and \conf{instant} otherwise, and the guess, though usually correct,
+is not guaranteed. A start date is matched against the \emph{unshifted} file times. In the interpolated mode
+the run then starts at the named instant (until 2026-10-04 a date equal to a stored stamp started half a
+window earlier, at the shifted midpoint, while a date one second later started on time); a date in the last
+half window, past the last midpoint, starts at the last record with a warning. In the discrete mode the run
+starts at the matched record.
+
+\section{The velocity handed to a step}\label{sec:input-payload}
+
+Snapshots are read through a small cache keyed by record index, which keeps the bracketing pair, the PCHIP
+stencil and the read-ahead window and releases the rest (\cref{sec:temp-prefetch}). Between two snapshots at
+fraction $\interpfrac$ the step receives a lazy view of the pair rather than an interpolated field: each field
+is blended, $(1-\interpfrac)\,a+\interpfrac\,b$, the first time a consumer reads it and is then cached, and a
+field that no consumer reads is never blended --- the two-dimensional fused kernels and the
+three-dimensional barycentric RK2 kernel read none, the fused three-dimensional Euler kernel reads the
+blended velocities, and the beaching hook the surface height and a dry mask. At a snapshot, to within $10^{-12}$ in $\interpfrac$, the snapshot itself is passed. With the
+view come the target snapshot and the time to it (\cref{sec:temp-linear}). Large blends run as a parallel
+loop that is bit-identical to the array expression; fields stored in single precision are blended serially.
+
+\codeanchor{The readers live in \srcfile{readers/} (one module per model; the registry and
+\fn{extract\_time\_info} in \srcfile{readers/\_\_init\_\_.py}); the multi-year assembly and its cadence check
+are in \srcfile{readers/fesom2.py}; the structured-grid builder is \srcfile{readers/structured.py}; the
+midpoint shift (\fn{\_shift\_to\_midpoints}), the start date (\fn{\_resolve\_start\_date}), the payload
+(\fn{\_build\_vel\_payload}) and the cache \fn{\_VelCache} are in \srcfile{tracking.py}; the lazy view
+\fn{LazyLerpField} and its blend are in \srcfile{core/io.py}.}
+
+\section{Sharing snapshots between processes}\label{sec:input-shared}
+
+A large release is often split into several processes on one node (\cref{sec:perf-shard}), and each would
+otherwise read and hold its own copy of every snapshot. With \conf{numerics.shared\_fields\_dir} set, one
+process reads and publishes each processed snapshot and the others map the same bytes read-only
+(\cref{fig:shared-cache}). A process that finds a snapshot missing takes a file lock; the one that wins
+builds the arrays, writes them under a temporary name and renames the directory into place, which is atomic,
+so a sibling never sees a partial snapshot. The writer keeps a window of three snapshots on either side of
+the current one and removes the rest.
+
+The snapshots live under a namespace derived from everything that determines their content: the
+configuration keys that change what a snapshot read returns (mesh, mode, the input paths, the velocity
+precision, the diffusivity and dry-mask variables), the size and modification time of the mesh and data files,
+the engine version, and a \emph{generation}. The generation is the key
+\conf{numerics.shared\_fields\_generation} when it is set; otherwise it is taken from the environment variable
+\code{KELP\_SHARED\_FIELDS\_GENERATION}, and failing that from the batch job and job step. Shards of one job therefore
+share a namespace, while another job, or a rewritten data file, never reuses a snapshot; without a generation
+the run falls back to local reads. Each process registers itself on start and deregisters when it ends, and a
+new cache removes namespaces whose processes have all ended. Every error of the shared layer falls back to
+local reads with one warning, read-ahead is disabled, and the trajectories are identical with and without the
+cache. Placed on the parallel file system and shared within one node, the cache costs almost nothing; shared
+across nodes it slows every step (\cref{sec:perf-io}). Node-local memory (\code{/dev/shm}) has not been
+measured.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[node distance=4mm and 8mm]
+  \node[flowbox,text width=22mm] (p1) {\footnotesize process 1\\(writer)};
+  \node[flowbox,text width=22mm,below=of p1] (p2) {\footnotesize process 2};
+  \node[flowbox,text width=22mm,below=of p2] (p3) {\footnotesize process $S$};
+  \node[flowbox,fill=laggreen!10,draw=laggreen,text width=47mm,right=26mm of p2,minimum height=26mm] (store)
+    {\footnotesize\textbf{namespace}\\[2pt] \code{t00000041/}\\ \code{t00000042/}\\ \code{t00000043.tmp} $\to$ rename\\[2pt] lock, users, window $\pm3$};
+  \node[flowbox,text width=22mm,left=16mm of p2] (data) {\footnotesize forcing files};
+  \draw[flowarrow] (data)--(p1.west) node[midway,above,font=\footnotesize,sloped]{read};
+  \draw[flowarrow] (p1.east)--(store.north west) node[midway,above,font=\footnotesize,sloped]{publish};
+  \draw[flowarrow,densely dashed] (store.west)--(p2.east) node[midway,above,font=\footnotesize]{map};
+  \draw[flowarrow,densely dashed] (store.south west)--(p3.east) node[midway,below,font=\footnotesize,sloped]{map};
+\end{tikzpicture}
+\caption{The node-shared snapshot cache. The process that wins the lock reads a snapshot from the forcing
+files, writes it under a temporary name and renames it into place; the other processes map the published
+arrays read-only. The namespace is derived from the configuration, the input files, the engine version and
+the job, so no other run reuses it.}
+\label{fig:shared-cache}
+\end{figure}
+
+\codeanchor{\fn{SharedFieldCache} in \srcfile{core/shared\_fields.py}; the namespace is
+\fn{\_shared\_fields\_tag} with \fn{\_path\_fingerprint} and \fn{\_shared\_fields\_generation}
+(\srcfile{tracking.py}).}

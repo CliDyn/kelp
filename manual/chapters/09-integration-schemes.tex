@@ -1,0 +1,170 @@
+\chapter{Time-Integration Schemes}\label{ch:integration}
+
+With the velocity available at an arbitrary position and time (\crefrange{ch:hvel}{ch:temporal}),
+the engine advances the trajectory equation \cref{eq:lagrangian-ode} by an explicit
+time-integration scheme. Four are provided, selected by \conf{numerics.integrator}: the
+first-order Euler method, the second-order midpoint Runge--Kutta method (RK2), the
+classical fourth-order Runge--Kutta method (RK4) \citep{butcher2016numerical}, and an adaptive
+Dormand--Prince 5(4) method (RK45) \citep{dormand1980family} that subdivides each step to an error
+tolerance. This chapter gives the discrete position update common to all of them, the per-scheme
+stage formulae as implemented, what happens when a stage fails, and the way the integration
+direction enters. The interaction
+of scheme order with the temporal reconstruction --- which can cap the achievable order
+--- is the subject of \cref{ch:temporal}.
+
+\section{The displacement metric}\label{sec:int-metric}
+
+The velocity is in metres per second but the horizontal position is in degrees, so each
+update converts through the spherical metric of \cref{sec:intro-conv}. A horizontal
+velocity $(U,V)$ over a step $\dt$ displaces the particle by
+\begin{equation}\label{eq:int-displacement}
+  \Delta\lonx = \frac{\dt\,U}{\zzero}, \qquad
+  \Delta\latx = \frac{\dt\,V}{\Mlat}, \qquad
+  \Delta\depx = \Wvel\,\dt,
+\end{equation}
+with $\Mlat=\SI{111120}{\metre\per\degree}$ the metres per degree of latitude and
+$\zzero=\max(\cos\latx\,\Mlat,\,1)$ the metres per degree of longitude. The lower bound
+of \SI{1}{\metre\per\degree} on $\zzero$ is a guard against the cosine vanishing at the
+poles; longitude is wrapped to $[-180^{\circ},180^{\circ})$ and latitude is held within
+$[-90^{\circ},90^{\circ}]$ after each update, for the stage positions and for the particles that
+moved --- the positions of dead and not-yet-released particles are returned unchanged. The interpolated velocity already carries
+the integration-direction factor $\tdir$ (\cref{sec:arch-direction}), so the time step
+$\dt$ in \cref{eq:int-displacement} is always positive and the same formulae serve
+forward and backward integration.
+
+\section{The three schemes}\label{sec:int-schemes}
+
+\paragraph{Euler.} The Euler step evaluates the velocity once, at the current position,
+and applies \cref{eq:int-displacement} directly:
+\begin{equation}\label{eq:euler}
+  \pos_{n+1} = \pos_n + \Delta\pos\bigl(\velvec(\pos_n,t_n)\bigr).
+\end{equation}
+It is first-order accurate: the error per step is of order $\dt^2$.
+
+\paragraph{RK2 (midpoint).} The midpoint method evaluates the velocity twice. A first
+evaluation at the current position gives a provisional half-step displacement to a
+midpoint; the velocity is then evaluated at that midpoint, at the half-step time, and
+the full step uses this midpoint velocity:
+\begin{align}\label{eq:rk2}
+  (U_1,V_1) &= \velvec(\pos_n,t_n), &
+  \pos_{\text{mid}} &= \pos_n + \tfrac{1}{2}\Delta\pos(U_1,V_1), \notag\\
+  (U_2,V_2) &= \velvec(\pos_{\text{mid}},\,t_n+\tfrac{1}{2}\dt), &
+  \pos_{n+1} &= \pos_n + \Delta\pos(U_2,V_2).
+\end{align}
+The longitude metric of each displacement is taken at the latitude where its velocity was evaluated:
+$\zzero(\latx_n)$ for the half step and $\zzero(\latx_{\text{mid}})$ for the full step,
+$\Delta\lonx=\dt\,U_2/\zzero(\latx_{\text{mid}})$. With the metric of the starting latitude the
+longitude update would fall to first order; the scheme is second-order accurate.
+
+\paragraph{RK4 (classical).} The fourth-order method evaluates the velocity at four
+stages and combines their displacements with the classical weights $\tfrac16(1,2,2,1)$
+(\cref{fig:rk4}). Writing the per-stage degree increment as
+$\mathbf{d}_k=\Delta\pos(U_k,V_k)$, the stages are
+\begin{align}\label{eq:rk4}
+  \mathbf{d}_1 &= \Delta\pos\bigl(\velvec(\pos_n,\,t_n)\bigr), &
+  \mathbf{d}_2 &= \Delta\pos\bigl(\velvec(\pos_n+\tfrac12\mathbf{d}_1,\,t_n+\tfrac12\dt)\bigr), \notag\\
+  \mathbf{d}_3 &= \Delta\pos\bigl(\velvec(\pos_n+\tfrac12\mathbf{d}_2,\,t_n+\tfrac12\dt)\bigr), &
+  \mathbf{d}_4 &= \Delta\pos\bigl(\velvec(\pos_n+\mathbf{d}_3,\,t_n+\dt)\bigr),
+\end{align}
+and the position advances by
+\begin{equation}\label{eq:rk4-combine}
+  \pos_{n+1} = \pos_n + \tfrac{1}{6}\bigl(\mathbf{d}_1 + 2\mathbf{d}_2 + 2\mathbf{d}_3 + \mathbf{d}_4\bigr).
+\end{equation}
+The longitude metric $\zzero$ is recomputed at each stage's latitude. RK4 is fourth-order accurate in
+space.
+
+In three dimensions on a z-level mesh the depth is advanced by the same stage structure, with
+$\Delta\depx_k=\Wvel_k\,\dt$ (for RK2, $\depx_{\text{mid}}=\depx_n+\Wvel_1\dt/2$ and
+$\depx_{n+1}=\depx_n+\Wvel_2\dt$), without clamping between stages, and the depth is clamped to the
+column after the step (\cref{sec:vert-clamp}). On a sigma mesh the stages advance the particle's
+fraction of the water column instead (\cref{sec:vert-sigma-step}).
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.2]
+  \draw[thick,lagblue] (0,0) .. controls (1.6,0.15) and (2.8,1.45) .. (4.0,1.7);
+  \node[meshnode] at (0,0) {};
+  \node[font=\footnotesize,below=1pt] at (0,0) {$\pos_n$ ($t_n$)};
+  % stage points
+  \node[drifter] (k1) at (0,0) {};
+  \node[circle,fill=lagelem,inner sep=1.5pt] (k2) at (1.55,0.5) {};
+  \node[circle,fill=lagelem,inner sep=1.5pt] (k3) at (1.7,0.78) {};
+  \node[circle,fill=laggreen,inner sep=1.5pt] (k4) at (3.55,1.5) {};
+  \node[font=\footnotesize,above left=-2pt of k1] {$\mathbf{d}_1$};
+  \node[font=\footnotesize,below right=-2pt of k2] {$\mathbf{d}_2$};
+  \node[font=\footnotesize,above left=-2pt of k3] {$\mathbf{d}_3$};
+  \node[font=\footnotesize,below right=-2pt of k4] {$\mathbf{d}_4$};
+  % slope arrows
+  \foreach \p/\dx/\dy in {k1/0.5/0.12,k2/0.5/0.32,k3/0.5/0.36,k4/0.45/0.32}
+     \draw[velarrow] (\p)--++(\dx,\dy);
+  % final weighted step
+  \draw[-{Stealth[length=6pt]},densely dashed,kelp,line width=1pt] (0,-0.02)--(4.0,1.68);
+  \node[font=\footnotesize,kelp!70!black] at (2.7,0.55) {$\tfrac16(\mathbf{d}_1{+}2\mathbf{d}_2{+}2\mathbf{d}_3{+}\mathbf{d}_4)$};
+  \node[meshnode] at (4.0,1.7) {};
+  \node[font=\footnotesize,right=1pt] at (4.0,1.7) {$\pos_{n+1}$ ($t_n{+}\dt$)};
+  \node[font=\footnotesize,gray] at (0.95,1.55) {true path};
+\end{tikzpicture}
+\caption{The four stages of RK4. The slope $\mathbf{d}_1$ is sampled at the start
+($t_n$); $\mathbf{d}_2$ and $\mathbf{d}_3$ at provisional midpoints (time
+$t_n+\tfrac12\dt$); $\mathbf{d}_4$ at a provisional endpoint ($t_n+\dt$). The step is
+their weighted average \cref{eq:rk4-combine} (dashed), a fourth-order approximation to
+the true path (blue). Each stage requires the velocity at a different position
+\emph{and} time, which is why the temporal reconstruction of \cref{ch:temporal} matters.}
+\label{fig:rk4}
+\end{figure}
+
+\section{The adaptive scheme}\label{sec:int-rk45}
+
+With \conf{integrator: rk45} each particle subdivides the tracking step $\dt$ into substeps $h$ chosen
+by an error estimate, using the Dormand--Prince 5(4) pair with the coefficients of MATLAB's
+\code{ode45}. The right-hand side is $(\dot\lonx,\dot\latx)=(U/\zzero,\,V/\Mlat)$; each stage samples the
+velocity at its own time through the same nested temporal blend as the fused kernels
+(\cref{sec:fused-identity}). The difference between the fifth- and fourth-order solutions is converted to
+metres,
+\begin{equation}\label{eq:rk45-err}
+  e=\sqrt{\bigl(e_\lonx\,\zzero\bigr)^2+\bigl(e_\latx\,\Mlat\bigr)^2},
+\end{equation}
+and a substep is accepted when $e$ does not exceed \conf{rk45\_tol\_m} (default \SI{1}{\metre}). After
+every attempt, accepted or rejected, the substep becomes
+\begin{equation}\label{eq:rk45-control}
+  h \leftarrow h\cdot\min\bigl(\max\bigl(0.9\,(\mathrm{tol}/e)^{1/5},\,0.2\bigr),\,5\bigr),
+\end{equation}
+the first attempt is the whole step, the last substep is clipped to end exactly at $\dt$, and the last
+stage of an accepted substep is reused as the first of the next. Apart from the last one, clipped to the end of the step, a
+substep is never smaller than \conf{rk45\_h\_min} (default $10^{-4}\dt$): a substep at that floor is accepted even above the tolerance,
+and the run warns with the number of such substeps. A failed stage interpolation counts as a rejected
+attempt and retries at a fifth of the substep; only a failure at the floor, or more attempts than
+$\max(10^4,\ 2\,\dt/h_{\min}+16)$, ends the particle.
+
+The adaptive scheme has a single fused kernel and no unfused twin, and its first version is limited to
+two-dimensional runs with element-layout least-squares interpolation, without the monotone-cubic time
+reconstruction, element tracking, or spatially varying diffusivity; each excluded combination is refused
+before the output file is created. The tolerance, and the floor when it is set, are written to the output
+metadata.
+
+\section{Failure within a step}\label{sec:int-failure}
+
+A stage whose interpolation fails --- no fit, no containing element --- ends the step for that particle:
+it is returned to its position at the start of the step, with its starting nearest node, its status is set
+to \code{OUTSIDE} and its failure reason to an interpolation failure. Stage positions are not tested for
+containment; only the final position is, and a final position outside every element fails the same way
+with the reason out of bounds (\cref{ch:lifecycle}). The velocity recorded with the particle is that of
+the first stage --- the velocity at the start of the step --- for Euler, RK2 and RK4, and that at the end of
+the last substep for RK45.
+
+\section{Order, and what limits it}\label{sec:int-order}
+
+The nominal orders --- one, two, and four --- are spatial: they describe how the error falls as the step
+shrinks, provided the velocity is known exactly as a function of time. In practice the velocity is
+reconstructed between stored snapshots, and the accuracy of that reconstruction in time can become the
+binding constraint. As we show in \cref{ch:temporal}, a linear-in-time reconstruction caps the
+time-truncation error at second order regardless of the spatial scheme, so that RK4 delivers no advantage
+over RK2 unless either the step is much smaller than the snapshot interval or a higher-order temporal
+reconstruction is used. The adaptive scheme controls the local error of the trajectory for the velocity
+field as reconstructed; it cannot recover accuracy that the reconstruction in time does not carry. We
+therefore defer any claim about realized accuracy to that chapter.
+
+\codeanchor{The schemes are \fn{euler\_step}, \fn{rk2\_step}, \fn{rk4\_step} and \fn{rk45\_step} (kernel
+\fn{\_rk45\_kernel\_2d}, stage evaluation \fn{\_rk45\_eval}), dispatched by \fn{get\_integrator}; the
+update equations \crefrange{eq:int-displacement}{eq:rk4-combine} are implemented in the kernels of
+\srcfile{numerics/integrators.py}, with the metric in \srcfile{core/geometry.py}.}

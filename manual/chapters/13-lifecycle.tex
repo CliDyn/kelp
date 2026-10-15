@@ -1,0 +1,154 @@
+\chapter{Particle Lifecycle and Boundary Conditions}\label{ch:lifecycle}
+
+A particle is not simply a position that updates each step: it carries a status that records whether it is
+being advected, has been removed, has stranded, or has not yet been released. This chapter describes the four
+statuses and the transitions between them (\cref{fig:lifecycle}), the record of why a particle died, the
+treatments of the domain's boundaries --- removal at the lateral boundary, clamping at the surface and floor,
+and the optional periodic fold --- the optional beaching model, and the delayed-release mechanism by which
+particles enter the simulation on a schedule.
+
+\section{The four statuses}\label{sec:life-status}
+
+Each particle holds one of four statuses. An \code{ALIVE} particle is advected normally and is the only kind
+included in the working set that the integrator processes. An \code{OUTSIDE} particle has left the domain; the
+status is terminal, and the particle is thereafter inert, its position frozen where it last was valid. A
+\code{BEACHED} particle has stranded in shallow water; uniquely among the non-alive statuses it is reversible,
+as a beached particle may refloat (\cref{sec:life-beach}). A \code{NOT\_RELEASED} particle has not yet reached
+its scheduled release time; it is excluded from the working set, frozen in place at no computational cost,
+until it is activated (\cref{sec:life-release}). Frozen positions are copied from step to step unchanged, not
+re-wrapped, so a dead particle at longitude $180^\circ$ stays there.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[node distance=14mm and 24mm]
+  \node[statebox,fill=gray!12] (NR) {\code{NOT\_RELEASED}};
+  \node[statebox,fill=laggreen!14,right=of NR] (AL) {\code{ALIVE}};
+  \node[statebox,fill=kelp!12,right=of AL] (OUT) {\code{OUTSIDE}};
+  \node[statebox,fill=lagelem!14,below=of AL] (BE) {\code{BEACHED}};
+  \draw[trans] (NR)--(AL) node[midway,above,font=\footnotesize]{release};
+  \draw[trans] (AL)--(OUT) node[midway,above,font=\footnotesize,align=center]{leaves domain\\(step reverted)};
+  \draw[trans,transform canvas={xshift=-3pt}] (AL)--(BE) node[midway,left,font=\footnotesize]{beach};
+  \draw[trans,transform canvas={xshift=3pt}] (BE)--(AL) node[midway,right,font=\footnotesize]{resuspend};
+  \draw[trans,densely dashed] (OUT) |- node[pos=0.25,right,font=\footnotesize,align=left]{shallow or\\coastal anchor} (BE);
+  \draw[trans] (AL) edge[loop above,looseness=5] node[font=\footnotesize,above,align=center]{surface/floor clamp;\\periodic fold} (AL);
+\end{tikzpicture}
+\caption{The particle status state machine. A particle is released from \code{NOT\_RELEASED} into
+\code{ALIVE} at its scheduled time; it is removed to \code{OUTSIDE} if it leaves the domain (its step undone).
+With beaching enabled, \code{ALIVE} and \code{BEACHED} interconvert, and a particle removed in the same step
+with a shallow or coastal anchor is reclassified as \code{BEACHED} (dashed). Reaching the surface or floor
+does not change the status: the depth is clamped and the particle remains \code{ALIVE}; nor does a fold back
+into a periodic window (the self-loop).}
+\label{fig:lifecycle}
+\end{figure}
+
+\section{Why a particle died}\label{sec:life-reason}
+
+With \conf{mode.track\_failure\_reason: true} each particle also carries a failure reason: none,
+\emph{interpolation failed} (a stage found no fit or no containing element) or \emph{out of bounds} (the final
+position lies in no element). Two further codes, for surface and bottom contact, are reserved and never set,
+because those limits never remove a particle (\cref{sec:life-bc}). The reason is set once, when the particle
+dies, and never overwritten; every integration path records it, fused and unfused alike (\cref{ch:fused}). A
+beaching remap or a resuspension clears it, so the field keeps the meaning ``cause of death''. It is written
+to the trajectory output and to checkpoints.
+
+\section{Lateral removal versus vertical clamping}\label{sec:life-bc}
+
+The engine treats the lateral boundary and the vertical limits in qualitatively different ways, and the
+distinction is deliberate. The containing-element test of \cref{sec:loc-contain} is the lateral boundary
+condition: a particle whose advected position is contained by no element has left the domain, and the engine
+\emph{removes} it --- it sets the status to \code{OUTSIDE} and reverts the position to the start of the step,
+so the particle does not record a spurious move across the boundary. A failed interpolation removes a particle
+in the same way, and so does a diffusive kick that ends outside the mesh (\cref{sec:diff-composition}).
+Because the test is geometric, an open boundary and a coastline are indistinguishable to it; both produce an
+\code{OUTSIDE} result unless the beaching model says otherwise. The surface and the sea floor, by contrast,
+are enforced by \emph{clamping} after the advective step (\cref{sec:vert-clamp}): a particle that would cross
+either limit is held at it and continues to be advected. The vertical diffusive kick is the exception: it
+\emph{reflects} at the limits, because a clamp would pile particles up there (\cref{sec:diff-vertical}).
+
+\section{Periodic windows}\label{sec:life-periodic}
+
+An idealized channel domain is made periodic in longitude, latitude or both by giving a window
+$[x_0,x_1)$ in \conf{numerics.periodic\_lon} or \conf{numerics.periodic\_lat}. After every step, before the beaching hook and the
+record, an alive particle outside the window is folded back,
+\begin{equation}\label{eq:life-fold}
+  x' = x_0 + \bigl((x-x_0)\bmod(x_1-x_0)\bigr),
+\end{equation}
+and receives a fresh nearest node; particles inside the window are left bit for bit untouched. Seeds are
+folded once at the start, including those not yet released. The fold adds no connectivity across the seam, so
+the mesh must extend beyond each periodic side by a \emph{ghost band} at least one step's displacement wide:
+a particle must still be inside the mesh at the end of the step in which it crosses. The configuration is
+checked before the output file is created: the windows must lie strictly inside $(-180^\circ,180^\circ)$ and
+$(-90^\circ,90^\circ)$ and overlap the mesh, a periodic-longitude mesh must not straddle the $\pm180^\circ$
+meridian, and a missing ghost band on either side produces a warning. Periodic windows cannot be combined with
+a rotated frame (\cref{ch:frame}). The windows are written to the output metadata when set.
+
+\section{Beaching and resuspension}\label{sec:life-beach}
+
+When beaching is disabled (the default), every lateral exit becomes \code{OUTSIDE}. When the key
+\conf{numerics.beaching.enabled} is set, a post-step hook strands particles by up to four criteria, combined
+inclusively. The water column at the particle's nearest node is taken raw, $H=d+\eta$ when
+\conf{use\_eta} is set and $H=d$ otherwise, without the minimum-thickness floor, which would hide tidal
+drying; $\eta$ comes from the step's own velocity payload.
+\begin{description}[font=\normalfont\conf,style=nextline,leftmargin=1.5em]
+  \item[depth] $H<$ \conf{depth\_min}, or the node is marked dry by \conf{dry\_mask\_var}.
+  \item[coastal\_element] the particle's containing element has an edge on the coast (an edge owned by one
+    element only).
+  \item[on\_failure] a particle the integrator has just removed is reclassified as \code{BEACHED} if its
+    reverted anchor has $H$ below the zone depth or lies in a coastal element (the coastal test needs the
+    coastal flags, built only when \conf{coastal\_element} or \conf{stochastic} is also a criterion); a removal in deep water at an
+    open boundary stays \code{OUTSIDE}.
+  \item[stochastic] within a near-shore zone --- $H<$ \conf{zone\_depth} (default twice \conf{depth\_min}), or
+    coastal contact whenever the coastal flags exist --- a particle strands with probability
+    $1-\exp(-\lvert\dt\rvert/t_{\text{beach}})$ per step.
+\end{description}
+A beached particle counts as re-wetted when $H>$ \conf{depth\_min} $+$ \conf{rewet\_hysteresis} and its node is
+not marked dry; the hysteresis suppresses flicker between the two states. The resuspension policy is one of
+\conf{never}; \conf{auto}, which refloats a particle after \conf{min\_wet\_steps} consecutive re-wetted steps;
+\conf{stochastic}, which refloats a re-wetted particle with probability $1-\exp(-\lvert\dt\rvert/t_{\text{resuspend}})$;
+and \conf{auto\_or\_stochastic}. The random draws use the counter-based generator of \cref{sec:diff-rng} with
+their own components, keyed by the original particle index and the global step, and the count of re-wetted
+steps is written to checkpoints, so a resumed run reproduces the uninterrupted one bit for bit.
+
+The hook runs in two phases after the step: first the reclassification of just-removed particles, then the
+criteria and the resuspension. Its containment test runs only for alive, beached and just-removed particles. The
+coastal flags are built only when a criterion needs them. A configuration asking for $\eta$ without a
+sea-surface height in the dataset, or naming a dry-mask variable that is absent, is refused at startup. On a
+HEALPix mesh with neither a bathymetry variable nor \conf{mesh.levels} the node depths are zero, and the depth criterion would strand every particle.
+
+\section{Delayed and pulsed release}\label{sec:life-release}
+
+Release positions are read from the seed file. Two library helpers can write one: a regular grid over the
+mesh extent, shrunk inward by a margin and filtered to points inside the mesh, and points scattered uniformly
+in a circle of given radius around a centre, scaled by $\cos\latx$ so that the circle is round in metres.
+Both work in the mesh's own coordinates: on a rotated mesh the caller rotates the centre into the mesh
+frame and the kept points back to geographic before saving them as seeds.
+
+Particles need not all enter at the start of the run. A per-particle release offset (a fourth column of the
+seed file, in seconds from the start) and a pulse schedule that re-releases the whole seed set at a fixed
+interval (\conf{time.n\_pulses}, \conf{time.pulse\_interval}) are both supported, and both are implemented by
+pre-allocation and freezing rather than by growing the particle array. At setup the seed set is replicated to
+its full final size --- the number of pulses times the number of seeds, pulse by pulse --- and each copy is given
+a release step
+\begin{equation}\label{eq:life-release}
+  k_{\text{rel}}=\operatorname{round}\Bigl(\frac{t_{\text{rel}}+p\,\Delta t_{\text{pulse}}}{\dt}\Bigr)
+\end{equation}
+for pulse $p$, with a warning when the offset is not a whole number of steps. Particles whose release step
+lies in the future begin as \code{NOT\_RELEASED}. At the top of each step the engine activates those whose
+step has come, $k\ge k_{\text{rel}}$ in the global step count (so the rule holds for backward runs and across
+restarts), flipping them to \code{ALIVE} so they are advected during that same step. A frozen particle costs
+nothing in the kernel, which skips it, and the fixed array size is what allows the streaming output writer to
+use a constant trajectory dimension. Dormant rows are written as missing values with their status; a particle
+whose release step lies beyond the end of the run produces a warning and stays missing throughout. The output
+records each particle's release position and release time, the start of the step in which it is activated
+(\cref{eq:out-release}), so the rounded schedule can be read back from the file. The
+diffusive noise is keyed by the global step, so a particle released later draws a different sequence from one
+released at the start, by design. A run with a single release and no offsets reduces exactly to the
+unscheduled case.
+
+\codeanchor{The statuses and failure reasons are the enumerations \fn{ParticleStatus} and \fn{FailureReason} in
+\srcfile{core/particles.py}; lateral removal and the revert are in the integrator kernels of
+\srcfile{numerics/integrators.py}; the periodic fold and its checks are \fn{\_apply\_periodic\_wrap} and
+\fn{\_validate\_periodic\_windows}, the beaching hook is \fn{\_apply\_beaching\_hook} (\srcfile{tracking.py})
+over \fn{evaluate\_beaching} (\srcfile{numerics/beaching.py}); the release schedule is
+\fn{build\_release\_state}, \fn{activate\_released} and \fn{mask\_dormant\_for\_record}
+(\srcfile{core/release.py}).}

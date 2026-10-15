@@ -1,0 +1,214 @@
+\chapter{Solver Architecture and the Per-Step Pipeline}\label{ch:arch}
+
+This chapter provides the map to which the remainder of the manual refers. We
+describe how the continuous problem of \cref{eq:lagrangian-ode} is reduced to a
+discrete pipeline, the principal data structures that the pipeline operates on,
+the one-time assembly that precedes the time loop, and the ordered sequence of
+operations performed at each step. Later chapters expand individual stages of this
+pipeline; here we are concerned only with their arrangement.
+
+\section{From the continuous equation to a discrete pipeline}\label{sec:arch-pipeline}
+
+The engine advances \cref{eq:lagrangian-ode} by an explicit time-stepping scheme:
+time is divided into steps of length $\dt$, and at each step the velocity is
+sampled along the path and used to displace the particle. Evaluating the velocity
+at the particle position decomposes into a fixed sequence of operations that is
+the same at every step and for every scheme. The particle must first be
+\emph{located} on the unstructured mesh --- the nearest node and the containing
+element must be identified --- because the interpolation stencils are expressed
+in terms of mesh entities. The velocity is then \emph{interpolated in space}, from
+the surrounding nodes or element centres to the particle position, and
+\emph{reconstructed in time}, from the bracketing stored snapshots to the substep
+time required by the integrator. The integrator \emph{advances} the position, and
+finally the \emph{boundary conditions} are applied: a particle that has left the
+domain is flagged and its step undone, while a particle that has reached the
+surface or the sea floor is clamped. The result is recorded at a prescribed
+cadence.
+
+This decomposition --- locate, interpolate in space, reconstruct in time,
+integrate, apply boundary conditions, record --- is realized directly in the
+source and is depicted in \cref{fig:pipeline}. The chapters of
+\crefrange{ch:mesh}{ch:lifecycle} correspond one-to-one to its stages.
+
+\section{Principal data structures}\label{sec:arch-data}
+
+Three objects carry the state of a run. The \fn{Mesh} holds the static geometry:
+the node coordinates, the element connectivity, the per-node sea-floor depth, the
+vertical interfaces, the frame and radius, and the search structures and adjacency tables built once and
+cached on it. The \fn{VelocityField} holds the model fields for a single
+time level, already shaped according to where they live (at nodes, at element
+centres, or at interfaces) and tagged with their layout. The \fn{ParticleState}
+holds the evolving per-particle quantities: position, status, the cached nearest
+node, the most recently evaluated velocity, and --- when the run uses them --- the failure reason, the
+release step and the carried element. \Cref{tab:datastructures}
+summarizes their principal members; the chapters indicated develop each in detail.
+
+\begin{table}[t]
+\centering
+\caption{The three principal data structures and their principal members. Shapes
+are given for $N$ nodes, $E$ elements, $K$ vertical interfaces (hence $K-1$
+layers), and $P$ particles.}
+\label{tab:datastructures}
+\small
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+Structure & Member & Meaning \\
+\midrule
+\fn{Mesh}
+  & \code{nodes\_lon/lat} & node coordinates, degrees ($N$); see \cref{ch:mesh} \\
+  & \code{elem\_nodes}    & element connectivity $(E,3)$ or $(E,4)$, $-1$-padded \\
+  & \code{elem\_center\_lon/lat} & element centroids ($E$) \\
+  & \code{depth}          & per-node sea-floor depth, positive down ($N$) \\
+  & \code{sigma}         & vertical interfaces ($K$): depths on z-level meshes, $\sigma$ values on sigma meshes \\
+  & \code{vertical\_coord} & \code{zlevel} or \code{sigma} \\
+  & \code{node\_to\_elems} & node$\rightarrow$element adjacency; see \cref{ch:localization} \\
+  & \code{rotation\_angles} & frame of the coordinates, or \code{None}; see \cref{ch:frame} \\
+  & (cached)              & grid hash and node table, element neighbours, areas, coastal flags \\
+\midrule
+\fn{VelocityField}
+  & \code{u}, \code{v}    & horizontal velocity; node $(N)$/$(K{-}1,N)$ or element $(E)$/$(K{-}1,E)$ \\
+  & \code{w}              & vertical velocity at interfaces $(K,N)$, or \code{None} (2-D) \\
+  & \code{eta}            & sea-surface height ($N$) \\
+  & \code{uv\_layout}     & \code{"node"} or \code{"element"}; selects the stencil \\
+  & \code{scalars}        & sampled fields (e.g.\ temperature, salinity) \\
+  & \code{kh\_*}, \code{az} & horizontal and vertical diffusivities, when used \\
+\midrule
+\fn{ParticleState}
+  & \code{lon}, \code{lat}, \code{z} & position ($P$) \\
+  & \code{status}         & lifecycle state; see \cref{ch:lifecycle} \\
+  & \code{nearest\_node}  & cached localization result ($P$) \\
+  & \code{u}, \code{v}, \code{w} & last evaluated velocity ($P$) \\
+  & \code{failure\_reason}, \code{release\_step}, \code{elem} & optional: cause of death, release step, carried element \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\codeanchor{The data structures are defined in \srcfile{core/mesh.py} (\fn{Mesh}),
+\srcfile{core/io.py} (\fn{VelocityField}) and \srcfile{core/particles.py}
+(\fn{ParticleState}).}
+
+\section{Run assembly}\label{sec:arch-assembly}
+
+Before the time loop begins, a single assembly phase prepares the run, in this order. The reader
+appropriate to the mesh type is selected and the mesh is loaded (\cref{ch:mesh}); the exact-anchor guard is
+set and the grid-hash cell is chosen --- pinned, measured or the reader's (\cref{sec:loc-cell}) --- and in three
+dimensions the vertical interfaces are trimmed to \conf{max\_levels}. The forcing is opened lazily, so that
+snapshots are read from disk only as they are needed, and the release positions are read. The time axis is
+resolved: the interval between stored snapshots is detected, the step is set, and for time-averaged forcing
+each timestamp is shifted from the end of its averaging window to its midpoint (\cref{ch:input}). Only then is
+the release schedule built, since release steps are offsets divided by the step; it pre-allocates the full
+particle array and freezes not-yet-released particles (\cref{ch:lifecycle}). The seeds are rotated into the
+computational frame (\cref{ch:frame}). A set of probes then checks, before any output file exists, the
+combinations that would fail later --- the sampled fields, the velocity layout against the interpolation scheme,
+the diffusion, beaching, periodic and adaptive-scheme settings --- so that a misconfigured run fails in
+seconds; a few remain for the first step (spatially varying diffusion in three dimensions, the adaptive
+scheme on a pixel mesh with the exact guard off). For each realization the output writer is opened with its provenance attributes (\cref{ch:output}),
+the shared snapshot cache is attached when configured (\cref{sec:input-shared}), and the time loop runs.
+
+\codeanchor{The assembly order is implemented in \fn{run\_tracking}
+(\srcfile{tracking.py}); the time loop in \fn{run\_single\_realization}
+(\srcfile{tracking.py}).}
+
+\section{The per-step loop}\label{sec:arch-loop}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[node distance=3.6mm and 16mm,flowbox/.append style={text width=54mm},sidebox/.append style={text width=54mm}]
+  \node[flowbox] (act)   {Activate due releases\\[1pt]\code{activate\_released}};
+  \node[flowbox,below=of act]   (vel)   {Build velocity payload\\[1pt]\footnotesize bracket $\rightarrow$ stencil $\rightarrow$ cache $\rightarrow$ lazy view};
+  \node[flowbox,below=of vel]   (int)   {Integrate one step: \code{step\_fn}\\[1pt]\footnotesize Euler\,/\,RK2\,/\,RK4\,/\,RK45};
+  \node[flowbox,below=of int]   (fold)  {Periodic fold (if set)};
+  \node[flowbox,below=of fold]  (beach) {Beaching hook (if enabled)};
+  \node[flowbox,below=of beach] (clock) {Advance clock\\[1pt]\footnotesize interpolated mode: $t\leftarrow t+\tdir\,\dt$};
+  \node[flowbox,below=of clock] (rec)   {Record \& checkpoint\\[1pt]\footnotesize global step $g$: $(g{+}1)$ multiple of the cadence};
+
+  \draw[flowarrow] (act)--(vel);
+  \draw[flowarrow] (vel)--(int);
+  \draw[flowarrow] (int)--(fold);
+  \draw[flowarrow] (fold)--(beach);
+  \draw[flowarrow] (beach)--(clock);
+  \draw[flowarrow] (clock)--(rec);
+  \draw[looparrow] (rec.east) -- ++(0.9,0) |- node[pos=0.25,sloped,below,font=\footnotesize,text=lagblue!60!black]{next step} (act.east);
+
+  \node[sidebox,right=22mm of int] (sub) {%
+    \textbf{Inside \code{step\_fn}, per particle:}\\[2pt]
+    1.\ exact nearest node at each site\\
+    2.\ \emph{(3-D)} find vertical layer\\
+    3.\ interpolate $u,v$ (with temporal blend)\\
+    4.\ \emph{(3-D)} interpolate $\Wvel$\\
+    5.\ advance position (every stage)\\
+    6.\ re-locate; test containment\\
+    7.\ commit, or revert, flag \code{OUTSIDE}\\
+    \phantom{7.\ }and record the failure reason\\
+    8.\ \emph{(3-D)} clamp $\depx$ to surface/floor\\
+    9.\ diffusive kicks, re-checked};
+  \draw[-{Stealth[length=4pt]},gray] (sub.west) -- (int.east);
+\end{tikzpicture}
+\caption{The per-step pipeline executed by \fn{run\_single\_realization}. The main loop (left) activates any
+particles whose release time has arrived, assembles the velocity for the step, integrates, folds particles
+back into periodic windows, applies the optional beaching hook, advances the clock, and records and
+checkpoints at the configured cadence. The side panel lists the operations performed for each particle
+inside the integration step; stages marked \emph{(3-D)} are present only in three-dimensional runs.}
+\label{fig:pipeline}
+\end{figure}
+
+At each step the engine performs the sequence shown in \cref{fig:pipeline}. It first activates any particles
+whose scheduled release time has arrived, so that they are advected during the same step
+(\cref{ch:lifecycle}). It then assembles the velocity payload for the step: the stored snapshots that bracket
+the current time are identified, the reconstruction stencil is resolved (two snapshots for linear
+reconstruction, four for monotone piecewise-cubic), the snapshots are taken from the cache or read, and the
+step receives either a snapshot or a lazy view that blends a field only when it is read, together with the
+target snapshot for the Runge--Kutta stages (\cref{sec:temp-linear,sec:input-payload}). On a sigma mesh the
+surface elevation at the start and the end of the step is supplied as well (\cref{sec:vert-sigma-step}). The
+integration step is invoked once; the operations it performs for each particle are listed in the side panel
+of \cref{fig:pipeline} and are the subject of \crefrange{ch:localization}{ch:integration}. Particles that left
+a periodic window are folded back, and if beaching is enabled a post-step hook evaluates the stranding and
+resuspension criteria (\cref{ch:lifecycle}). In the interpolated mode the clock advances by $\tdir\,\dt$; in the
+discrete mode the snapshot index advances by $\tdir$, one record forward or backward. The state is recorded, and checkpointed, after every step
+whose global index $g$ satisfies that $g+1$ is a multiple of \conf{output\_freq}, respectively
+\conf{checkpoint\_freq}, so that a resumed run records the same steps as an uninterrupted one
+(\cref{ch:output}); one more checkpoint follows the last executed step. A record is labelled with the time at
+the end of its step, samples the requested scalars at that time, un-rotates positions and velocities to
+geographic coordinates, writes the rows of not-yet-released particles as missing values, and writes the
+velocity as missing wherever the particle was not alive through the whole step.
+
+The boundary conditions are applied inside the step, immediately after the position is advanced. The
+containing-element test serves as the domain check: a particle whose new position is not contained by any
+element --- whether it has crossed an open boundary or left a coastline --- has its step undone and its status
+set to \code{OUTSIDE}. Vertical limits, by contrast, are enforced by clamping rather than removal: a particle
+that would cross the surface or the local sea floor is held at that limit (\cref{ch:vertical,ch:lifecycle}).
+With the option \code{-v} the loop prints, per step, the time spent reading (\code{io=}), stepping
+(\code{step=}), beaching (\code{beach=}) and recording (\code{rec=}) (\cref{sec:perf-measure}).
+
+\codeanchor{The step sequence is the loop body of \fn{run\_single\_realization}
+(\srcfile{tracking.py}); the per-particle operations are implemented in the
+integration kernels of \srcfile{numerics/integrators.py}.}
+
+\section{Forward and backward integration}\label{sec:arch-direction}
+
+The engine integrates equally in either time direction, and it does so without a
+separate backward code path. The direction factor $\tdir\in\{+1,-1\}$ is folded
+into the interpolated velocity: every interpolation routine returns
+$\tdir\,u$, $\tdir\,v$ and $\tdir\,\Wvel$ rather than the raw model velocity, while
+the time step $\dt$ remains positive. Backward integration is therefore a sign
+reversal of the sampled velocity, and the same integrator advances the position in
+both cases. The step counter increments in both directions, and the simulation
+clock advances by $\tdir\,\dt$. With stochastic diffusion the backward run is the adjoint process: the
+advection is reversed, the diffusive drift and noise are not (\cref{sec:diff-model}). This symmetry is what the reversibility tests of
+\cref{ch:validation} exploit: integrating forward and then backward over the same
+interval, with the same scheme, returns a particle to its starting point to within
+a small tolerance.
+
+\section{Fused and unfused execution paths}\label{sec:arch-fused}
+
+The per-particle operations of \cref{fig:pipeline} are realized by two interchangeable implementations. A set
+of \emph{fused} kernels, compiled just-in-time, performs the whole step --- localization, interpolation,
+integration and the boundary check --- within a single compiled loop over the particles, for the common
+configurations to which they apply: two-dimensional least-squares runs, time-dependent two-dimensional
+barycentric runs on node velocities (RK2 and RK4, linear interpolation in time, no element tracking), three-dimensional Euler with least-squares velocities on z-level meshes (vertical combine \conf{nearest}
+or \conf{leastsq}), and
+three-dimensional RK2 with node-layout barycentric velocities when the vertical velocity is combined by
+\conf{nearest} or \conf{barycentric}. An \emph{unfused} path performs the same operations as separate parallel
+passes over all particles and covers every other configuration. Where both exist they produce bit-for-bit
+identical trajectories, statuses and failure reasons under the default exact anchor guard
+(\conf{mesh.exact\_nearest}); the details are in \cref{ch:fused}.

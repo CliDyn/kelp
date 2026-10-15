@@ -1,0 +1,133 @@
+\chapter{Coordinate Frame and Rotation}\label{ch:frame}
+
+A global ocean mesh must contend with the convergence of the meridians at the geographic poles, where
+the longitude metric $\zzero=\cos\latx\,\Mlat$ of \cref{sec:intro-conv} vanishes and longitude becomes
+ill-conditioned. FESOM2 meshes commonly avoid this by rotating the computational frame so that its
+poles lie over land --- conventionally over Greenland and Antarctica --- leaving the entire ocean far from
+the coordinate singularity. This chapter describes how the engine supports such a rotated frame: the
+rotation itself, the distinction between rotating points and rotating vectors, what is and is not
+affected, the contract that keeps the rotation invisible to the user, and the accuracy it achieves. The
+facility is available on FESOM2 and HEALPix meshes; FESOM-C meshes and NEMO-derived meshes reject a
+non-null \conf{mesh.rotation} with a configuration error.
+
+\section{The rotated frame}\label{sec:frame-rotation}
+
+The rotation is configured by the key \conf{mesh.rotation}. Its default is \conf{null}, a geographic
+frame in which no rotation is applied and the trajectories are computed directly in longitude and
+latitude; a run with this default is byte-identical to one on an engine without the facility. Setting
+\conf{mesh.rotation} to \conf{fesom2} selects FESOM2's own Euler angles $(\alpha,\beta,\gamma)=
+(50^\circ,15^\circ,-90^\circ)$, which place the computational poles in Greenland and in East Antarctica;
+an explicit triple of angles may also be given. The rotation is a rigid map of the sphere,
+\begin{equation}\label{eq:frame-map}
+  \mathbf{r}' = \mathbf{R}(\alpha,\beta,\gamma)\,\mathbf{r},\qquad
+  \mathbf{r}=(\cos\latx\cos\lonx,\ \cos\latx\sin\lonx,\ \sin\latx),
+\end{equation}
+with $\mathbf{R}$ the Euler rotation matrix and $\mathbf{R}^{\mathsf T}$ its inverse; rotated longitudes are
+wrapped to $[-180^\circ,180^\circ)$. It is applied once when the mesh and each velocity snapshot are read,
+never inside the per-particle loop. With the \conf{fesom2} angles the rotated FESOM2 mesh reproduces the
+model's own element areas to machine precision.
+
+\section{Rotating points and rotating vectors}\label{sec:frame-vectors}
+
+The rotation acts differently on positions and on velocities, and the distinction is essential to
+correctness (\cref{fig:rotation}). Node coordinates and element centres are \emph{points}: they are
+mapped by \cref{eq:frame-map}. The element centres are rotated as points and not recomputed from the
+rotated nodes, because a centroid computed on the sphere does not commute with the rotation. The
+horizontal velocity components, by contrast, are the components of a \emph{tangent vector} expressed in
+the local east--north frame, and that local frame itself turns from place to place; the velocity must
+therefore be re-expressed in the rotated frame's local east--north basis. With $c$ and $s$ the cosine
+and sine of the local angle through which the unit-east direction turns, the transformed components are
+\begin{equation}\label{eq:vec-rot}
+  u' = c\,u - s\,v, \qquad v' = s\,u + c\,v,
+\end{equation}
+a rotation that preserves the speed, $u'^2+v'^2=u^2+v^2$. The factors $(c,s)$ are the rotated-frame
+components of $\mathbf{R}\,\hat{\mathbf{e}}$, with $\hat{\mathbf{e}}=(-\sin\lonx,\cos\lonx,0)$ the geographic
+unit east vector, computed once per velocity carrier --- per node, per element centre, or both, as the
+mesh's velocity layout requires --- from the \emph{geographic} coordinates, before the points are
+rotated. At an exact pole the east direction is taken as the limit at the stored longitude.
+
+Scalar and vertical quantities have no horizontal direction and pass through unchanged: the vertical
+velocity, the sea-surface height, the diffusivity and the sampled scalars. For the diffusivity one
+qualification applies: a diffusivity whose zonal and meridional values differ acts along the rotated
+axes rather than along east and north, and the engine warns once when it meets such a pair. The
+stochastic kicks move along great circles (\cref{ch:diffusion}), so an isotropic diffusivity gives the
+same statistics in either frame.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.3]
+  \coordinate (O) at (0,0);
+  \def\th{28}
+  \draw[-{Stealth[length=5pt]},gray!70,line width=0.8pt] (O)--(2.4,0) node[right,font=\footnotesize,black]{east};
+  \draw[-{Stealth[length=5pt]},gray!70,line width=0.8pt] (O)--(0,2.4) node[above,font=\footnotesize,black]{north};
+  \draw[-{Stealth[length=5pt]},lagelem,line width=0.9pt,densely dashed] (O)--(\th:2.4) node[right,font=\footnotesize,lagelem!70!black]{east$'$};
+  \draw[-{Stealth[length=5pt]},lagelem,line width=0.9pt,densely dashed] (O)--({\th+90}:2.4) node[above,font=\footnotesize,lagelem!70!black]{north$'$};
+  \draw[->,black] (1.5,0) arc (0:\th:1.5);
+  \node[font=\footnotesize] at ({\th/2}:1.72) {$\theta$};
+  \draw[-{Stealth[length=6pt]},lagblue,line width=1.3pt] (O)--(62:2.0) node[above right,font=\footnotesize,lagblue!70!black]{$(u,v)$};
+  \node[font=\footnotesize] at (1.0,-0.5) {$u'=c\,u-s\,v,\quad v'=s\,u+c\,v\quad(c=\cos\theta,\ s=\sin\theta)$};
+\end{tikzpicture}
+\caption{Rotation of a horizontal velocity into the rotated frame. The velocity $(u,v)$ is a tangent
+vector; its components are re-expressed in the rotated local east--north basis (dashed), turned through
+the local angle $\theta$, by \cref{eq:vec-rot}. The map preserves the speed. Node coordinates and element
+centres, being points rather than vectors, are instead mapped directly by the rotation.}
+\label{fig:rotation}
+\end{figure}
+
+\section{The user-facing contract}\label{sec:frame-contract}
+
+The rotation is arranged to be invisible outside the engine. Release positions are always supplied in
+geographic coordinates and are rotated into the computational frame when the run starts. Trajectory
+output is always geographic: at every record the positions and the horizontal velocity diagnostics are
+un-rotated on a copy of the state, while the internal state stays in the rotated frame; the vertical
+velocity and the sampled scalars are written as they are. The release positions written with the
+trajectories (\cref{sec:out-schema}) are geographic too: the particle state carries them in the rotated
+frame, checkpoints store them in that frame, and they are un-rotated by the same rule when they are
+written. A restart checkpoint records the three angles
+of the frame in which it was written, and a resuming driver validates them against the mesh
+(\fn{\_validate\_restart\_frame}, \cref{ch:output}), so a run is not continued in a different frame by
+accident; the output file carries the angles as metadata whenever
+the frame is rotated. Within this contract the rotation is purely an internal device for conditioning
+the arithmetic near the poles. Periodic fold windows (\cref{ch:lifecycle}) are defined in the mesh's
+coordinates and cannot be combined with a rotation; the combination is refused.
+
+\section{Rotation on HEALPix meshes}\label{sec:frame-healpix}
+
+A FESOM2 model builds its mesh in its own rotated frame; a HEALPix product carries geographic east and
+north components on a global pixel grid. Rotation of a HEALPix mesh is therefore a pure runtime
+transform: node coordinates are rotated as points, the velocities receive tangent factors per node (per pixel centre on the pixel mesh), the
+search structures are rebuilt on the rotated coordinates, and the tracking layer handles the rest as for
+FESOM2. The rotated frame has two poles of its own, and the polar pathologies move there, so the loader
+guards against them: a wet element that straddles a rotated pole is refused with an error that names
+where the poles land, and wet nodes poleward of $88^\circ$ rotated latitude produce a warning. With the
+\conf{fesom2} angles both poles fall on land, and on the global HEALPix products tested the wet nodes stay
+below about $85^\circ$ rotated latitude. In the geographic frame, by contrast, the containment test rejects
+points poleward of the first ring of pixel centres, $\arcsin\bigl(1-1/(3\,n_{\text{side}}^2)\bigr)$ ---
+$84.15^\circ$ at $n_{\text{side}}=8$, $89.91^\circ$ at $n_{\text{side}}=512$ --- so a particle there dies
+as \code{OUTSIDE}; for global HEALPix runs the rotation is the recommended setting.
+
+\section{Accuracy and when rotation is needed}\label{sec:frame-accuracy}
+
+Rotation is a change of chart, not of physics, and away from the poles a correctly implemented run
+differs between the geographic and rotated frames only at the level of the discretization. In the
+engine's verification the two frames agree to about $10^{-6}$ degrees at mid-latitudes, and the
+difference shrinks as the step is refined: at second order in the step for element-layout velocity and
+at first order for node-layout velocity. Across a pole only the rotated frame can track: a meridional
+flow over the pole follows the analytic great circle to within \SI{7e-8}{\metre}, whereas the geographic
+frame breaks down there. A genuine framing error would produce discrepancies of tens of degrees,
+independent of the step. Over long integrations the two frames diverge like any two slightly different
+discretizations of a chaotic flow; their statistics, not their individual paths, are what agree.
+
+Rotation becomes necessary only when the mesh carries wet points close to a geographic pole. The
+FESOM2 reader warns, and suggests the \conf{fesom2} setting, when a mesh extends beyond about
+$\pm 88^{\circ}$ without a rotation, and warns about a node exactly at a pole when rotated; the FESOM-C
+reader warns without the suggestion; the HEALPix reader warns as described in \cref{sec:frame-healpix}.
+For regional domains away from the poles the geographic frame is appropriate and is the default.
+
+\codeanchor{The maps are \fn{euler\_matrix}, \fn{rotate\_lonlat}/\fn{unrotate\_lonlat} and
+\fn{rotate\_vectors}/\fn{unrotate\_vectors} in \srcfile{core/rotation.py}; the angles and vector factors
+are \fn{rotation\_angles} and \fn{\_vec\_rot\_factors} (\srcfile{core/mesh.py}); the readers apply them
+in \fn{\_apply\_mesh\_rotation} (\srcfile{readers/fesom2.py}) and \fn{\_apply\_rotation}
+(\srcfile{readers/healpix.py}); the tracking layer rotates seeds in \fn{\_maybe\_rotate\_seeds},
+un-rotates records in \fn{\_geo\_view\_for\_record} and checks restarts in
+\fn{\_validate\_restart\_frame} (\srcfile{tracking.py}).}

@@ -1,0 +1,12 @@
+{
+  "title": "KELP: Kinematic Engine for Lagrangian Particles",
+  "upload_type": "software",
+  "version": "1.0.0",
+  "description": "A Lagrangian particle tracker for unstructured ocean model meshes (FESOM2, FESOM-C) and HEALPix grids: 2-D and 3-D advection with Euler, RK2, RK4 and adaptive RK45 integrators, temporal velocity reconstruction, rotated-frame tracking, stochastic diffusion, beaching, field sampling along trajectories, and streaming NetCDF/Zarr output with restarts.",
+  "creators": [
+    {"name": "Kuznetsov, Ivan"}
+  ],
+  "license": "BSD-3-Clause",
+  "access_right": "open",
+  "keywords": ["Lagrangian particle tracking", "ocean modelling", "unstructured mesh", "FESOM", "HEALPix", "Python", "Numba"]
+}

@@ -1,0 +1,54 @@
+\chapter{Source-Code Map}\label{app:codemap}
+
+This appendix maps each subsystem of the engine to the source files that implement it and to the chapter that
+describes it, so that a reader starting from the code can find the corresponding text and vice versa. Paths are
+relative to the package source root, \code{src/kelp/}, unless they begin with the repository directory
+\code{utils/} or \code{.claude/}.
+
+\begin{longtable}{@{}>{\footnotesize}p{0.34\linewidth} >{\ttfamily\footnotesize\raggedright\arraybackslash}p{0.40\linewidth} >{\footnotesize}l@{}}
+\toprule
+\normalfont Subsystem & \normalfont Principal source & \normalfont Manual \\
+\midrule \endhead
+Run orchestration & tracking.py & \cref{ch:arch} \\
+Command line & cli/main.py & \cref{app:config} \\
+Mesh structure, contract \& derived tables & core/mesh.py & \cref{ch:mesh} \\
+FESOM2 and FESOM-C meshes & readers/fesom2.py, readers/fesomc.py & \cref{ch:mesh} \\
+HEALPix meshes and reader & readers/healpix.py & \cref{ch:mesh,ch:input} \\
+Structured grids and NEMO & readers/structured.py, readers/nemo.py & \cref{ch:mesh,ch:input} \\
+Nearest node: grid hash, cell rule, exact search & core/mesh.py, utils/check\_grid\_hash\_cell.py & \cref{ch:localization} \\
+Containment and element tracking & core/mesh.py, numerics/integrators.py & \cref{sec:loc-contain,sec:loc-walk} \\
+Horizontal velocity interpolation & numerics/interpolate.py & \cref{ch:hvel} \\
+Polygon weights (triangle / Wachspress) & core/mesh.py & \cref{sec:hvel-quad} \\
+Vertical geometry \& $\Wvel$ (z-level) & numerics/vertical.py & \cref{ch:vertical} \\
+Vertical geometry \& $\Wvel$ (sigma) & numerics/vertical\_sigma.py & \cref{ch:vertical} \\
+Vertical-velocity sign & readers/\_\_init\_\_.py & \cref{sec:vert-wsign} \\
+Offline vertical-velocity reconstruction & w\_reconstruct.py, utils/reconstruct\_w.py & \cref{sec:vert-wsign} \\
+Scalar sampling & numerics/sampling.py & \cref{ch:sampling} \\
+Coordinate frame / rotation & core/rotation.py, readers/fesom2.py, readers/healpix.py, tracking.py & \cref{ch:frame} \\
+Time integration & numerics/integrators.py & \cref{ch:integration} \\
+Fused kernels & numerics/integrators.py, numerics/interpolate.py & \cref{ch:fused} \\
+Temporal reconstruction & numerics/temporal\_reconstruct.py, core/io.py & \cref{ch:temporal} \\
+Stochastic diffusion & numerics/diffusion.py & \cref{ch:diffusion} \\
+Particle state \& lifecycle & core/particles.py, core/release.py & \cref{ch:lifecycle} \\
+Seeding helpers & core/particles\_gen.py & \cref{ch:lifecycle} \\
+Beaching & numerics/beaching.py, tracking.py & \cref{sec:life-beach} \\
+Periodic windows & tracking.py & \cref{sec:life-periodic} \\
+Forcing readers \& time axis & readers/, tracking.py & \cref{ch:input} \\
+Step payload \& snapshot cache & core/io.py, tracking.py & \cref{sec:input-payload} \\
+Node-shared snapshot cache & core/shared\_fields.py & \cref{sec:input-shared} \\
+Trajectory output \& restart & writers.py & \cref{ch:output} \\
+Sharding and merging & utils/sort\_seeds.py, utils/split\_seeds.py, utils/concat\_trajectories.py & \cref{sec:out-merge,sec:perf-shard} \\
+Plotting and statistics & visualization/ (plots, animation, presence statistics) & --- (module README) \\
+Region extraction & utils/extract\_fesom\_region.py, utils/extract\_healpix\_region.py & \cref{sec:perf-io} \\
+Configuration & core/config.py & \cref{app:config} \\
+Spherical metric / constants & core/geometry.py & \cref{sec:int-metric} \\
+Agent skills & .claude/skills/ & \cref{ch:skills} \\
+\bottomrule
+\end{longtable}
+
+\noindent The package installs with \code{pip install -e .} from the repository root and provides the
+\code{kelp} command. Every output records the engine version --- the package version and the commit ---
+in its attributes, so a result can be traced to the source that produced it. The documentation tree carries a
+machine-readable map from each subsystem to the source symbols and the revision at which its documentation was
+last verified (\code{docs/doc\_map.yaml}), and a script that reports which documents have fallen behind their
+code (\code{docs/check\_doc\_sync.py}).

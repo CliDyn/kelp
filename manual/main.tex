@@ -1,0 +1,67 @@
+% =====================================================================
+%  KELP — Numerical Methods and Implementation: A Reference Manual
+%
+%  Build:   make            (pins the TeX Live 2025 path; runs latexmk)
+%           make -C manual
+%  Single chapter while drafting: uncomment \includeonly below.
+% =====================================================================
+\documentclass[11pt,oneside]{book}
+\input{preamble}
+\input{notation}
+\makeindex
+
+% \includeonly{chapters/02-architecture}   % fast single-chapter rebuilds
+
+\begin{document}
+\frontmatter
+\input{frontmatter/titlepage}
+\input{frontmatter/abstract}
+\tableofcontents
+\listoffigures
+\input{frontmatter/howtouse}
+\input{frontmatter/notation-conventions}
+
+\mainmatter
+\part{Foundations}
+\include{chapters/01-introduction}
+\include{chapters/02-architecture}
+
+\part{Mesh and Localization}
+\include{chapters/03-mesh}
+\include{chapters/04-localization}
+
+\part{Interpolation in Space}
+\include{chapters/05-horizontal-velocity}
+\include{chapters/06-vertical}
+\include{chapters/07-scalar-sampling}
+\include{chapters/08-coordinate-frame}
+
+\part{Time Integration}
+\include{chapters/09-integration-schemes}
+\include{chapters/10-temporal-reconstruction}
+\include{chapters/11-fused-kernels}
+
+\part{Stochastic Transport and Boundaries}
+\include{chapters/12-diffusion}
+\include{chapters/13-lifecycle}
+
+\part{Data, Configuration, and Validation}
+\include{chapters/14-input-time}
+\include{chapters/15-output-restart}
+\include{chapters/16-validation}
+\include{chapters/17-performance}
+
+\part{Working with KELP}
+\include{chapters/18-agent-skills}
+
+\appendix
+\include{appendices/A-config-reference}
+\include{appendices/B-notation}
+\include{appendices/C-code-map}
+\include{appendices/D-glossary}
+
+\backmatter
+\bibliographystyle{plainnat}
+\bibliography{refs}
+\printindex
+\end{document}

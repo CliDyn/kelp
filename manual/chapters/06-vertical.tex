@@ -1,0 +1,298 @@
+\chapter{Vertical Structure and Vertical-Velocity Interpolation}\label{ch:vertical}
+
+In a three-dimensional run the particle also moves vertically, driven by the model vertical velocity
+$\Wvel$. This chapter describes the sign convention of $\Wvel$ and how each reader establishes it,
+how the depth coordinate is organized for the two vertical-coordinate families, how the layer
+containing a particle is found, how $\Wvel$ is interpolated to the particle in the vertical and then
+in the horizontal, how a step advances the depth on a terrain-following mesh, and how a particle is
+held within the water column. The two families are the fixed depth levels (z-levels) of FESOM2 and of
+the HEALPix products, and the terrain-following sigma coordinate of FESOM-C; they are implemented by
+\emph{separate} routines throughout, and we give each explicitly. Depth $\depx$ and vertical velocity
+$\Wvel$ are positive downward (\cref{sec:intro-conv}). On a z-level mesh the vertical position update
+is
+\begin{equation}\label{eq:vert-update}
+  \depx_{n+1} = \depx_n + \Wvel\,\dt ,
+\end{equation}
+which deepens a particle wherever the flow is downwelling; on a sigma mesh the step advances the
+particle's fraction of the water column instead (\cref{sec:vert-sigma-step}).
+
+\section{The sign of the vertical velocity}\label{sec:vert-wsign}
+
+Inside the engine the vertical velocity is the positive-down rate of the tracked depth. Ocean models
+write the opposite sign, and every reader converts once, when a snapshot is read
+(\cref{tab:vert-wsign}). The convention of a file is resolved in this order: the configuration key
+\conf{mode.w\_positive} when it is \conf{up} or \conf{down}; otherwise the variable's CF
+\code{positive} attribute; otherwise a CF \code{standard\_name} beginning with \code{upward} or
+\code{downward}; otherwise the default of the reader's producer. The default, \conf{auto}, therefore
+needs no setting for model output. For a FESOM2 dataset without a vertical velocity, the tool
+\code{utils/reconstruct\_w.py} reconstructs one offline from $u$, $v$ and the sea-surface height, by
+integrating the horizontal divergence down the column; it writes the result positive down, with the
+attribute that says so.
+
+\begin{table}[t]
+\centering\footnotesize\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{30mm}p{20mm}p{62mm}p{16mm}@{}}
+\toprule
+producer (reader) & variable & file convention & conversion \\
+\midrule
+FESOM2 (\code{fesom2}) & \code{w} & positive up; in the zstar coordinate the velocity \emph{through} the moving interfaces & negated \\
+HEALPix products (\code{healpix}) & \code{wo}, \code{avg\_wo} & positive up (``upward sea water velocity'') & negated \\
+FESOM-C (\code{fesomc}) & \code{w} & positive up; the flux through the sigma interfaces per unit area, zero at the surface and the bottom & negated \\
+offline reconstruction & \code{w} & positive down, attribute \code{positive = "down"} & none \\
+\bottomrule
+\end{tabular}
+\caption{Vertical-velocity conventions of the supported producers and the conversion each reader
+applies. The FESOM-C diagnostic \code{w\_cart} is refused: its flux term lacks the dia-sigma part of the
+Cartesian vertical velocity.}
+\label{tab:vert-wsign}
+\end{table}
+
+\codenote{Engine versions before September 2026 applied no conversion, so their three-dimensional
+FESOM2 and HEALPix runs moved particles vertically in the wrong direction. The sign is now tested
+against the equatorial upwelling in real model output. A vertical-velocity file written by the offline
+reconstruction before that date carries no attribute and is read with \conf{w\_positive: down}.}
+
+\paragraph{The zstar coordinate of FESOM2.} FESOM2's interfaces move with the sea surface, and its
+\code{w} is the flow through them. The engine integrates it on the fixed reference levels, where the
+horizontal velocities also live, which drops the factor $H/(H+\eta)$ of the zstar equation: a relative
+error $\eta/H$ in the vertical rate, about $10^{-4}$ in the deep ocean and \SIrange{1}{2}{\percent} on a
+shelf \SIrange{50}{100}{\metre} deep. The recorded depth is the zstar (reference) depth, which differs
+from the physical depth by $\eta\,(1-\depx/H)$, at most $|\eta|$.
+
+\codeanchor{\fn{resolve\_w\_sign} in \srcfile{readers/\_\_init\_\_.py}, applied by the FESOM2,
+HEALPix and FESOM-C readers; the key \conf{mode.w\_positive} is validated in \srcfile{core/config.py}.}
+
+\section{Vertical coordinate: z-levels and sigma}\label{sec:vert-coord}
+
+The two families are distinguished only by how an interface depth is obtained, but the difference
+propagates through every routine below. For the \emph{z-level} family the interface depths are a
+fixed array $z_0=0<z_1<\dots<z_{K-1}$, the same at every horizontal location; the per-node sea floor is
+the separate array \code{depth}. FESOM2 meshes carry the levels in the mesh file. A HEALPix product
+takes them from \conf{mesh.levels} --- the path of a level table or an inline list of depths, required to
+be strictly increasing --- or from the table a regional extract embeds; its per-node floor comes from
+a bathymetry variable when the store has one, otherwise from the deepest level with finite data. For
+the terrain-following \emph{sigma} family of FESOM-C the interface depths are reconstructed per water
+column from a fixed set of fractions $\sigma_k$ and the local column thickness $H$,
+\begin{equation}\label{eq:sigma}
+  H = \max(d+\eta,\,D_{\min}), \qquad z_k = (1-\sigma_k)\,H,
+\end{equation}
+where $d$ is the still-water depth, $\eta$ the sea-surface height, and $D_{\min}$ a configurable minimum
+thickness (default \SI{0.5}{\metre}). With this convention $\sigma=1$ maps to $z=0$ (the surface) and
+$\sigma=0$ maps to $z=H$ (the floor). The key \conf{mode.max\_levels} keeps the top
+\conf{max\_levels} interfaces of either family.
+
+\codenote{The FESOM2 NetCDF and Zarr loaders store the z-levels positive down; the
+\code{mesh.z\_levels} property takes the absolute value once more. Three-dimensional runs on the legacy
+ASCII mesh format are unsupported: its level reader takes the whole \code{aux3d.out} file, node depths
+included, as the level table. For sigma meshes the orientation $\sigma=1$ (surface) to $\sigma=0$ (floor) is
+assumed by \cref{eq:sigma} but is \emph{not} validated when the mesh is read: a file written with the
+opposite ordering would silently invert the column.}
+
+On z-level meshes $\eta$ does not enter the vertical path at all: the layer search, the
+vertical-velocity profile and the depth clamp depend only on the fixed levels and the per-node floor.
+On sigma meshes $\eta$ sets the column thickness everywhere, and the column that matters is the one
+\emph{at the particle}: every routine below uses $H_p$, the column thickness interpolated to the
+particle position by the same horizontal method as the vertical velocity (\cref{sec:vert-whoriz}).
+
+\section{Finding the layer}\label{sec:vert-layer}
+
+Given a particle depth $\depx$, the engine identifies the layer that contains it, and the two families
+do this differently. On a z-level mesh the search is over the fixed interfaces: a particle at or above
+$z_0$ is assigned to the top layer, and otherwise the layer is the index $k$ with
+$z_k\le\depx<z_{k+1}$. The search is bounded below by the local floor through a specific rule --- the
+deepest admissible layer is $\max(k^\ast-1,0)$, where $k^\ast$ is the first index whose lower interface
+$z_{k+1}$ exceeds the per-node bottom depth --- so a particle is never placed in a layer that lies below
+its local sea floor. On a sigma mesh the search is over the interfaces $z_k=(1-\sigma_k)H_p$ of the
+particle's own column; its deepest layer is simply $K-2$, bounded by the bottom interface, with no
+analogue of the z-level step-back. This asymmetry is a genuine difference in behaviour between the two
+families at the deepest layer, not merely a difference in formulae.
+
+\codeanchor{Layer location is \fn{find\_layer}/\fn{find\_layers} (\srcfile{numerics/vertical.py},
+z-level) and \fn{find\_layer\_sigma}/\fn{find\_layers\_sigma} (\srcfile{numerics/vertical\_sigma.py},
+sigma, with the particle column passed as \code{H\_particle}); the per-particle layer index is
+assembled by \fn{\_compute\_layers} (\srcfile{numerics/integrators.py}).}
+
+\section{The vertical velocity profile}\label{sec:vert-wprofile}
+
+Within the bracketing interfaces the vertical velocity is interpolated linearly in \emph{physical
+depth} (\cref{fig:vert}), for both families: on a sigma mesh the bracketing interface depths are first
+reconstructed from \cref{eq:sigma} and the interpolation fraction is then formed in metres. With
+\begin{equation}\label{eq:vert-alpha}
+  \interpfrac = \frac{\depx-z_k}{z_{k+1}-z_k}\in[0,1],
+\end{equation}
+the profile value at a single node is
+\begin{equation}\label{eq:vert-wlin}
+  \Wvel(\depx) = \tdir\bigl[(1-\interpfrac)\,\Wvel_k + \interpfrac\,\Wvel_{k+1}\bigr],
+\end{equation}
+where $\Wvel_k,\Wvel_{k+1}$ are the interface values and $\tdir$ is the integration-direction factor. A
+particle at or above the surface interface takes the surface value and a particle at or below the
+deepest interface of the column takes the deepest value; no vertical extrapolation is performed, and a
+degenerate layer (thickness below $10^{-12}$\,m) returns the upper-interface value. The local floor
+enters through the horizontal combination, which evaluates each neighbour no deeper than its own
+bottom (\cref{sec:vert-whoriz}).
+
+On z-level meshes the bracket $(k,\interpfrac)$ depends only on the depth, so the least-squares and
+inverse-distance combinations compute it once for the particle and reuse it at every neighbour deep
+enough to contain the particle's depth; only shallower neighbours are bracketed again at their own
+bottom. The result is bit-identical to bracketing each neighbour separately and makes the vertical-velocity
+interpolation 1.1 to 1.4 times faster, the more so the more levels a column has.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.15]
+  \def\xl{0}\def\xr{4.0}
+  \foreach \y in {0,-0.8,-1.6,-2.7,-3.5} \draw[interface] (\xl,\y)--(\xr,\y);
+  \node[font=\footnotesize,left] at (\xl,0)    {$z_0=0$};
+  \node[font=\footnotesize,left] at (\xl,-1.6) {$z_k$};
+  \node[font=\footnotesize,left] at (\xl,-2.7) {$z_{k+1}$};
+  \node[interfacept] at (1.3,-1.6) {}; \draw[velarrow] (1.3,-1.6)--++(0,-0.34);
+  \node[font=\footnotesize,right] at (1.42,-1.44) {$\Wvel_k$};
+  \node[interfacept] at (1.3,-2.7) {}; \draw[velarrow] (1.3,-2.7)--++(0,-0.34);
+  \node[font=\footnotesize,right] at (1.42,-2.54) {$\Wvel_{k+1}$};
+  \node[drifter] (D) at (2.55,-2.05) {};
+  \node[font=\footnotesize,kelp!70!black,below right=2pt and 0pt] at (2.55,-2.05) {drifter, depth $\depx$};
+  \draw[<->,gray!80] (4.9,-1.6)--(4.9,-2.05) node[midway,right,font=\footnotesize]{$\interpfrac\,\Delta z$};
+  \draw[<->,gray!80] (4.9,-2.05)--(4.9,-2.7) node[midway,right,font=\footnotesize]{$(1-\interpfrac)\Delta z$};
+  \draw[gray!50,densely dotted] (2.55,-2.05)--(4.9,-2.05);
+  \draw[dashed,laggreen,line width=0.9pt] (\xl,-3.15)--(\xr,-3.15);
+  \node[font=\footnotesize,laggreen,right] at (\xr,-3.18) {local floor};
+  \fill[pattern=north east lines,pattern color=gray!45] (\xl,-3.15) rectangle (\xr,-3.55);
+  \draw[-{Stealth[length=5pt]},gray] (-1.45,0.05)--(-1.45,-3.4);
+  \node[gray,rotate=90,anchor=south,font=\footnotesize] at (-1.65,-1.7){depth $\depx$ (positive down)};
+\end{tikzpicture}
+\caption{Vertical interpolation of the vertical velocity, identical in form for the z-level and sigma
+families. The interface values $\Wvel_k,\Wvel_{k+1}$ (open circles; downward arrows mark the
+positive-down sign) bracket the drifter at depth $\depx$. The fraction
+$\interpfrac=(\depx-z_k)/(z_{k+1}-z_k)$ is formed in physical depth, and the profile value is
+$(1-\interpfrac)\Wvel_k+\interpfrac\Wvel_{k+1}$. No extrapolation is performed beyond the ends of the
+column.}
+\label{fig:vert}
+\end{figure}
+
+\codeanchor{The single-node profiles are \fn{\_interp\_w\_linear\_single} (z-level; the reusable
+bracket is \fn{\_w\_bracket} with \fn{\_w\_at\_bracket}) and \fn{\_interp\_w\_sigma\_linear\_single}
+(sigma), in \srcfile{numerics/vertical.py} and \srcfile{numerics/vertical\_sigma.py}.}
+
+\section{Horizontal combination of the vertical velocity}\label{sec:vert-whoriz}
+
+The profile of \cref{eq:vert-wlin} gives the vertical velocity at a single node; to obtain it at the
+particle, the per-node profiles are combined horizontally over the one-ring of nodes surrounding the
+particle. The combination method is selected by \conf{w\_interp}: \conf{nearest} (the profile at the
+nearest node alone), \conf{leastsq} (a plane fit to the ring-node profiles, the default),
+\conf{barycentric} (the vertex blend of \cref{ch:hvel} applied to the profiles), and \conf{idw}
+(inverse-distance weighting). This least-squares stencil is over the surrounding \emph{nodes}, in
+contrast to the horizontal velocity of \cref{sec:hvel-leastsq}, whose stencil is over the surrounding
+\emph{element centres}; the two are distinct constructions that share a name. Only \conf{barycentric}
+depends on the element type: on a quadrilateral it uses the Wachspress weights of
+\cref{sec:hvel-quad}, on a triangle the triangular weights. The choice also decides whether a
+three-dimensional run can use a fused kernel (\cref{ch:fused}).
+
+\paragraph{z-level meshes.} When a profile is sampled at a neighbouring node, the evaluation depth is
+capped at that neighbour's floor, $\depx_{\text{eval}}=\min(\depx,\,d_j)$, so that a shallow neighbour
+cannot contribute a spurious below-floor velocity. The \conf{nearest} method evaluates the nearest
+node's own profile without a cap: an RK stage position below that node's floor reads the profile below
+the bottom, where the other methods' fallbacks cap the depth at the floor.
+
+\paragraph{Sigma meshes.} On a sloping bottom a fixed depth cuts across sigma surfaces, and sampling
+the neighbours at the particle's depth would mix the flow of different sigma levels. The neighbours
+are therefore evaluated \emph{along the particle's sigma surface} (\cref{fig:vert-sigma}): with the
+particle's fraction of its column
+\begin{equation}\label{eq:vert-sigma-frac}
+  \xi = \min\bigl(\max(\depx/H_p,\,0),\,1\bigr),
+\end{equation}
+neighbour $j$ is evaluated at $\depx_j=\xi\,H_j$, $H_j=\max(d_j+\eta_j,D_{\min})$. The particle column
+$H_p$ is interpolated by the same method --- a least-squares plane (floored at $D_{\min}$), the
+barycentric weights of the containing element, or inverse-distance weights --- which makes it exact for
+a linearly sloping bottom under \conf{leastsq} and \conf{barycentric}; \conf{nearest} uses the nearest
+node's column.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.25]
+  \fill[pattern=north east lines,pattern color=gray!45] (0,-2.0)--(5,-3.5)--(5,-3.8)--(0,-2.3)--cycle;
+  \draw[laggreen,line width=0.9pt] (0,-2.0)--(5,-3.5);
+  \draw[lagblue,line width=0.9pt] (0,0)--(5,0);
+  \node[font=\footnotesize,lagblue,anchor=north west] at (0,-0.02) {surface};
+  \node[font=\footnotesize,laggreen!70!black,anchor=north east] at (5,-3.55) {sloping floor};
+  \draw[gray!60] (1.5,0)--(1.5,-2.45);
+  \draw[gray!60] (4.0,0)--(4.0,-3.2);
+  \draw[kelp!70,densely dashed,line width=0.8pt] (0,-1.2)--(5,-2.1);
+  \node[font=\footnotesize,kelp!70!black,anchor=west] at (5.05,-2.1) {sigma surface $\xi=0.6$};
+  \draw[gray,densely dotted,line width=0.8pt] (1.5,-1.47)--(5,-1.47);
+  \node[font=\footnotesize,gray,anchor=west] at (5.05,-1.47) {depth $\depx$ (not used)};
+  \node[drifter] at (1.5,-1.47) {};
+  \node[meshnode] at (4.0,-1.92) {};
+  \node[meshnodeopen] at (4.0,-1.47) {};
+  \draw[<->,gray!80] (1.0,0)--(1.0,-2.3) node[pos=0.35,left,font=\footnotesize,text=black]{$H_p$};
+  \draw[<->,gray!80] (4.3,0)--(4.3,-3.29) node[pos=0.8,right,font=\footnotesize,text=black]{$H_j$};
+  \node[font=\footnotesize,anchor=north] at (4.0,-1.98) {$\xi H_j$};
+  \node[font=\footnotesize,anchor=south] at (1.5,0.3) {particle column};
+  \node[font=\footnotesize,anchor=south] at (4.0,0.3) {neighbour $j$};
+\end{tikzpicture}
+\caption{Sigma-following evaluation of the vertical velocity. The particle sits at the fraction
+$\xi=\depx/H_p$ of its column; the neighbouring column is evaluated at $\xi H_j$ on the same sigma
+surface (filled node), not at the particle's depth (open node), which on a sloping floor lies on a
+different sigma level.}
+\label{fig:vert-sigma}
+\end{figure}
+
+Every method falls back to the nearest-node profile when its stencil is unusable, so the combined
+vertical velocity is never undefined.
+
+\codeanchor{The horizontal combinations are \fn{interp\_w\_spatial} (z-level) and
+\fn{interp\_w\_sigma\_spatial} (sigma), in \srcfile{numerics/vertical.py} and
+\srcfile{numerics/vertical\_sigma.py}; the particle column is \fn{sigma\_column\_height} with the
+per-method helpers \fn{\_H\_leastsq\_single}, \fn{\_H\_bary\_single} and \fn{\_H\_idw\_single}.}
+
+\section{The step on a sigma mesh}\label{sec:vert-sigma-step}
+
+FESOM-C's vertical velocity is a flux through the sigma interfaces, not the rate of the particle's
+depth: with the surface rising and falling and the floor sloping, a particle at rest on its sigma
+surface still changes depth. The step therefore integrates the particle's fraction of the water column,
+\begin{equation}\label{eq:vert-sigma-ode}
+  \xi = \frac{\depx}{H_p}, \qquad \frac{d\xi}{dt}=\frac{\Wvel}{H_p},
+\end{equation}
+with $\Wvel$ the negated file value of \cref{tab:vert-wsign} (including the direction factor). With
+$\xi_0=\depx_n/H_p(\mathbf{x}_0,t_0)$ and $f_k=\Wvel_k/H_{p,k}$ evaluated at stage $k$,
+\begin{align}
+  \text{Euler:}\quad & \xi_{n+1}=\xi_0+\dt\,f_1, \label{eq:vert-sigma-euler}\\
+  \text{RK2:}\quad & \xi_{1/2}=\xi_0+\tfrac{\dt}{2}f_1,\qquad \xi_{n+1}=\xi_0+\dt\,f_2, \label{eq:vert-sigma-rk2}\\
+  \text{RK4:}\quad & \xi_{n+1}=\xi_0+\tfrac{\dt}{6}\,(f_1+2f_2+2f_3+f_4). \label{eq:vert-sigma-rk4}
+\end{align}
+Every stage places the particle at $\depx=\xi\,H_p(\mathbf{x}_k,t_k)$ in the column at the stage position
+and time, and the end of the step at $\depx_{n+1}=\xi_{n+1}\,H_p(\mathbf{x}_{n+1},t_{n+1})$. The surface
+elevation at the start and at the end of every step comes from one function of time --- the PCHIP
+value where a four-snapshot stencil exists and PCHIP is enabled, otherwise the linear blend, and in
+discrete mode the next record --- so the end of one step and the start of the next see the same surface
+bit for bit, $\xi$ is continuous across steps, and a resumed run reproduces the uninterrupted one. With a
+linear time interpolant, a linear bottom and a uniform dia-sigma velocity the discrete solution is
+exact; with a dia-sigma velocity linear in $\xi$ the three schemes converge at orders one, two and four.
+The layer of the horizontal velocity, the depth clamp and the diffusion kicks (\cref{ch:diffusion}) use
+the same column $H_p$. The recorded vertical velocity on a sigma mesh is $\Wvel$ itself, the dia-sigma
+flux, not the rate of the particle's depth.
+
+\codeanchor{The sigma branches of \fn{\_euler\_step\_unfused}, \fn{\_rk2\_step\_unfused} and
+\fn{\_rk4\_step\_unfused} with the helpers \fn{\_sigma\_col\_H} and \fn{\_sigma\_end\_eta}
+(\srcfile{numerics/integrators.py}); the surface at the step boundaries is \fn{\_eta\_at\_time}
+(\srcfile{tracking.py}). Sigma meshes always take the unfused path (\cref{ch:fused}).}
+
+\section{Depth clamping at the surface and the floor}\label{sec:vert-clamp}
+
+After the vertical position is advanced, the depth is clamped into the admissible range, and the
+limits differ by family. On a z-level mesh the depth is clamped into $[\,z_0,\ d_{\text{nn}}\,]$ --- the
+surface interface and the per-node sea floor of the nearest node --- and neither $\eta$ nor any
+minimum-thickness parameter enters. On a sigma mesh the depth is clamped into
+$[\,0,\ \max(H_p-z_{0b},\,0)\,]$, with $H_p$ the end-of-step column at the particle and $z_{0b}$ (default
+\SI{0.1}{\metre}) holding the particle a fixed distance above the bed. The clamp is applied at every
+step, so a particle that reaches the floor is not removed but tracks along it, in contrast to a particle
+that leaves the horizontal domain, which is flagged and removed (\cref{ch:lifecycle}).
+
+\codenote{The keys \conf{Dmin} ($D_{\min}$) and \conf{z0b\_min} ($z_{0b}$) are consumed only on sigma
+meshes; the z-level clamp uses neither (nor $\eta$). $z_{0b}$ is a geometric clamp offset, not a
+roughness length in any physics. The sigma surface clamp holds the particle at a literal $\depx=0$
+rather than at $(1-\sigma_0)H$, so it coincides with the top interface only when $\sigma_0=1$ exactly.}
+
+\codeanchor{Depth clamping is \fn{clamp\_depth} (z-level, limits $[z_0,d_{\text{nn}}]$) and
+\fn{clamp\_depth\_sigma} (sigma, limits $[0,\max(H_p-z_{0b},0)]$) in the respective vertical modules,
+invoked by \fn{\_clamp\_z} (\srcfile{numerics/integrators.py}); the defaults
+$D_{\min}=\SI{0.5}{\metre}$, $z_{0b}=\SI{0.1}{\metre}$ are set in \srcfile{core/config.py}.}

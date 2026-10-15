@@ -1,0 +1,355 @@
+\chapter{Computational Cost and Performance}\label{ch:performance}
+
+The cost of a run is governed by a small number of terms, and knowing them is what lets a study be
+sized and configured sensibly. This chapter sets out the per-step budget, the per-particle cost of
+the schemes and of the nearest-node search, how the work spreads over threads, processes and nodes,
+what bounds memory, and how the cost is measured. Unless stated, the timings were taken on compute nodes
+with two 64-core AMD EPYC 7763 processors (128 cores, \SI{256}{GB}), with the engine's own benchmark
+scripts and verbose timing, and are collected in \srcfile{docs/performance.md}; the nearest-node rows
+(the node coordinate table and \cref{tab:perf-guard}) were measured on a login node and are kept in
+\srcfile{benchmarks/nearest\_scan\_table.md}. Absolute
+values depend on the hardware and the mesh; the structure of the budget does not.
+
+\section{The per-step budget}\label{sec:perf-model}
+
+A step consists of four phases, and \code{kelp run --verbose} prints each of them for every step
+(\code{io=}, \code{step=}, \code{beach=} when beaching is enabled, \code{rec=}) together with their
+means at the end of the run:
+\begin{equation}\label{eq:perf-model}
+  t_{\text{step}} \approx t_{\text{read}} + t_{\text{blend}} + N\,c_{\text{kernel}} + t_{\text{record}},
+\end{equation}
+with $N$ the number of live particles. The \emph{read} term loads the snapshots the step needs; it
+is set by the size of the field and by how often a new snapshot is needed, and it is independent of
+the particle count and of where the particles are. The \emph{blend} term forms the velocity at the
+step's time from the bracketing snapshots (\cref{ch:temporal}); it is paid only for the fields a
+consumer actually reads, because the payload of a step blends a field on its first access and not
+before. The \emph{kernel} term is the tracking itself --- locate, interpolate, advance --- and grows
+with the number of live particles; dead and not-yet-released particles cost nothing. The
+\emph{record} term writes a trajectory record every \conf{output\_freq} steps. The phases inside the
+kernel are not separable in the fused kernels (\cref{ch:fused}); the verbose split is the finest
+the engine reports.
+
+Two consequences follow. A step that reads no snapshot and writes no record measures the kernel
+alone; the \emph{steady step} of a run is therefore defined as the median, over the steps after
+the first that read no snapshot, of the tracking phase --- and, for a run split over processes, of
+the slowest process, which sets the completion time. And because the kernel cost of a step does not
+depend on the time step, the cost of a model day grows linearly with the number of sub-steps per
+snapshot interval: halving \conf{dt} doubles the run.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  term/.style={rectangle,draw=lagblue,fill=lagblue!8,minimum height=9mm,align=center,font=\small,inner sep=2pt},
+  lever/.style={rectangle,rounded corners=2pt,draw=lagelem,fill=lagelem!8,align=center,
+                font=\footnotesize,text width=33mm,inner sep=3pt},
+  lk/.style={-{Stealth[length=4pt]},line width=0.7pt,draw=lagelem!80}]
+  \node[term,minimum width=30mm] (rd) at (0,0) {read\\[-1pt]\footnotesize field size $\times$ reads};
+  \node[term,minimum width=20mm,right=0mm of rd] (bl) {blend\\[-1pt]\footnotesize fields read};
+  \node[term,minimum width=46mm,right=0mm of bl] (kn) {kernel\\[-1pt]\footnotesize $N\,[c_{\text{anchor}} + n_{\text{eval}}\,c_{\text{stencil}}]$};
+  \node[term,minimum width=22mm,right=0mm of kn] (rc) {record\\[-1pt]\footnotesize every \conf{output\_freq}};
+  \node[lever,above=10mm of rd] (l1) {region extraction, \conf{prefetch\_size}, node-shared snapshots, \conf{velocity\_float32}};
+  \node[lever,above=10mm of kn,xshift=-12mm] (l2) {grid-hash cell rule, node coordinate table, exact anchors};
+  \node[lever,above=10mm of kn,xshift=26mm] (l3) {scheme (\conf{integrator}), fused kernels, seed sorting, processes per node};
+  \node[lever,below=9mm of bl,xshift=-6mm] (l4) {lazy per-field blends, parallel blend kernels};
+  \node[lever,below=9mm of rc,xshift=-8mm] (l5) {\conf{output\_freq}, sampled variables, writer backend};
+  \draw[lk] (l1) -- (rd); \draw[lk] (l2) -- (kn.north -| l2); \draw[lk] (l3) -- (kn.north -| l3);
+  \draw[lk] (l4) -- (bl); \draw[lk] (l5) -- (rc);
+\end{tikzpicture}
+\caption{The per-step budget of \cref{eq:perf-model} and the lever that acts on each term. The
+kernel term splits into the nearest-node anchor ($c_{\text{anchor}}$, \cref{sec:perf-anchor}) and
+the stencil work, repeated once per velocity evaluation of the scheme ($n_{\text{eval}}$).}
+\label{fig:perf-budget}
+\end{figure}
+
+\section{The per-particle kernel cost}\label{sec:perf-schemes}
+
+\paragraph{Schemes.} The kernel cost grows with the number of velocity evaluations per step. In two
+dimensions, per particle and step at sixteen threads, forward Euler costs about \SI{1.1}{\micro s},
+the midpoint method about \SI{6.6}{\micro s} and RK4 about \SI{22}{\micro s} (a June 2026
+measurement, before the exact-anchor guard and the node coordinate table of
+\cref{sec:perf-anchor}; the ladder, not the absolute values, is the point). The monotone-cubic
+temporal reconstruction is blended inside the two-dimensional least-squares kernels and adds only a small fixed
+offset, so the midpoint method with PCHIP is the cost-effective way to buy temporal accuracy
+(\cref{ch:temporal}).
+
+\paragraph{Three dimensions.} The fused three-dimensional midpoint kernel for node-layout
+barycentric velocities on z-level meshes (\cref{ch:fused}) evaluates the whole step, including the
+four-snapshot PCHIP blend, per particle; on steady steps its cost per particle does not depend on the
+mesh (\cref{sec:perf-mesh}). The unfused three-dimensional paths --- among them RK4, sigma meshes, and
+\conf{w\_interp} other than nearest or barycentric --- blend whole fields per stage. Those blends
+run in a parallel kernel over contiguous double-precision fields, and RK4 reconstructs its repeated
+midpoint stage once: a four-snapshot PCHIP blend of a global field of \num{47} layers by
+\num{244000} elements (an element velocity field of the \emph{core2} mesh) takes \SI{46}{ms} at eight threads instead of \SI{953}{ms} serially, and a full
+RK4 stage set (u, v, w, surface) about \SI{275}{ms} at eight threads and \SI{136}{ms} at 32. The
+whole-field reconstruction is therefore no longer a multi-second floor of three-dimensional PCHIP
+runs.
+
+\codeanchor{Parallel blends: \fn{\_pchip\_blend4\_flat} in
+\srcfile{numerics/temporal\_reconstruct.py} and \fn{\_blend} in \srcfile{core/io.py}; the lazy
+payload is \fn{LazyLerpField} in \srcfile{core/io.py}; the stage dedup is in
+\fn{make\_stage\_vels\_recon}.}
+
+\codenote{The parallel linear blend requires double-precision inputs: with
+\conf{velocity\_float32} the linear time interpolation falls back to a serial blend (about
+\SI{0.25}{s} instead of \SI{0.05}{s} per global-size field), and the fused three-dimensional step
+pays 15--20\,\% for the conversion on gather. The PCHIP blend converts first and keeps its parallel
+path. Single precision is a memory lever, not a speed lever.}
+
+\section{The nearest-node anchor}\label{sec:perf-anchor}
+
+Every evaluation site starts from the nearest mesh node (\cref{sec:loc-nearest}), found by scanning
+the nodes of a $3\times3$ window of grid-hash cells. The scan is linear in the number of nodes in the
+window, so its cost depends on how many nodes a cell holds, and under the exact-anchor guard
+(\conf{mesh.exact\_nearest}, the default) on how often the window must be widened before the
+nearest node is proven. Three measures keep this term small.
+
+\paragraph{The cell is chosen by measurement.} The automatic cell of the reader is
+$2\sqrt{A/N}$, with $A$ the bounding-box area of the mesh in square degrees, and at least \ang{0.05}. On a mesh whose resolution varies by orders of magnitude, a cell
+sized for the coarse part holds thousands of nodes in the refined part. Since September 2026 every
+run chooses the cell itself (\conf{mesh.grid\_hash\_cell\_rule: occupancy}): it samples up to
+\num{200000} element centres, finds each one's exact nearest node once, and, for candidate cells
+$\ell_{\text{legacy}}/\sqrt{2}^{\,k}$, evaluates a per-query cost estimate --- the nodes of the window
+plus nine cells plus one certificate for a provable hit, the nodes and cells of the widened
+rectangle and one certificate per widening otherwise. It leaves the reader's cell only when the best
+eligible candidate (at most 20\,\% widened queries, at most \SI{128}{MB} of hash offsets) promises at
+least a 2.75-fold gain. Quasi-uniform meshes keep the reader's cell (the predicted gain is about two,
+which buys nothing measurable on a step); structure-resolving meshes take a smaller one: a coastal
+FESOM-C mesh goes from \ang{0.058} to \ang{0.014} (search 1.7 times faster) and an 11.5-million-node
+global mesh from \ang{0.145} to \ang{0.051} (1.7--2.6 times). An explicit
+\conf{mesh.grid\_hash\_cell\_size} always wins; the chosen cell and the rule are written to the
+output metadata.
+
+\paragraph{The node coordinate table.} The scans read unit-sphere coordinates of the nodes from a
+table filled once when the hash is built, instead of evaluating trigonometric functions per
+candidate. The pure scan is 6.3 times faster (\SI{3.2}{\micro s} to \SI{0.5}{\micro s} per query on one
+thread), a two-dimensional midpoint step phase about twice as fast, at 24 bytes per node and process;
+the trajectories are bit-for-bit unchanged.
+
+\paragraph{The cost of exact anchors.} \Cref{tab:perf-guard} gives the cost of the guard for
+\num{400000} particles at eight threads. It is a few per cent on HEALPix meshes and on the fused
+three-dimensional kernel, about 40\,\% on a structured mid-latitude mesh even with every anchor provable,
+and grows where many windows must widen --- at high latitude, where a degree of longitude shrinks, and with
+a cell well below the node spacing. In every case the fused kernel with exact anchors stays faster
+than the unfused path.
+
+\begin{table}[t]
+\centering\small
+\caption{Cost of exact nearest-node anchors: one fused step, \num{400000} particles, eight threads,
+milliseconds, with the node coordinate table. ``Off'' is the approximate in-window anchor; ``unfused''
+is the unfused path under the guard.}
+\label{tab:perf-guard}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Configuration & off & on & unfused \\
+\midrule
+structured mid-latitude mesh, automatic cell, RK4 & 115 & 157 & 230 \\
+structured mesh at \ang{80}--\ang{88}\,N, automatic cell, RK4 & 102 & 201 & 278 \\
+same, cell three times below the node spacing & 81 & 371 & 455 \\
+HEALPix, polar band \ang{89}--\ang{89.9}\,N, RK4 barycentric & 531 & 855 & 961 \\
+HEALPix, global uniform seeds, RK4 barycentric & 554 & 541 & 1019 \\
+HEALPix at \ang{80}--\ang{88}\,N, fused 3-D midpoint barycentric & 398 & 385 & 406 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\codeanchor{Cell rule: \fn{choose\_grid\_hash\_cell}, \fn{apply\_grid\_hash\_cell\_rule} and the
+estimate \fn{\_gh\_sample\_stats}; table: \fn{\_node\_xyz\_fill}; exact search:
+\fn{\_grid\_hash\_nearest\_exact}; all in \srcfile{core/mesh.py}. Benchmarks:
+\srcfile{benchmarks/exact\_nearest\_cost.py}, \srcfile{benchmarks/nearest\_scan\_table.md},
+\srcfile{benchmarks/grid\_hash\_cell\_rule\_table.md}.}
+
+\section{Threads and processes on one node}\label{sec:perf-threads}
+
+The kernels parallelize over particles. Two-dimensional fused kernels with single-precision
+velocities scale steeply, about 38-fold for the midpoint method from one to 128 threads on a global
+mesh. The fused three-dimensional midpoint kernel is not memory-bound: it gains 6.2-fold from 16 to
+128 threads. The unfused three-dimensional paths are bound by memory bandwidth and saturate at 16 to
+32 threads. The thread count must always be set explicitly (\code{NUMBA\_NUM\_THREADS}); left
+unset, the kernel library occupies every logical core and small kernels slow down markedly.
+
+A node can also be split into several processes, each tracking a contiguous share of the
+particles and pinned to its own NUMA domain. \Cref{tab:perf-layouts} shows the effect for six million
+particles in three dimensions on a zoom-9 HEALPix mesh with node-shared snapshots: the same 128 cores
+take a 22\,\% shorter step as sixteen processes of eight threads than as one process of 128 (29\,\% more
+particle-steps per second).
+
+\begin{table}[t]
+\centering\small
+\caption{Process layouts on one node: 6.0 million particles, fused three-dimensional midpoint
+barycentric kernel, zoom-9 HEALPix mesh (2.2 million wet surface nodes), 128 threads in total,
+node-shared snapshots. Steady tracking step of the slowest process.}
+\label{tab:perf-layouts}
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+Processes $\times$ threads & $1\times128$ & $2\times64$ & $4\times32$ & $8\times16$ & $16\times8$ \\
+\midrule
+Tracking step (s) & 0.576 & 0.540 & 0.489 & 0.478 & 0.447 \\
+Throughput ($10^6$ particle-steps/s) & 10.4 & 11.1 & 12.3 & 12.6 & 13.4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Mesh size and particle count}\label{sec:perf-mesh}
+
+The kernel does not see the size of the mesh: a particle's work is a constant-size stencil around
+its position. \Cref{tab:perf-mesh} confirms this for the fused three-dimensional step over a
+3765-fold range of HEALPix meshes with the same six million particles --- the step varies by at most
+1.45 times, and not monotonically; the search window holds a median of 57--65 nodes on all seven
+meshes, so the variation is not the nearest-node search. The step grows slightly less than linearly
+with the number of particles (\cref{fig:perf-particles}): from \SI{0.144}{\micro s} per particle-step at
+three million to \SI{0.106}{\micro s} at 24 million on 128 threads, a log--log slope of 0.88.
+
+\begin{table}[t]
+\centering\small
+\caption{Mesh size: 6.0 million particles, one 128-thread process, fused three-dimensional midpoint
+barycentric kernel, HEALPix meshes of zoom 5 to 11.}
+\label{tab:perf-mesh}
+\begin{tabular}{@{}lrrrrrrr@{}}
+\toprule
+Zoom & 5 & 6 & 7 & 8 & 9 & 10 & 11 \\
+\midrule
+Wet surface nodes ($10^6$) & 0.009 & 0.036 & 0.14 & 0.57 & 2.2 & 8.9 & 35.5 \\
+Tracking step (s) & 0.742 & 0.814 & 0.628 & 0.803 & 0.638 & 0.635 & 0.908 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{loglogaxis}[width=0.62\linewidth,height=55mm,xlabel={particles},ylabel={tracking step (s)},
+  grid=major,grid style={gray!20},tick label style={font=\footnotesize},label style={font=\small}]
+\addplot[mark=*,color=lagblue,mark size=1.6pt] coordinates {
+  (0.25e6,0.042) (0.5e6,0.100) (1.0e6,0.135) (1.5e6,0.253) (2.0e6,0.329) (3.0e6,0.433)
+  (4.0e6,0.543) (6.0e6,0.794) (12e6,1.295) (24e6,2.546)};
+\addplot[dashed,color=gray,domain=0.25e6:24e6,samples=2] {0.106e-6*x*(24e6/x)^(0.12)};
+\end{loglogaxis}
+\end{tikzpicture}
+\caption{Particle count: steady tracking step against the number of particles, zoom-10 HEALPix mesh
+(8.9 million wet surface nodes), one 128-thread process, fused three-dimensional midpoint kernel.
+Dashed: the fitted power law with slope 0.88.}
+\label{fig:perf-particles}
+\end{figure}
+
+\section{Many nodes}\label{sec:perf-nodes}
+
+Particles are independent, so a release splits over nodes as contiguous shares, one or several
+processes per node, each reading its own snapshots or sharing them within the node
+(\cref{sec:perf-io}). \Cref{fig:perf-nodes} shows weak and strong scaling on the zoom-11 HEALPix mesh
+(35.5 million wet surface nodes, 69 layers), one 128-thread process per node --- a zoom-11 process
+needs about \SI{146}{GiB}, so one fits a \SI{256}{GB} node. With six million particles per node the
+step stays within 90\,\% of the one-node value up to sixteen nodes (96 million particles in
+\SI{0.85}{s}, $113\times10^{6}$ particle-steps per second). A fixed release of 24 million particles
+runs 12.6 times faster on sixteen nodes; on the zoom-9 mesh, split as eight processes per node, six
+million particles run 9.7 times faster on sixteen nodes, where each process holds only
+\num{47000} particles.
+
+Very large releases keep the same throughput. Tracked for a few steps without any output, $10^{9}$
+particles on sixteen nodes step in \SI{7.6}{s} and $10^{10}$ particles on sixteen \SI{512}{GB} nodes in
+\SI{73}{s} --- both about $1.3\times10^{8}$ particle-steps per second.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[name=weak,width=0.47\linewidth,height=52mm,xmode=log,log basis x=2,
+  xtick={1,2,4,8,16},xticklabels={1,2,4,8,16},xlabel={nodes},ylabel={tracking step (s)},
+  ymin=0,ymax=1.2,grid=major,grid style={gray!20},title={weak: 6.0\,M per node},
+  title style={font=\small},tick label style={font=\footnotesize},label style={font=\small}]
+\addplot[mark=*,color=lagblue,mark size=1.6pt] coordinates {(1,0.760) (2,0.792) (4,0.649) (8,0.829) (16,0.848)};
+\addplot[dashed,color=gray,domain=1:16,samples=2] {0.760};
+\end{axis}
+\begin{axis}[at={(weak.east)},anchor=west,xshift=14mm,width=0.47\linewidth,height=52mm,
+  xmode=log,ymode=log,log basis x=2,log basis y=2,xtick={1,2,4,8,16},xticklabels={1,2,4,8,16},
+  ytick={1,2,4,8,16},yticklabels={1,2,4,8,16},xlabel={nodes},ylabel={speed-up},
+  grid=major,grid style={gray!20},title={strong: 24.1\,M in total},title style={font=\small},
+  tick label style={font=\footnotesize},label style={font=\small}]
+\addplot[mark=*,color=lagblue,mark size=1.6pt] coordinates {(1,1.00) (2,1.99) (4,3.42) (8,9.02) (16,12.55)};
+\addplot[dashed,color=gray,domain=1:16,samples=2] {x};
+\end{axis}
+\end{tikzpicture}
+\caption{Scaling over nodes on the zoom-11 HEALPix mesh, one 128-thread process per node, fused
+three-dimensional midpoint kernel. Left: weak scaling (dashed, the one-node step). Right: strong
+scaling of 24.1 million particles (dashed, ideal). The strong curve is not smooth because the cost of
+a process depends on which particles its contiguous share holds.}
+\label{fig:perf-nodes}
+\end{figure}
+
+\section{Memory}\label{sec:perf-memory}
+
+A process holds the mesh, the node coordinate table (24 bytes per node), the hash offsets (at most
+\SI{128}{MB} under the cell rule), the snapshots of the read window, and the particle state. For
+releases large enough that the particles dominate, the peak resident memory of a
+three-dimensional midpoint process without output was measured as
+\begin{equation}\label{eq:perf-memory}
+  M_{\text{peak}} \approx \SI{61}{GiB} + \SI{181}{B} \times N_{\text{process}}
+  \qquad\text{(zoom-11 mesh, fused 3-D midpoint, no output)},
+\end{equation}
+fitted through one-node releases of $10^{9}$ (\SI{230}{GiB}) and $4\times10^{9}$ particles
+(\SI{735}{GiB}); it predicted \SI{166.7}{GiB} for 625 million particles per process where
+\SI{166.2}{GiB} was measured. Below about $4\times10^{8}$ particles per process the snapshot read,
+not the particles, sets the peak (122--146 GiB on this mesh). A small probe therefore measures the
+read, not the cost per particle; a new configuration is sized from two releases large enough for the
+particles to dominate.
+
+\section{Input and output}\label{sec:perf-io}
+
+\paragraph{The read term dominates runs that write.} For a full model year of six million
+three-dimensional particles on a zoom-9 mesh with daily snapshots and six-hour steps, one 128-thread
+process took 2 hours 12 minutes: of the mean step of \SI{5.33}{s}, reading took \SI{2.94}{s},
+tracking \SI{0.62}{s} and writing \SI{1.78}{s} (\SI{7.1}{s} per record, every fourth step). Input and
+output make up 88\,\% of the step. On the zoom-11 mesh one daily snapshot costs about \SI{146}{s} per
+process --- as much as some 190 tracking steps of six million particles.
+
+\paragraph{Levers on the read term.} Confining a study to part of the ocean does not by itself
+reduce the read on a global mesh; extracting the region into a smaller mesh and forcing once, before
+the run, reduces the input volume by about two orders of magnitude and improves the thread scaling,
+because the smaller field fits in cache. The read-ahead (\cref{sec:temp-prefetch}) amortizes the
+per-read overhead; it is forced to one snapshot when snapshots are shared between processes or when
+the forcing is cycled. Several processes on one node can share one copy of each processed snapshot
+(\conf{numerics.shared\_fields\_dir}): one process, elected by a file lock, publishes each snapshot
+with an atomic rename and the others map it read-only. Every measurement placed the cache on the
+parallel file system: shared within one node it was nearly free and removed the per-process replication
+(\SI{16}{GB} to \SI{10}{GB} per process in one layout); shared by several nodes it slowed every step,
+because remote nodes fault pages in while stepping. Node-local memory has not been measured. The outputs are bit-for-bit identical with and without the shared
+cache, and any failure of the shared layer falls back to local reads.
+
+\paragraph{Output.} The volume grows with the number of particles and records: at most about \SI{66}{B} per
+particle and record uncompressed (positions, status, velocity diagnostics and two sampled fields, the
+velocity diagnostics some 40\,\%), and about \SI{37}{B} on disk in the one measured compressed store
+(six million particles, one year); \conf{output\_freq} is the
+lever, and sampled variables add their own columns. A pulsed release stores the whole pre-allocated
+array at every record, released or not.
+
+\codeanchor{Read window and shared snapshots: \fn{\_VelCache} in \srcfile{tracking.py},
+\fn{SharedFieldCache} in \srcfile{core/shared\_fields.py}; region extraction:
+\srcfile{utils/extract\_fesom\_region.py} and \srcfile{utils/extract\_healpix\_region.py}; sharding:
+\srcfile{utils/sort\_seeds.py}, \srcfile{utils/split\_seeds.py}, \srcfile{utils/concat\_trajectories.py}.}
+
+\section{Sharding a release}\label{sec:perf-shard}
+
+A release is sharded in three steps: the seeds are sorted spatially (by HEALPix cell, then depth),
+so that consecutive particles share cached velocity data --- worth 17\,\% on the fused
+three-dimensional step at a million particles; the sorted file is split into contiguous shares, one
+per process; and the per-process outputs are merged in shard order afterwards. A deterministic run
+with a single release, sharded and merged, is data-identical to the unsharded run, stochastic features
+included: the splitting tool writes each shard's position in the full release into the shard file, and
+the engine keys every random draw by the particle's index in the full release (\cref{sec:diff-rng}).
+All shards therefore use the same seeds.
+
+\section{Measuring the cost}\label{sec:perf-measure}
+
+Three measurements cover most questions. The verbose per-step phase split of
+\cref{sec:perf-model} tells which term dominates a run; the steady step --- the median tracking
+phase over read-free steps after the first, of the slowest process --- is the number to compare
+between runs and configurations, never a mean that mixes steps that read snapshots with steps that
+do not. The portable single-node benchmark (\srcfile{benchmarks/single\_node/run\_bench.py}) builds a
+synthetic HEALPix store and reports the machine-independent \emph{thread-microseconds per
+particle}, its steady step (the mean of its last five steps) times the thread count divided by the
+particles: on the compute node
+above 15.7--19.9 thread-\si{\micro s} from 16 to 128 threads, on a laptop's five performance cores
+5.5. Comparisons are valid only between rows of the same benchmark.
+
+\codeanchor{Phase timing: the verbose branch of \fn{run\_single\_realization} in
+\srcfile{tracking.py}; benchmark: \srcfile{benchmarks/single\_node/run\_bench.py} and its
+\srcfile{README.md}; the diagnosis path for a run slower than these numbers is the
+\code{kelp-diagnose} skill (\cref{ch:skills}).}

@@ -1,0 +1,102 @@
+% =====================================================================
+%  preamble.tex — shared packages, page geometry, code listings,
+%  bibliography and cross-referencing for the KELP manual.
+%  pdfLaTeX toolchain (TeX Live 2025).
+% =====================================================================
+
+% --- fonts / encoding ---
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{textcomp}
+
+% --- page geometry ---
+\usepackage[a4paper,margin=2.6cm,headheight=14pt]{geometry}
+
+% --- mathematics ---
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{siunitx}
+\sisetup{detect-all=true}
+
+% --- tables / figures ---
+\usepackage{graphicx}
+\graphicspath{{figs/}}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage{caption}
+\captionsetup{font=small,labelfont=bf}
+
+% --- colour ---
+\usepackage{xcolor}
+\definecolor{codebg}{rgb}{0.965,0.965,0.965}
+\definecolor{codekw}{rgb}{0.13,0.29,0.53}
+\definecolor{codecomment}{rgb}{0.30,0.50,0.30}
+\definecolor{codestr}{rgb}{0.64,0.08,0.08}
+\definecolor{lagblue}{rgb}{0.10,0.30,0.55}
+\definecolor{lagnode}{rgb}{0.10,0.30,0.55}
+\definecolor{lagelem}{rgb}{0.70,0.35,0.05}
+\definecolor{kelp}{rgb}{0.78,0.10,0.10}
+\definecolor{laggreen}{rgb}{0.15,0.45,0.25}
+
+% --- diagrams ---
+\usepackage{tikz}
+\usetikzlibrary{calc,positioning,arrows.meta,decorations.pathmorphing,%
+  decorations.markings,shapes.geometric,backgrounds,fit,patterns,angles,quotes}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+\input{style/tikz-styles}
+
+% --- code listings (dependency-free: no shell-escape / Pygments) ---
+\usepackage{listings}
+\lstdefinestyle{py}{%
+  language=Python,
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecomment}\itshape,
+  stringstyle=\color{codestr},
+  numbers=left,numberstyle=\tiny\color{gray!70},
+  breaklines=true,showstringspaces=false,
+  frame=single,rulecolor=\color{gray!40},columns=fullflexible,
+  aboveskip=1.0em,belowskip=0.6em,
+}
+\lstdefinelanguage{yaml}{%
+  keywords={true,false,null},
+  keywordstyle=\color{codekw},
+  comment=[l]{\#},commentstyle=\color{codecomment}\itshape,
+  morestring=[b]",morestring=[b]',stringstyle=\color{codestr},
+  basicstyle=\ttfamily\small,showstringspaces=false,
+}
+\lstdefinestyle{cfg}{%
+  language=yaml,backgroundcolor=\color{codebg},frame=single,
+  rulecolor=\color{gray!40},basicstyle=\ttfamily\small,breaklines=true,
+  aboveskip=1.0em,belowskip=0.6em,
+}
+\lstset{style=py}
+
+% --- bibliography (author-year) ---
+\usepackage[round,authoryear]{natbib}
+
+% --- hyperlinks (load late) then cleveref ---
+\usepackage[colorlinks=true,linkcolor=lagblue,citecolor=laggreen,%
+  urlcolor=lagblue,breaklinks=true]{hyperref}
+\usepackage[capitalise,noabbrev]{cleveref}
+
+% --- index ---
+\usepackage{makeidx}
+
+% running heads
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\leftmark}
+\fancyhead[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}

@@ -1,0 +1,239 @@
+\chapter{Trajectory Output and Restart}\label{ch:output}
+
+The product of a run is a set of trajectories: the recorded position, and any sampled properties, of every
+particle through time. This chapter describes the two output backends and how to choose between them, the
+variables written and their arrangement (output format~2, the format of release 1.0), the record time, the
+provenance recorded with the trajectories, the checkpoint mechanism that allows a long run to be resumed and
+continued in a chain of jobs, and the merging of a release split across processes. The authoritative
+variable-by-variable description is \code{docs/io\_and\_time.md}, section~5.
+
+\section{Two backends}\label{sec:out-backends}
+
+The output format is chosen by the file extension of the output path. A \code{.zarr} path selects a chunked
+Zarr store; any other selects a compressed NetCDF4 file (an unlimited record dimension, compression level 4).
+The distinction is operationally significant for long runs. A NetCDF4 file is held under an exclusive write
+lock for as long as it is open, so it cannot be inspected while the run proceeds; the key
+\conf{output\_flush\_every} (command line \code{--flush-every}) mitigates this by buffering that many records
+and then opening, appending, and closing the file, so that completed records become readable between flushes
+and the file stays byte-identical. A Zarr store, by contrast, is lock-free and can be read while the run is
+still writing. It buffers records in memory and writes one chunk of records at a time, so readers see it grow
+in chunk-sized increments and a killed run loses at most one chunk of records; a checkpoint and the end of the
+run flush the buffer. For multi-hour runs that one may wish to monitor, Zarr is the more convenient choice.
+
+\paragraph{The Zarr layout.} Each variable is chunked in blocks of $n_t$ particles by $n_o$ records,
+\begin{equation}\label{eq:out-chunks}
+  n_t=\min(P,\ \num{500000}),\qquad
+  n_o=\max\Bigl(1,\ \min\bigl(256,\ \bigl\lfloor 4\cdot10^{6}/(8\,n_t)\bigr\rfloor\bigr)\Bigr),
+\end{equation}
+so a chunk holds about \SI{4}{MB}. Up to half a million particles the particle axis is one block and a chunk
+is one or more complete time columns; above that, a subset of particles reads only the blocks it touches.
+Outputs written before this layout (August 2026) keep a single particle block.
+
+\section{What is written}\label{sec:out-schema}
+
+The output follows the CF conventions (the Climate and Forecast metadata conventions) for trajectories and
+carries the global attribute \code{kelp\_output\_format} with the value~2; a file without it was written by an
+earlier engine (\cref{sec:out-format1}). It is organized as a set of two-dimensional arrays indexed by
+particle and by record, the \emph{trajectory} and \emph{time} dimensions (\cref{fig:output}), and both
+dimensions have a coordinate variable of the same name. Every run writes the position --- longitude,
+latitude and depth (positive down) --- the particle status as a coded flag (1 alive, 2 beached, 3 outside,
+4 not released), the record time, a trajectory identifier, and, once per particle, the release position and
+release time. The identifier is the particle's index in the whole release, so a shard of a sharded release
+(\cref{sec:out-merge}) numbers its particles from its first global index. Several further variables are
+written when they are present: the velocity as \code{vel\_u}, \code{vel\_v} and, in three dimensions only,
+\code{vel\_w} (described below), the failure reason (\cref{sec:life-reason}), and one array per
+sampled scalar field (\cref{ch:sampling}). Positions, release positions and horizontal velocities are always
+written in geographic coordinates, un-rotated from any computational frame (\cref{ch:frame}). Where nothing
+applies the arrays hold a fill value: a missing value (NaN) for positions, velocities, sampled fields and
+release variables, and zero (no failure) for the failure reason; the rows of particles not yet released are
+missing values. Positions carry the CF names and units (\code{longitude}, \code{latitude}, and
+\code{depth} with \code{positive = "down"}), the status, failure reason and sampled fields name the
+positions as their coordinates, and both backends write the same attributes. The one known departure from
+CF is the order of the dimensions: CF wants the unlimited record dimension to be the outer one, while here
+it is the inner one, so that the track of one particle is contiguous on disk.
+
+A record is written after every step $g$ for which $g+1$ is a multiple of \conf{output\_freq}, counting steps
+from the start of the run across any restarts. The release positions are therefore not part of the records ---
+a particle first appears at the end of a step, at least one step after its release --- and are kept in the
+separate release variables instead. The size of the output is proportional to
+the number of particles times the number of records; for a large pulsed release this product, not the number
+of live particles, sets the size, because the frozen particles occupy rows in the pre-allocated arrays. A run
+with several realizations writes one file per realization, with the suffix \code{\_r}$N$.
+
+\paragraph{The record time.} The time is stored in seconds since the first record of the forcing time axis
+as it appears in the file, and the attributes of the time variable name that record's date as the epoch and
+the forcing's calendar (for example \code{noleap} or \code{360\_day}), so that a reader such as xarray
+decodes the values to dates. The record written after global step $g$ holds
+\begin{equation}\label{eq:out-time}
+  \tau_g=\tau_{\text{run}}+(g+1)\,\dt\,\tdir,
+\end{equation}
+the time at the \emph{end} of the step, in both time modes, where $\tau_{\text{run}}$ is the time at which
+global step zero started. Let $g_{\text{s}}$ be the global index of the first step of the current call (zero for
+a run that starts afresh). In the interpolated mode $\tau_{\text{run}}=t_{\text{first}}-g_{\text{s}}\,\dt\,\tdir$, with
+$t_{\text{first}}$ the time at which the call's first step starts (the requested start date, or the time of the
+start snapshot); in the discrete mode $\tau_{\text{run}}$ is the time of the snapshot $g_{\text{s}}$ records before
+the call's start snapshot, the one the run started from. Under time-averaged forcing these
+are the shifted midpoints (\cref{sec:input-timeavg}), so the dates are window centres, while the epoch stays
+the first unshifted record. Because $\tau_g$ depends only on the global step and the start of the whole run,
+the segments of a resumed chain carry exactly the labels of an uninterrupted run. In the discrete mode the
+label advances by $\dt$ per step; the time-step check of \cref{sec:temp-modes} admits a small difference
+between $\dt$ and the record spacing, by which the label may drift from the stored stamps. When the forcing is
+cycled the time does not wrap: past the first period the dates lie beyond the end of the forcing, and an
+attribute records the period. A forcing without a calendar epoch --- a bare unit, or an index axis with a
+declared spacing --- gives plain seconds from its first record, with an attribute saying so.
+
+\paragraph{Release positions and times.} For every particle the output holds its release longitude, latitude
+and depth --- the seed position, after the fold into a periodic window when one is set --- and its release
+time,
+\begin{equation}\label{eq:out-release}
+  \tau^{\text{rel}}=\tau_{\text{run}}+\max(k_{\text{rel}},0)\,\dt\,\tdir,
+\end{equation}
+the start of the step in which the particle is activated, with $k_{\text{rel}}$ the rounded release step of
+\cref{eq:life-release} (zero without a delayed release). A particle never activated within the run still
+gets its scheduled time, which then lies after the last record. The release positions travel with the
+particle state and are stored in every checkpoint (\cref{sec:out-restart}), so each segment of a resumed chain
+writes the same values; they are missing only for a run resumed from a checkpoint of an earlier engine.
+
+\paragraph{Velocities.} The velocity of a record is the one the integrator evaluated for
+the step that ends at the record, at the step's start position and time (for RK45, at its end); it therefore
+names no coordinates. \code{vel\_w} is the rate of depth change, positive down, and on a sigma mesh the
+dia-sigma flux (\cref{ch:vertical}). All components are flow velocities, with the same sign in forward and
+backward runs (the integrators carry $\tdir$ times the velocity; the record removes the factor). A velocity is
+written only where the particle was alive through the whole step --- alive after the release activation and
+before the step, and alive after the step and the beaching hook. The record in which a particle dies or
+strands, every later record of a beached or outside particle, a particle not yet released and a particle
+resuspended during the step hold missing values. A two-dimensional run writes no \code{vel\_w}.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=0.85]
+  \draw[fill=gray!8]  (0.45,0.45) rectangle (4.45,2.85);
+  \draw[fill=gray!12] (0.25,0.25) rectangle (4.25,2.65);
+  \draw[fill=white] (0,0) rectangle (4,2.4);
+  \draw[step=0.4,gray!35,line width=0.4pt] (0,0) grid (4,2.4);
+  \draw[kelp,line width=1pt] (0,1.2) rectangle (1.6,2.4);
+  \node[font=\footnotesize,kelp!70!black,anchor=south west] at (0,2.4) {};
+  \node[font=\footnotesize] at (2,2.95) {time (records) $\longrightarrow$};
+  \node[font=\footnotesize,rotate=90] at (-0.45,1.2) {trajectory $\longrightarrow$};
+  \node[font=\footnotesize,anchor=west,align=left] at (4.9,1.5)
+    {layers (per particle, per record):\\[2pt]
+     \code{lon},\,\code{lat},\,\code{z},\,\code{status},\\
+     \code{vel\_*},\,\code{failure\_reason},\,\code{temp},\,\dots\\[2pt]
+     \textcolor{kelp!70!black}{one chunk: $n_t$ particles $\times$ $n_o$ records}};
+\end{tikzpicture}
+\caption{The output data model: two-dimensional arrays indexed by particle (trajectory) and by record (time),
+one such array per stored variable, with the time and the trajectory identifier as one-dimensional coordinate
+variables and the release position and time as one-dimensional arrays over the particles. The position and
+status are always present, and so are the velocities of a tracking run (NaN where none was evaluated);
+failure reasons and sampled scalars are added when available. In a
+Zarr store each array is split into chunks of \cref{eq:out-chunks}.}
+\label{fig:output}
+\end{figure}
+
+\paragraph{Provenance.} Every output carries global attributes that record how it was produced: the
+integrator, the step, the mesh type, the direction, the start index and step count, whether the run is
+three-dimensional and time-interpolated, the temporal reconstruction and time averaging, the engine version,
+the exact-anchor flag and the resolved grid-hash cell with the rule that chose it (\cref{sec:loc-cell}); in
+three dimensions the vertical-velocity combine and sign convention. Options that are off by default add their
+parameters only when they are on --- pulses, diffusion, beaching, the adaptive scheme's tolerance, periodic
+windows, sampling, a non-default horizontal scheme or element search, single-precision fields, read-ahead and
+the rotation angles --- so that an output written with the defaults carries none of them. A run is repeated
+from these attributes; the recorded grid-hash cell, for instance, can be pinned to reproduce the anchors of
+an earlier run.
+
+\section{Checkpoints and restart}\label{sec:out-restart}
+
+When \conf{checkpoint\_freq} is set, the engine writes a checkpoint after every step $g$ for which $g+1$ is a
+multiple of it, overwriting the previous one, and a final checkpoint at the end, stamped with the last step
+actually executed. The checkpoint lives in the output file itself as arrays named \code{restart\_*}: the
+positions, statuses and nearest nodes, the release positions, the step and forcing indices, and --- when the
+run uses them --- the failure reasons, release steps, carried elements, the counts of re-wetted steps and the
+frame angles. Positions and release positions are stored in the computational frame. The arrays are created
+by the first checkpoint, so an output written without checkpoints holds none of them. A flag,
+\code{restart\_valid}, is created before any other checkpoint array and written as zero, cleared again before
+every later checkpoint, and set only after all arrays are written; a checkpoint interrupted mid-write, the
+first one included, is therefore detected rather than trusted. Checkpoints are off by default: a run killed
+at a wall limit without them leaves nothing to resume from.
+
+Resuming is done by the calling program rather than by a configuration key. It loads the checkpoint
+(\fn{load\_restart}), checks its frame against the mesh, and continues with the next step index, the saved
+counts of re-wetted steps and the forcing position; in the interpolated mode it also supplies the simulation
+time, which the checkpoint does not store. For the record times of the continuation to equal those of the
+uninterrupted run (\cref{eq:out-time}), the program passes the same forcing times as the first call ---
+under time-averaged forcing the shifted midpoints --- and, when a cycled forcing is read in the discrete
+mode, the start index counted on without wrapping (in the discrete mode the forcing index stored in the
+checkpoint is that unwrapped index, so the index after it continues the run).
+The release positions need no step of their own: they come back with the particle state. A program that
+splits a resumed state into parts slices it with \fn{ParticleState.subset}, which slices every per-particle
+array, the release positions included. With the exact-anchor guard the nearest nodes of the resumed state
+are recomputed once.
+
+\paragraph{Resumable chains.} A run longer than one allocation of a batch system is split into a chain of
+jobs. Each job resumes from the newest standalone restart file --- written with \fn{write\_restart\_file}, which
+writes the same arrays to a separate NetCDF file under a temporary name and moves it into place only after a
+clean close, so a failed write keeps the previous restart --- writes its records into its own output segment,
+and drops a numbered restart at every checkpoint (\cref{fig:out-chain}). At the end the segments are
+concatenated along time. The concatenated chain equals one uninterrupted run bit for bit, because everything
+that depends on time --- the random draws of diffusion and beaching, the release activation, the record and
+checkpoint cadence --- is keyed to the global step index, never to the step within a job. The library supplies
+these pieces; the driver that submits the chain belongs to the experiment.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[x=1.15cm,y=1cm]
+  \draw[-{Stealth[length=5pt]},gray] (0,0)--(10.3,0) node[right,font=\footnotesize,black]{global step $g$};
+  \foreach \j/\a/\b in {1/0/3.4,2/3.4/6.8,3/6.8/10.0}{
+    \draw[flowbox,fill=lagblue!8] (\a+0.06,0.35) rectangle (\b-0.06,1.05);
+    \node[font=\footnotesize] at ({(\a+\b)/2},0.7) {job \j: segment \j};
+  }
+  \foreach \x in {0.5,1.0,...,10.0} \draw[gray!70] (\x,-0.08)--(\x,0.08);
+  \foreach \x/\lbl in {3.4/restart 1,6.8/restart 2}{
+    \draw[kelp,line width=1pt] (\x,-0.25)--(\x,1.3);
+    \node[font=\footnotesize,kelp!70!black,anchor=south] at (\x,1.3) {\lbl};
+  }
+  \node[font=\footnotesize,anchor=north,align=center] at (5,-0.3) {records at $(g+1)\bmod \text{\conf{output\_freq}}=0$ continue across the job boundaries};
+  \draw[flowarrow] (10.0,0.7)--(10.6,0.7) node[right,font=\footnotesize,align=left]{concatenate\\along time};
+\end{tikzpicture}
+\caption{A resumable chain. Each job resumes from the newest numbered restart, writes its own segment and
+drops restarts as it goes; the segments are concatenated at the end. Because every cadence and every random
+draw is keyed to the global step, the result equals one uninterrupted run.}
+\label{fig:out-chain}
+\end{figure}
+
+\section{Merging a sharded release}\label{sec:out-merge}
+
+A large release split into contiguous blocks of seeds and run as parallel processes (\cref{sec:perf-shard})
+produces one Zarr output per shard. The merge tool concatenates them along the trajectory axis in shard
+order, after checking that the shards share their time axis, their variables and every attribute that
+defines the run. A run with a single release merges into an output identical in its data to the unsharded run, stochastic
+diffusion and beaching included, because each shard keys its random draws by the particle's index in the
+full release; the merge refuses shards passed out of that order whenever the run draws random numbers (and
+warns for a deterministic run). A pulsed release is refused. Shards that are independent by design --- a
+pulsed run split through its restart, one seed per shard --- merge on an explicit option that lifts the offset
+order, the pulsed refusal and the seed equality, refuses shards that share any seed of a random feature they
+use over the same particle indices, and records each shard's particle count, offset and seeds in the merged store. Checkpoint
+arrays are not merged. The merge keeps the time attributes and the release variables, and refuses shards that
+differ in the output format, in the name of the record dimension, or in the units or calendar of the time;
+shards of the earlier format merge as before.
+
+\section{Outputs of earlier engines}\label{sec:out-format1}
+
+Outputs written before release 1.0 are in output format~1. Such a file has no
+\code{kelp\_output\_format} attribute, and its record dimension is called \code{obs}. In format~1 the record time has
+no epoch: in the discrete mode it is the index of the snapshot the step started from, one step behind the
+position it labels, and in the interpolated mode the seconds from the first record. Format~1 has no release
+variables; a two-dimensional run writes a vertical velocity of zeros; a particle's velocity is written in the
+record in which it dies or strands and is zero afterwards; the discrete mode samples scalar fields at the
+start of the step; and the checkpoint arrays exist in every file, holding fill values when no checkpoint was
+written. These files remain readable by \fn{load\_trajectories}, \fn{load\_restart}, the merge tool and the
+visualization helpers; there is no converter.
+
+% (plan Task 5 interfaces) on the final code.
+\codeanchor{The writer \fn{TrajectoryWriter} and its NetCDF and Zarr backends, the embedded checkpoint,
+\fn{write\_restart\_file}, \fn{load\_restart} and \fn{load\_trajectories} are in \srcfile{writers.py}; the record
+cadence and checkpoint scheduling are in the time loop of \srcfile{tracking.py}, the record time and the release
+variables in \fn{\_record\_clock\_origin} and \fn{\_release\_arrays} there; the epoch and calendar of the time
+come from \fn{time\_axis\_epoch} (\srcfile{readers/\_\_init\_\_.py}); the velocity mask is
+\fn{mask\_inactive\_velocity} (\srcfile{core/release.py}); the frame check on resume is
+\fn{\_validate\_restart\_frame} (\srcfile{tracking.py}); sharding and merging are
+\code{utils/sort\_seeds.py}, \code{utils/split\_seeds.py} and \code{utils/concat\_trajectories.py}.}

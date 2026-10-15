@@ -1,0 +1,10 @@
+# Core runtime dependencies — the mirror of [project] dependencies in
+# pyproject.toml.  Optional features live in extras, install them with
+#   pip install -e '.[viz,zarr,healpix]'      (or '.[all]')
+numpy
+scipy
+xarray
+netCDF4
+dask[array]
+numba
+PyYAML

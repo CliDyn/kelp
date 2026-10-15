@@ -1,0 +1,49 @@
+# ==========================================================================
+# kelp example — NEMO (structured Arakawa C-grid; v1: 2-D, E/N-aligned) — TODO 4.6
+# ==========================================================================
+# NEMO output is mapped onto an unstructured quad mesh: nodes = wet T-points,
+# elements = quads of 4 adjacent T-points; u/v are averaged from the C-grid
+# faces to the T-points (NODE layout) -> requires uv_interp: barycentric.
+#
+# File layout: point `data.ncinput` at the grid_T file; the grid_U / grid_V
+# siblings are auto-derived by swapping the `grid_T` token (grid_V can be
+# overridden with ncinput_v; ncinput_w is unused — the NEMO reader is 2-D). The mask + coordinates come from `mesh.meshpath`
+# (mesh_mask.nc / domain_cfg.nc).
+#
+# v1: 2-D, **E/N-aligned** grid only. NEMO grid_U/grid_V are along the local
+# grid axes; v1 uses them as geographic east/north, valid only when the axes
+# align with E/N (regular lat/lon or pre-rotated output). A skewed/curvilinear
+# grid (axes > 2 deg off E/N, e.g. global ORCA) is REJECTED with a clear error
+# until vector rotation lands. 3-D, em/m1 diffusion and mesh.rotation also fail
+# fast in v1 — each is a staged follow-up, not a silent wrong answer.
+
+mode:
+  Fdrift2D: true
+  time_dir: 1.0
+  # var_u: uo            # override velocity/ssh names if your XIOS field defs differ
+  # var_v: vo
+  # var_eta: ssh
+  # sample_vars: [thetao, so]   # T-point scalars along the track (temp/salt)
+
+numerics:
+  dt: 3600.0
+  integrator: rk2
+  output_freq: 1
+  uv_interp: barycentric  # REQUIRED: NEMO velocities are node-layout (T-points)
+  temporal_interp: true   # blend between snapshots (NEMO output is time-stamped)
+
+mesh:
+  type: nemo
+  meshpath: path/to/mesh_mask.nc        # set me (mesh_mask.nc or domain_cfg.nc)
+
+data:
+  ncinput: path/to/EXP_grid_T.nc        # grid_T (ssh + sampled temp/salt)
+  # ncinput_v: path/to/EXP_grid_V.nc    # override if not the *_grid_V.nc sibling
+  inicloud: particles.dat                # seeds: "lon lat [depth] [release_sec]"
+  output_path: ./.tmp/nemo_tracks.zarr
+  time_averaging: instant                # NEMO model output is usually instantaneous
+
+time:
+  start_time_idx: 0
+  n_steps: 240
+  on_exhausted: stop

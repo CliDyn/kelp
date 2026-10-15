@@ -1,0 +1,8 @@
+*.png
+*.pdf
+*.svg
+*.mp4
+*.gif
+*.nc
+*.zarr
+__pycache__/

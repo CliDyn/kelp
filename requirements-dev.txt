@@ -1,0 +1,10 @@
+-r requirements.txt
+pytest
+pytest-cov
+# Most tests of the optional features skip without their extras (the Zarr
+# input tests need zarr installed); install them all with:
+#   pip install -e '.[all]'          # plotting, Zarr, HEALPix
+# 3-D volume rendering (pyvista) and video writing (imageio) are used by
+# gallery recipes only and are not required by the test suite.
+matplotlib
+cartopy

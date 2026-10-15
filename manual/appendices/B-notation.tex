@@ -1,0 +1,33 @@
+\chapter{Notation and Symbols}\label{app:notation}
+
+This appendix collects the principal symbols used in the manual. The sign and unit
+conventions they obey are stated in the front-matter section ``Notation and conventions''.
+
+\begin{longtable}{@{}l p{0.72\linewidth}@{}}
+\toprule
+Symbol & Meaning \\
+\midrule \endhead
+$\pos=(\lonx,\latx,\depx)$ & Particle position: longitude, latitude (degrees), depth (m, positive down). \\
+$\velvec=(u,v,\Wvel)$ & Velocity: horizontal components (m\,s$^{-1}$) and vertical velocity $\Wvel$ (m\,s$^{-1}$, positive down). \\
+$t,\ \dt$ & Time and the (positive) integration step. \\
+$\tdir$ & Integration-direction factor, $+1$ forward or $-1$ backward (the key \conf{time\_dir}). \\
+$\Mlat$ & Metres per degree of latitude, $\SI{111120}{\metre\per\degree}$. \\
+$\zzero$ & Metres per degree of longitude, $\max(\cos\latx\,\Mlat,1)$. \\
+$\bwt{i}$ & Barycentric / Wachspress interpolation weight at vertex $i$. \\
+$\interpfrac$ & Interpolation fraction, in time (\cref{eq:temp-linear}) or in depth (\cref{eq:vert-alpha}). \\
+$N,\ E,\ K$ & Number of mesh nodes, elements, and vertical interfaces ($K-1$ layers). \\
+$z_k$ & Depth of the $k$-th vertical interface. \\
+$\sigma_k$ & Sigma value of the $k$-th interface (FESOM-C); $\sigma=1$ surface, $\sigma=0$ floor. \\
+$H$ & Sigma-mesh water-column thickness, $\max(d+\eta,D_{\min})$. \\
+$d,\ \eta$ & Still-water depth and sea-surface height. \\
+$D_{\min},\ z_{0b}$ & Minimum column thickness and bottom clamp offset (sigma; keys \conf{Dmin}, \conf{z0b\_min}). \\
+$K_h$ & Horizontal eddy diffusivity (m$^2$\,s$^{-1}$); $\sigma^2=2K_h t$. \\
+$R$ & Earth radius of the mesh (\conf{mesh.r\_earth}), used in the local tangent-plane projection. \\
+$R_M$ & Metric radius of the displacement, $\Mlat\cdot180/\pi$, used by the great-circle kicks (\cref{sec:diff-sphere}). \\
+$\xi,\ \xi_1,\ \xi_2$ & Standard normal variates of the stochastic kicks (\cref{ch:diffusion}). \\
+$A_z$ & Vertical eddy diffusivity (m$^2$\,s$^{-1}$), \cref{sec:diff-vertical}. \\
+$c_k$ & Fraction of the step at which Runge--Kutta stage $k$ samples the flow. \\
+$\alpha_0,\ \alpha_k$ & Bracket fraction of a lazy blend and stage fraction of a stage blend (\cref{ch:temporal}). \\
+$A_k,\ C_k$ & Doubled fan- and corner-triangle areas in the Wachspress weights (\cref{eq:wachspress}). \\
+\bottomrule
+\end{longtable}

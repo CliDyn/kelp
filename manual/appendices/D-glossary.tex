@@ -1,0 +1,59 @@
+\chapter{Glossary}\label{app:glossary}
+
+\begin{description}[style=nextline,leftmargin=0pt,font=\normalfont\bfseries]
+\item[FESOM family] The unstructured-mesh ocean models the engine principally targets:
+  FESOM2 and FESOM-C. Used here as a collective term; statements specific to one model name it.
+\item[FESOM2] A global ocean model on a purely triangular mesh with a fixed depth-level
+  (z-level) vertical coordinate. The running example uses a FESOM2 mesh.
+\item[FESOM-C] A coastal ocean model on a mixed mesh --- elements may be triangles or
+  quadrilaterals --- with a terrain-following (sigma) vertical coordinate.
+\item[Node] A vertex of the mesh. Node-layout fields (e.g.\ \code{unod}/\code{vnod},
+  scalars, sea-surface height) are defined at nodes.
+\item[Element] A mesh face: a triangle (FESOM2) or a triangle or quadrilateral (FESOM-C, HEALPix,
+  NEMO). Element-layout velocities are defined at element centroids.
+\item[Interface, layer] The vertical level boundaries (interfaces) and the volumes between
+  them (layers); $K$ interfaces bound $K-1$ layers. The vertical velocity lives at
+  interfaces, the three-dimensional horizontal velocity and scalars at mid-layers.
+\item[One-ring] The set of elements that share a given node; the stencil used by the
+  localization search and several interpolators.
+\item[Barycentric coordinates] The area-ratio weights of a point within a triangle, used to
+  blend the three vertex values; the triangular interpolation stencil.
+\item[Wachspress coordinates] The generalization of barycentric coordinates to a convex
+  polygon, used to interpolate over a quadrilateral element; computed in a division-free product form
+  that is exact on edges, which is why quadrilaterals must be convex.
+\item[z-level coordinate] A vertical coordinate with fixed interface depths, the same
+  everywhere (FESOM2).
+\item[Sigma coordinate] A terrain-following vertical coordinate whose interface depths are
+  fractions of the local column thickness $H=\max(d+\eta,D_{\min})$ (FESOM-C).
+\item[Node-layout / element-layout] Whether a velocity field is stored at nodes or at
+  element centroids; node layout admits only the barycentric scheme, element layout all three.
+\item[Fused / unfused kernel] The two interchangeable implementations of a step: a single
+  compiled loop over the particles, or separate parallel passes; they agree bit-for-bit where both exist.
+\item[PCHIP] Monotone piecewise-cubic Hermite reconstruction of the velocity in time, using
+  four snapshots; raises the realized temporal order above the linear reconstruction's cap.
+\item[Counter-based RNG] A stateless random-number generator in which each draw is a hash of
+  an integer key, giving results independent of thread count and reproducible across restarts.
+\item[Beaching] The optional stranding of particles in shallow or coastal water, with an
+  optional resuspension; the only reversible non-alive status.
+\item[\code{time\_dir}] The integration-direction factor ($+1$ forward, $-1$ backward),
+  folded into the interpolated velocity so the step size stays positive.
+\item[Drifter / particle] A passive Lagrangian tracer advected by the flow; ``drifter'' is
+  used in the schematics for the point being interpolated to.
+\item[HEALPix] A hierarchical equal-area grid of the sphere on which some ocean products are stored; the
+  engine builds a mesh from its pixel centres (dual mesh) or from its pixels (pixel mesh).
+\item[Grid hash] The uniform lattice of cells over which mesh nodes are bucketed for the nearest-node
+  search; its cell is chosen by measurement for each run.
+\item[Exact anchor] A nearest node proven to be the nearest by the cap certificate of the search, the
+  default since September 2026.
+\item[Edge walk] Tracking the containing element from step to step by crossing element edges, instead of
+  searching around the nearest node every time.
+\item[Edge least squares] The velocity interpolation that fits a plane to the containing element and its
+  edge neighbours, with mirrored ghost values at the coast.
+\item[Adjoint process] The backward-in-time counterpart of an advection--diffusion process: the advection
+  reversed, the diffusive drift and noise unchanged.
+\item[Resumable chain] A long run split into consecutive batch jobs, each resuming from the previous one's
+  restart; the concatenated result equals one uninterrupted run.
+\item[Shard] One contiguous block of a large release, run as a separate process and merged back afterwards.
+\item[Agent skill] A packaged set of instructions, reference files and check scripts that a coding agent
+  loads to carry out one kind of task on the engine (\cref{ch:skills}).
+\end{description}

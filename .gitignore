@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+.venv/
+.env
+*.zarr/
+tests/plots_3d/
+*.png
+*.nc
+!tests/fixtures/*.nc
+*.DS_Store
+tmp/
+work/
+.tmp/
+.pytest_cache/
+
+# Claude Code local state (the skills themselves ARE committed)
+.claude/settings.local.json
+
+# manual/: LaTeX reference manual — keep its bundled figures despite the global *.png ignore above
+!manual/figs/*.png

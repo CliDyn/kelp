@@ -1,0 +1,54 @@
+# =========================================================================
+# Example: global 2-D surface tracking, 10 years, continuous release.
+#
+# A real production run (the kind used for a basin-scale "where does surface
+# water go" picture): every Nth global node is re-released every 30 days as a
+# timed pulse, advected 2-D on the surface with rk2 + linear temporal
+# interpolation at dt = 1 day, streamed to Zarr (inspectable mid-run; the
+# flushed chunks survive a crash — records are written up to 256 at a time).
+#
+# Velocities are FESOM2 NODE fields (unod/vnod) -> uv_interp MUST be
+# barycentric (the leastsq default is element-centre math and fails fast on
+# node-layout u/v). Pole-safe rotated frame is on (Arctic coverage); output is
+# always geographic.
+#
+# Paths below are placeholders -- edit them for your machine.
+# Full option reference: docs/configuration.md
+# =========================================================================
+mode:
+  Fdrift2D: true
+  Fdrift3D: false
+  time_dir: 1.0               # +1.0 forward, -1.0 backward
+  var_u: unod                 # node-layout velocity (FESOM2 daily node output)
+  var_v: vnod
+  var_eta: ssh
+  sigma_layer: 0              # track the surface layer of the 3-D field
+
+numerics:
+  dt: 86400.0                 # 1 day = the daily velocity cadence
+  integrator: rk2
+  uv_interp: barycentric      # REQUIRED for node-layout unod/vnod
+  output_freq: 5              # record every 5 days
+  temporal_interp: true       # blend velocity between file snapshots
+  temporal_reconstruction: linear   # 'pchip' = smoother 4-snapshot cubic (then set prefetch_size >= 4)
+  prefetch_size: 8            # bulk-read 8 snapshots per disk read (big-mesh I/O)
+  checkpoint_freq: 365        # restart checkpoint ~yearly (overwritten in the store)
+
+mesh:
+  type: fesom2
+  meshpath: path/to/core2/fesom.mesh.diag.nc   # FESOM2 mesh diagnostic file
+  rotation: fesom2            # pole-safe rotated frame (Arctic/transpolar)
+
+data:
+  ncinput: path/to/fesom2_output       # directory of <var>.fesom.<YYYY>.nc files
+  inicloud: path/to/seeds.dat          # "lon lat [depth] [release_sec]" per line
+  output_path: tracks_global_2d_10yr.zarr   # .zarr = lock-free, readable mid-run
+  time_averaging: mean        # FESOM2 output is time-averaged (timestamps at window end)
+
+time:
+  start_time_idx: 8035        # first file time index (dataset-specific; set yours)
+  n_steps: 3650               # 10 years at dt = 1 day
+  n_pulses: 120               # re-release the seed set 120 times (every 30 days over 10 yr)
+  pulse_interval: 2592000.0   # 30 days in seconds
+  on_exhausted: stop
+  num_runs: 1

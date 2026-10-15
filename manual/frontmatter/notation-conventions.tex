@@ -1,0 +1,58 @@
+\chapter*{Notation and conventions}
+\addcontentsline{toc}{chapter}{Notation and conventions}
+
+We collect here the conventions that recur throughout the manual. The complete
+symbol list is given in \cref{app:notation}.
+
+\paragraph{Position and velocity.} A particle position is the triple
+$\pos=(\lonx,\latx,\depx)$ of longitude, latitude (both in degrees), and depth.
+The model velocity is $\velvec=(u,v,\Wvel)$, with horizontal components $u,v$ in
+metres per second and vertical component $\Wvel$ in metres per second.
+
+\paragraph{Depth and vertical velocity are positive downward.} Depth $\depx$
+increases from $0$ at the surface to the sea floor, and the vertical velocity
+$\Wvel$ is positive for downwelling. Consequently the vertical position update
+$\depx \mathrel{+}= \Wvel\,\dt$ deepens a particle in downwelling, so that sinking
+is followed with the correct sign.
+
+\paragraph{Integration direction.} The factor $\tdir\in\{+1,-1\}$ (the
+configuration key \conf{time\_dir}) selects forward ($+1$) or backward ($-1$)
+integration. The time step $\dt$ is always a positive quantity; the direction
+enters by multiplying the interpolated velocity, so that backward integration is
+a sign reversal of the sampled velocity rather than a separate code path
+(\cref{ch:arch,ch:integration}).
+
+\paragraph{The spherical metric.} Velocities in metres per second are converted to
+angular increments in degrees by the local metric. With
+$\Mlat=\SI{111120}{\metre\per\degree}$ the (constant) metres per degree of
+latitude and $\zzero=\cos(\latx)\,\Mlat$ the metres per degree of longitude,
+the horizontal update reads $\lonx \mathrel{+}= \dt\,u/\zzero$ and
+$\latx \mathrel{+}= \dt\,v/\Mlat$. The value of $\Mlat$ follows the nautical-mile
+convention ($1852\times 60$), the value used by Parcels; the original Fortran tracker used
+\SI{111300}{\metre\per\degree}, so the two differ by \num{0.16}\,\% in every displacement
+(\cref{ch:validation}). Diffusive kicks are the exception: they move along great circles
+(\cref{sec:diff-sphere}).
+
+\paragraph{The FESOM family.} \textsf{KELP} targets the unstructured-mesh ocean
+models of the FESOM family: \emph{FESOM2}, whose meshes are purely triangular and
+whose vertical coordinate is a set of fixed depth levels (z-levels), and
+\emph{FESOM-C}, whose meshes are \emph{mixed} --- each element being a triangle or a
+quadrilateral --- and whose vertical coordinate is terrain-following (sigma). The
+engine additionally reads ocean fields remapped to the HEALPix grid and structured NEMO grids, which it
+represents as meshes of quadrilaterals (with a few triangles). Accordingly, throughout this manual an \emph{element} is a
+triangle or a quadrilateral, and a ``FESOM mesh'' means a mesh of either model;
+statements that hold for only one of them name it explicitly. Sizes quoted as examples are those of the
+FESOM2 \emph{core2} (triangular, z-level) mesh.
+
+\paragraph{Where fields live.} On a FESOM mesh, scalar fields and node-layout
+velocities are defined at the element \emph{vertices} (nodes); element-layout
+velocities are defined at element \emph{centroids} (elements); and the vertical
+velocity and other interface quantities are defined at the \emph{vertical
+interfaces} that bound the depth layers. The distinction governs which
+interpolation stencil applies and is made explicit in every schematic.
+
+\paragraph{Typographic conventions.} Source files, functions, and configuration
+keys are set in a monospaced font: a configuration key such as \conf{uv\_interp},
+a function such as \fn{run\_tracking}, a file such as
+\srcfile{numerics/interpolate.py}. A \textbf{Source} callout ties a passage of
+prose to the implementation that realizes it.

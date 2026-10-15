@@ -1,0 +1,185 @@
+\chapter{Configuration Key Reference}\label{app:config}
+
+This appendix lists the configuration keys consumed by the engine, grouped by their YAML
+section. It is a reference companion to the chapters: each key is described in context in
+the relevant chapter, and here we collect them with their types and defaults. The keys and
+defaults follow the engine's configuration module.
+
+\paragraph{Load rules.} A configuration must contain all five top-level sections
+(\conf{mode}, \conf{numerics}, \conf{mesh}, \conf{data}, \conf{time}); a section that is
+present but empty must be written as \code{\{\}}. Keys that are misspelled or of the wrong
+case are silently ignored and the default is used --- there is no typographic protection ---
+so a key that appears to have no effect should be checked against this table. Relative paths of the mesh,
+data, seed and output files are resolved against the directory of the configuration file;
+\conf{numerics.shared\_fields\_dir} is taken as written. Many values are validated when the file is
+loaded --- the interpolation methods \conf{uv\_interp} and \conf{sample\_interp}, the diffusion, beaching
+(when enabled), periodic, adaptive-scheme, grid-hash, rotation and HEALPix keys, and
+\conf{w\_positive} --- and an invalid value there raises an error immediately; others, such as
+\conf{integrator}, \conf{w\_interp}, \conf{max\_levels}, \conf{time\_averaging} and the \conf{time}
+values, are checked when the run starts or when first used. Unknown keys inside the diffusion and
+beaching blocks are ignored like any other.
+
+\setlength{\tabcolsep}{4pt}
+
+\section*{\texttt{mode} --- tracking mode and variable names}
+\begin{longtable}{@{}>{\ttfamily\footnotesize}p{0.295\linewidth} >{\footnotesize}p{0.075\linewidth} >{\footnotesize}p{0.095\linewidth} >{\footnotesize}p{0.37\linewidth}@{}}
+\toprule
+\normalfont Key & Type & Default & Description \\
+\midrule \endhead
+Fdrift2D & bool & \code{true} & Kept for older configurations; not read by the engine. \\
+Fdrift3D & bool & \code{false} & Three-dimensional tracking with vertical velocity; alone decides between 2-D and 3-D. \\
+time\_dir & float & \code{1.0} & Integration direction: \code{1.0} forward, \code{-1.0} backward; any other value is refused. \\
+Vpuls & bool & \code{false} & FESOM-C 2-D only: add the pulsation velocity to the mean flow. \\
+var\_u, var\_v & str & auto & Names of the horizontal velocity variables; set to \code{unod}/\code{vnod} for node-layout FESOM2 velocities (requires \conf{uv\_interp: barycentric}). \\
+var\_w & str & auto & Name of the vertical velocity (3-D). FESOM2: if unresolved, the run proceeds in 2-D silently; FESOM-C refuses \code{w\_cart}. \\
+w\_positive & str & \code{auto} & Sign convention of the vertical velocity in the file: \code{auto}, \code{up} or \code{down} (\cref{sec:vert-wsign}). \\
+var\_eta & str & auto & Name of the sea-surface height. \\
+sigma\_layer & int & surface & 2-D layered input: which vertical layer to track. \\
+sigma\_mean & bool & \code{false} & FESOM-C 2-D: thickness-weighted vertical mean instead of one layer. \\
+max\_levels & int & all & Keep the first $N$ vertical interfaces from the surface; must be $\ge 2$ in 3-D. \\
+sample\_vars & list & \code{[]} & Node-based scalar fields to sample along trajectories (e.g.\ \code{temp}, \code{salt}). \\
+track\_failure\_reason & bool & \code{false} & Record why each particle died (\cref{sec:life-reason}). \\
+\bottomrule
+\end{longtable}
+
+\section*{\texttt{numerics} --- step, integrator, interpolation}
+\begin{longtable}{@{}>{\ttfamily\footnotesize}p{0.295\linewidth} >{\footnotesize}p{0.075\linewidth} >{\footnotesize}p{0.095\linewidth} >{\footnotesize}p{0.37\linewidth}@{}}
+\toprule
+\normalfont Key & Type & Default & Description \\
+\midrule \endhead
+dt & float (s) & auto & Integration step. Defaults to the snapshot interval. In the discrete mode it must equal the record spacing, and irregular record times (calendar months) are refused --- use \conf{temporal\_interp}, where it may be smaller. \\
+file\_dt & float (s) & auto & Time between stored snapshots; auto-detected from the time coordinate. When the axis cannot be decoded it defines $t_i=i\,\Delta t$ (\cref{sec:input-axis}). \\
+integrator & str & \code{euler} & \code{euler} / \code{rk2} / \code{rk4} / \code{rk45} (\cref{ch:integration}). \\
+rk45\_tol\_m & float (m) & \code{1.0} & Adaptive scheme: error tolerance per substep, $>0$ (\cref{sec:int-rk45}). \\
+rk45\_h\_min & float (s) & $10^{-4}\dt$ & Adaptive scheme: smallest substep, $>0$. \\
+output\_freq & int & \code{1} & Record positions every $N$ steps, counted from the start of the run. \\
+temporal\_interp & bool & \code{false} & Reconstruct velocity in time between snapshots; permits sub-stepping (\cref{ch:temporal}). \\
+temporal\_reconstruction & str & \code{linear} & \code{linear} or \code{pchip} (monotone cubic); active only with \conf{temporal\_interp}. \\
+velocity\_float32 & bool & \code{false} & Hold velocity in single precision; halves snapshot memory. \\
+prefetch\_size & int & \code{1} & Snapshots read per bulk read-ahead; forced to 1 under cyclic forcing and with the shared cache. \\
+shared\_fields\_dir & str & \code{null} & Directory of the node-shared snapshot cache (\cref{sec:input-shared}). \\
+shared\_fields\_generation & str & \code{null} & Namespace generation of the cache; else \code{KELP\_SHARED\_FIELDS\_GENERATION}, else the batch job. \\
+checkpoint\_freq & int & \code{0} & Write a restart checkpoint every $N$ steps (\code{0} = off); needs an output path. \\
+output\_flush\_every & int & \code{0} & NetCDF only: flush every $N$ records so the file is readable mid-run. \\
+uv\_interp & str & \code{leastsq} & \code{leastsq} (element centres), \code{edge\_leastsq} (containing element and edge neighbours) or \code{barycentric} (vertex blend; required for node velocities) (\cref{ch:hvel}). \\
+edge\_leastsq\_bc & str & \code{freeslip} & Wall ghost of \code{edge\_leastsq}: \code{freeslip} or \code{noslip}. \\
+elem\_search & str & \code{local} & Containing element: \code{local} (search each step) or \code{walk} (track across edges; \cref{sec:loc-walk}). \\
+w\_interp & str & \code{leastsq} & 3-D vertical-velocity horizontal combine: \code{nearest}/\code{leastsq}/\code{barycentric}/\code{idw}. \\
+sample\_interp & str & \code{leastsq} & Horizontal method for sampled scalars (same options). \\
+Dmin & float (m) & \code{0.5} & Minimum water-column thickness (sigma meshes only; \cref{sec:vert-clamp}). \\
+z0b\_min & float (m) & \code{0.1} & Bottom clamp offset (sigma meshes only). \\
+Dch & float & \code{1.0} & Reserved; currently unused. \\
+periodic\_lon, periodic\_lat & [lo, hi] & \code{null} & Periodic windows for channel domains (\cref{sec:life-periodic}). \\
+diffusion & map & off & Stochastic-diffusion sub-configuration (below). \\
+beaching & map & off & Beaching sub-configuration (below). \\
+\bottomrule
+\end{longtable}
+
+\section*{\texttt{numerics.diffusion}}
+\begin{longtable}{@{}>{\ttfamily\footnotesize}p{0.295\linewidth} >{\footnotesize}p{0.075\linewidth} >{\footnotesize}p{0.095\linewidth} >{\footnotesize}p{0.37\linewidth}@{}}
+\toprule
+\normalfont Key & Type & Default & Description \\
+\midrule \endhead
+enabled & bool & \code{false} & Master switch; when off, byte-identical to no diffusion. \\
+scheme & str & \code{uniform} & \code{uniform} / \code{em} (Euler--Maruyama) / \code{m1} (Milstein). Only \code{uniform} for the horizontal kick in 3-D. \\
+kh\_zonal, kh\_meridional & float & \code{0.0} & Constant diffusivities (\code{uniform} only), m$^2$/s. \\
+var\_kh\_zonal, var\_kh\_meridional & str & auto & Dataset diffusivity variable names (\code{em}/\code{m1}). \\
+dres\_m & float (m) & auto & Central-difference offset for the diffusivity gradient. \\
+seed & int & \code{0} & Counter-based RNG seed (\cref{sec:diff-rng}); restart-safe. \\
+composition & str & \code{split} & How the kick composes with the step: \code{split}/\code{combined}/\code{split\_rk}. \\
+kh\_eval\_position & str & \code{end} & \code{split\_rk} only: sample diffusivity at \code{start} or \code{end} of step. \\
+az\_enabled & bool & \code{false} & Vertical random walk (\cref{sec:diff-vertical}); needs \conf{enabled} and the \code{uniform} scheme. \\
+az\_const & float & \code{0.0} & Constant vertical diffusivity, m$^2$/s, $\ge 0$. \\
+var\_az & str & \code{null} & Vertical diffusivity variable on the interfaces (FESOM2 z-level). \\
+\bottomrule
+\end{longtable}
+
+\section*{\texttt{numerics.beaching}}
+\begin{longtable}{@{}>{\ttfamily\footnotesize}p{0.295\linewidth} >{\footnotesize}p{0.075\linewidth} >{\footnotesize}p{0.095\linewidth} >{\footnotesize}p{0.37\linewidth}@{}}
+\toprule
+\normalfont Key & Type & Default & Description \\
+\midrule \endhead
+enabled & bool & \code{false} & Master switch (\cref{sec:life-beach}). \\
+criteria & list & \code{[depth]} & Any of \code{depth}, \code{coastal\_element}, \code{on\_failure}, \code{stochastic}; combined inclusively. \\
+depth\_min & float (m) & \code{0.3} & Strand when the column height falls below this. \\
+use\_eta & bool & \code{false} & Include sea level in the column height (needs an ssh field). \\
+dry\_mask\_var & str & none & Node variable marking dry cells ($>0.5$); strands (with the \code{depth} criterion) and blocks resuspension. \\
+zone\_depth & float (m) & auto & Near-shore zone for stochastic stranding; defaults to twice \conf{depth\_min}. \\
+t\_beach & float (s) & \code{86400} & Stochastic stranding timescale: $P=1-\exp(-|\dt|/t_{\text{beach}})$ per step. \\
+resuspension & str & \code{never} & One of \code{never}, \code{auto}, \code{stochastic}, or \code{auto\_or\_stochastic}. \\
+rewet\_hysteresis & float (m) & \code{0.1} & Margin above \conf{depth\_min} to count as re-wetted. \\
+min\_wet\_steps & int & \code{1} & Consecutive wet steps before automatic release. \\
+t\_resuspend & float (s) & none & Stochastic-release timescale (required for stochastic resuspension). \\
+seed & int & none & Beaching RNG seed; defaults to the diffusion seed. \\
+\bottomrule
+\end{longtable}
+
+\section*{\texttt{mesh} --- mesh source}
+\begin{longtable}{@{}>{\ttfamily\footnotesize}p{0.295\linewidth} >{\footnotesize}p{0.075\linewidth} >{\footnotesize}p{0.095\linewidth} >{\footnotesize}p{0.37\linewidth}@{}}
+\toprule
+\normalfont Key & Type & Default & Description \\
+\midrule \endhead
+type & str & \code{fesomc} & \code{fesom2} / \code{fesomc} / \code{nemo} / \code{healpix}; selects the reader, conventions, and vertical coordinate. \\
+meshpath & str & required & Path to the mesh file or directory (\cref{ch:mesh}). \\
+r\_earth & float (m) & family & Earth radius for mesh-derived areas; defaults per model. \\
+rotation & varies & \code{null} & FESOM2 + HEALPix: \code{null} (geographic), \code{fesom2}, or an explicit list of Euler angles (\cref{ch:frame}). \\
+exact\_nearest & bool & \code{true} & Prove every nearest-node anchor (\cref{sec:loc-exact}). \\
+grid\_hash\_cell\_rule & str & \code{occu-} \code{pancy} & Choose the hash cell by measurement (\code{occupancy}), or keep the reader's (\code{legacy}) (\cref{sec:loc-cell}). \\
+grid\_hash\_cell\_size & float (deg) & \code{null} & Explicit hash cell; overrides the rule. \\
+healpix\_zoom & int & \code{null} & HEALPix: zoom level when the store carries no grid attributes. \\
+healpix\_geometry & str & \code{dual} & HEALPix: \code{dual} (nodes at pixel centres) or \code{pixel} (elements are pixels; 2-D). \\
+crop\_bbox & [W, E, S, N] & \code{null} & HEALPix: crop to a box; $W>E$ crosses the dateline. \\
+levels & path or list & \code{null} & HEALPix: interface depths, a level-table path or an inline list; needed in 3-D, and in 2-D it sets the node depths when the store has no bathymetry variable. \\
+\bottomrule
+\end{longtable}
+
+\section*{\texttt{data} --- input and output}
+\begin{longtable}{@{}>{\ttfamily\footnotesize}p{0.295\linewidth} >{\footnotesize}p{0.075\linewidth} >{\footnotesize}p{0.095\linewidth} >{\footnotesize}p{0.37\linewidth}@{}}
+\toprule
+\normalfont Key & Type & Default & Description \\
+\midrule \endhead
+ncinput & str & required & Velocity input: a file, a Zarr store, or (FESOM2) a directory of per-variable files. \\
+ncinput\_v & str & \code{""} & Separate $v$-velocity file, if not in \conf{ncinput} (NEMO: overrides grid-V; HEALPix: refused). \\
+ncinput\_w & str & \code{""} & Separate vertical-velocity file (3-D), if applicable (HEALPix: refused). \\
+ncinput\_eta & str & \code{""} & HEALPix: separate sea-surface-height store. \\
+inicloud & str & required & Release positions: rows of \code{lon lat [depth] [release\_sec]}, geographic (\cref{sec:life-release}). \\
+particle\_offset & int & \code{null} & Global index of the file's first particle in a sharded release (\cref{sec:perf-shard}); \code{null} = the file's \code{\# kelp particle\_offset N} header, else 0. Keys every random draw. \\
+output\_path & str & memory & Output; \code{.zarr} selects Zarr, otherwise NetCDF4 (\cref{ch:output}). \\
+time\_averaging & str & guess & \code{mean} (shift timestamps to window midpoints) or \code{instant}; set explicitly (guess: \code{mean} for FESOM2 and HEALPix). \\
+\bottomrule
+\end{longtable}
+
+\section*{\texttt{time} --- window and realizations}
+\begin{longtable}{@{}>{\ttfamily\footnotesize}p{0.295\linewidth} >{\footnotesize}p{0.075\linewidth} >{\footnotesize}p{0.095\linewidth} >{\footnotesize}p{0.37\linewidth}@{}}
+\toprule
+\normalfont Key & Type & Default & Description \\
+\midrule \endhead
+start\_time\_idx & int & \code{0} & First snapshot index to read. \\
+n\_steps & int & --- & Number of integration steps (preferred way to set the length). \\
+end\_time\_idx & int & --- & Legacy alternative to \conf{n\_steps}. \\
+start\_date & str & --- & Start as an ISO date in the axis calendar; between snapshots only with \conf{temporal\_interp} (\cref{sec:input-window}). \\
+duration\_days & float & --- & With \conf{start\_date}: run length in days, $\lfloor\text{days}\cdot86400/\dt\rfloor$ steps. \\
+on\_exhausted & str & \code{stop} & At the end of the forcing: \code{stop} or \code{cycle} (wrap). \\
+num\_runs & int & \code{1} & Independent realizations (ensemble; \cref{ch:diffusion}). \\
+run\_interval & int & \code{0} & Snapshot-index offset between successive realizations. \\
+n\_pulses & int & \code{1} & Re-release the seed set this many times (\cref{sec:life-release}). \\
+pulse\_interval & float (s) & \code{0.0} & Interval between pulses (required when \conf{n\_pulses} $>1$). \\
+\bottomrule
+\end{longtable}
+
+\section*{Command line}
+The command \code{kelp run config.yaml} runs a configuration, \code{kelp info config.yaml} prints the mesh and
+the time range without tracking, and \code{kelp --version} prints the engine version. The options of \code{kelp run} override the corresponding keys:
+
+\begin{longtable}{@{}>{\ttfamily\footnotesize}p{0.295\linewidth} >{\footnotesize}p{0.58\linewidth}@{}}
+\toprule
+\normalfont Option & Effect \\
+\midrule \endhead
+-o, --output & Output path; overrides \conf{data.output\_path}. \\
+--checkpoint-freq N & Overrides \conf{numerics.checkpoint\_freq}. \\
+--temporal-interp & Switches the interpolated mode on; without the option the configuration decides. \\
+--seed N & Overrides \conf{numerics.diffusion.seed}. \\
+--flush-every N & Overrides \conf{numerics.output\_flush\_every}. \\
+-v, --verbose & Per-step timing with the phase split of \cref{sec:perf-measure}. \\
+\bottomrule
+\end{longtable}

@@ -1,0 +1,62 @@
+# =========================================================================
+# Example: 2-D surface tracking on a HEALPix product (nextGEMS ng5, zoom 7).
+#
+# HEALPix stores (nextGEMS / EERIE / DestinE) publish one data location --
+# pixel centres -- which kelp maps onto a dual mesh: centres = nodes,
+# corner cells = elements.  Velocities are NODE-layout, so the run REQUIRES
+# uv_interp: barycentric (leastsq fails fast at startup).
+#
+# The ng5-production ocean recipe needs TWO stores: the 2-D store has no
+# ocean u/v, so u/v come from the 3-D store (surface level) and ssh
+# (avg_zos) from the 2-D store.  Point ncinput at the 3-D store; the 2-D
+# sibling is auto-derived from the file name (or set data.ncinput_eta).
+# These stores are kerchunk parquet references whose chunks are GRIB
+# messages: the environment needs healpy + gribscan (+ dask); kelp
+# registers the GRIB codec and the fsspec null-reference guard itself.
+#
+# Zoom ladder (same directory): healpix128 = zoom 7 (~51 km, bring-up),
+# healpix512 = zoom 9 (~13 km, production runs).
+#
+# Paths are placeholders -- edit for your machine.
+# Full option reference: docs/configuration.md
+# =========================================================================
+mode:
+  Fdrift2D: true
+  Fdrift3D: false             # 3-D on HEALPix: see config_healpix_3d.yaml
+  time_dir: 1.0
+  var_u: avg_uoe              # ng5 names; other products: uo/vo/zos aliases
+  var_v: avg_von
+  var_eta: avg_zos
+
+numerics:
+  dt: 86400.0                 # daily means
+  integrator: rk2
+  uv_interp: barycentric      # REQUIRED for node-layout HEALPix velocities
+  elem_search: local          # node-layout barycentric + temporal interp runs the fused kernel; walk would switch it off
+  temporal_interp: true
+  output_freq: 1
+
+mesh:
+  type: healpix
+  # mesh is derived FROM the data store (wet mask = finite surface u & v):
+  meshpath: path/to/ng5/3D_daily_healpix128_ocean.parq
+  # optional regional crop at mesh build ([W, E, S, N]; W > E = across the
+  # dateline) -- the memory lever for zoom >= 10:
+  # crop_bbox: [-70.0, 20.0, -75.0, -50.0]
+  # vertical interface depths (GRIB level axes carry only indices); also
+  # gives per-cell bathymetry via the deepest finite level.  A FESOM
+  # aux3d.out path or an inline list of metres:
+  levels: path/to/NG5/aux3d.out   # the mesh's aux3d.out (from the model's mesh directory)
+
+data:
+  ncinput: path/to/ng5/3D_daily_healpix128_ocean.parq
+  # ssh store (auto-derived 3D->2D sibling when omitted):
+  # ncinput_eta: path/to/ng5/2D_daily_healpix128_ocean.parq
+  inicloud: seeds.dat         # "lon lat" per line
+  output_path: tracks_healpix_2d.zarr
+  time_averaging: mean        # daily means, stamped at the END of the window
+
+time:
+  start_time_idx: 0
+  n_steps: 300                # data window: 2020-01-02 .. 2021-03-01 (425 d)
+  on_exhausted: stop

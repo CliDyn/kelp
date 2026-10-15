@@ -1,0 +1,52 @@
+# =========================================================================
+# Example: 3-D tracking with the model's true vertical velocity (FESOM2).
+#
+# Track Antarctic Bottom Water: release a 3-D tracer net on the Weddell
+# shelf/slope and follow its sinking and northward spread, sampling
+# temperature and salinity along every trajectory.
+#
+# Uses the DAILY NODE trio unod/vnod/w (+ daily temp/salt/ssh). Do NOT mix in
+# the MONTHLY element u/v from the same dataset -- one run needs a single
+# consistent cadence (mixing raises at read time). Node-layout velocities
+# REQUIRE uv_interp: barycentric.
+#
+# Paths below are placeholders -- edit them for your machine.
+# Full option reference: docs/configuration.md (3-D: see Sections 2 and 3)
+# =========================================================================
+mode:
+  Fdrift2D: false
+  Fdrift3D: true
+  time_dir: 1.0
+  var_u: unod
+  var_v: vnod
+  var_w: w                    # model vertical velocity at interfaces
+  var_eta: ssh
+  sample_vars: [temp, salt]   # node scalars sampled at each record point
+  max_levels: 48              # keep the full water column (Antarctic Bottom Water sinks to the abyss)
+
+numerics:
+  dt: 86400.0                 # 1 day = the daily node-velocity cadence
+  integrator: rk2
+  uv_interp: barycentric      # REQUIRED for node-layout unod/vnod
+  w_interp: barycentric       # nearest/barycentric take the fused 3-D RK2 kernel; leastsq runs unfused
+  sample_interp: leastsq      # scalar-sampling horizontal blend
+  output_freq: 5              # record every 5 days
+  temporal_interp: true
+  temporal_reconstruction: linear
+  checkpoint_freq: 365        # yearly restart checkpoint (resumed by a driver, docs/io_and_time.md)
+
+mesh:
+  type: fesom2
+  meshpath: path/to/core2/fesom.mesh.diag.nc
+
+data:
+  ncinput: path/to/fesom2_output       # directory of <var>.fesom.<YYYY>.nc files
+  inicloud: path/to/seeds_3d.dat       # "lon lat depth [release_sec]" (depth in metres, positive-down)
+  output_path: tracks_weddell_3d.nc
+  time_averaging: mean        # the fields are daily means
+
+time:
+  start_time_idx: 0           # record 0 is the forcing's FIRST record (a cold start, if the run began there) -- set your start record or use start_date
+  n_steps: 1095               # ~3 years at dt = 1 day
+  on_exhausted: stop
+  num_runs: 1

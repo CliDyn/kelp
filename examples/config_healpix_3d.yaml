@@ -1,0 +1,56 @@
+# =========================================================================
+# Example: 3-D tracking on a HEALPix product (nextGEMS ng5, zoom 7),
+# sampling temperature and salinity along every trajectory.
+#
+# ng5 vertical conventions (verified on the real store): u/v live on the
+# 69 layer mids (the 70th GRIB level is all-NaN padding), avg_wo lives ON
+# the 70 interfaces (surface interface w = 0), positive UP ("time-mean upward
+# sea water velocity"); the reader negates it into KELP's positive-down depth
+# rate (mode.w_positive: auto -> the HEALPix default, up).
+# GRIB level axes carry only indices, so 3-D REQUIRES mesh.levels — the
+# FESOM aux3d.out interface table (or an inline list of metres).  Per-cell
+# bathymetry = the deepest finite u level's interface depth.
+#
+# Memory: a zoom-9 3-D snapshot is ~3.7 GB in float64 (u+v+w) — use
+# velocity_float32 and/or cut a regional extract first
+# (utils/extract_healpix_region.py with source.levels set: the extract
+# then carries its own interface table and needs no mesh.levels here).
+#
+# Paths are placeholders -- edit for your machine.
+# =========================================================================
+mode:
+  Fdrift2D: false
+  Fdrift3D: true
+  time_dir: 1.0
+  var_u: avg_uoe
+  var_v: avg_von
+  var_w: avg_wo
+  var_eta: avg_zos
+  sample_vars: [avg_thetao, avg_so]   # NOTE: avg_thetao is in KELVIN
+  # max_levels: 40            # keep only the top 40 interfaces (memory)
+
+numerics:
+  dt: 86400.0
+  integrator: rk2
+  uv_interp: barycentric      # REQUIRED for node-layout HEALPix velocities
+  w_interp: barycentric       # nearest/barycentric take the fused 3-D RK2 kernel; leastsq runs unfused
+  sample_interp: leastsq
+  temporal_interp: true
+  velocity_float32: true      # halves 3-D snapshot memory
+
+mesh:
+  type: healpix
+  meshpath: path/to/ng5/3D_daily_healpix128_ocean.parq
+  levels: path/to/NG5/aux3d.out   # the mesh's aux3d.out (from the model's mesh directory)
+
+data:
+  ncinput: path/to/ng5/3D_daily_healpix128_ocean.parq
+  # avg_zos comes from the auto-derived 2D sibling store
+  inicloud: seeds_3d.dat      # "lon lat depth" per line (metres, positive-down)
+  output_path: tracks_healpix_3d.zarr
+  time_averaging: mean
+
+time:
+  start_time_idx: 0
+  n_steps: 300
+  on_exhausted: stop

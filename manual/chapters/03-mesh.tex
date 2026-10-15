@@ -1,0 +1,326 @@
+\chapter{The Unstructured Mesh}\label{ch:mesh}
+
+This chapter describes the static geometry on which the engine operates: the
+unstructured mesh, the quantities a model stores on it, and the conventions under which each source ---
+FESOM2, FESOM-C, HEALPix products and structured NEMO grids --- is read into the \fn{Mesh} structure of
+\cref{sec:arch-data}. We use the triangular FESOM2 \emph{core2} mesh as the worked example and describe
+the other sources where they differ. The localization search of \cref{ch:localization} and every
+interpolation stencil of \crefrange{ch:hvel}{ch:sampling} are expressed in terms of
+the entities introduced here, so we also fix the vocabulary --- node, element,
+interface, layer --- used throughout the manual.
+
+\section{Nodes, elements, and interfaces}\label{sec:mesh-anatomy}
+
+The horizontal mesh is a tessellation of the ocean surface: a set of $N$
+\emph{nodes} joined into $E$ \emph{elements}. \index{node}\index{element} In FESOM2
+the elements are triangles; in FESOM-C they are mixed, each element being a triangle
+or a quadrilateral; structured grids and the HEALPix pixel mesh produce quadrilaterals only, and the
+HEALPix dual mesh quadrilaterals with a few triangles (\cref{sec:mesh-sources}). A triangle in a mesh with room for four vertices is stored with its fourth slot
+set to $-1$.
+For the FESOM2 \emph{core2} configuration used as the running example the elements are
+triangular, with $N=\num{126858}$ nodes and $E=\num{244659}$ elements. Each element
+stores the indices of its vertices --- three for a triangle, four for a quadrilateral
+--- and the engine precomputes, for each node, the list of elements that contain it
+(its \emph{one-ring}), which the localization search relies upon
+(\cref{ch:localization}).
+
+The model does not store all fields at the same location, and the distinction is
+fundamental to interpolation (\cref{fig:mesh-anatomy}). \emph{Node-layout} fields
+are defined at the vertices: the FESOM2 horizontal velocity components \conf{unod}
+and \conf{vnod}, the sea-surface height, and the sampled scalars (temperature,
+salinity) are all node quantities. \emph{Element-layout} fields are defined at the
+element centroids: the alternative monthly-mean FESOM2 velocities \conf{u} and
+\conf{v} are element quantities. A node-layout field carries one value per vertex
+and is interpolated by the barycentric scheme of \cref{ch:hvel}; an element-layout
+field carries one value per element and is interpolated by either least-squares scheme or,
+through area-weighted vertex values, the barycentric scheme of the same chapter. The \fn{VelocityField} records which layout applies in
+its \code{uv\_layout} attribute, and the engine selects the matching stencil
+accordingly.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.25]
+  \coordinate (C)  at (2.00,1.55);
+  \coordinate (p1) at (0.35,1.50);
+  \coordinate (p2) at (1.15,0.20);
+  \coordinate (p3) at (2.95,0.35);
+  \coordinate (p4) at (3.70,1.70);
+  \coordinate (p5) at (2.75,2.95);
+  \coordinate (p6) at (1.00,2.80);
+  % the one-ring of triangles around node C
+  \foreach \a/\b in {p1/p2,p2/p3,p3/p4,p4/p5,p5/p6,p6/p1}
+     \fill[meshface] (C)--(\a)--(\b)--cycle;
+  % highlight one element
+  \fill[hilface] (C)--(p2)--(p3)--cycle;
+  \foreach \a/\b in {p1/p2,p2/p3,p3/p4,p4/p5,p5/p6,p6/p1}{
+     \draw[meshedge] (C)--(\a); \draw[meshedge] (\a)--(\b);}
+  % element centroid of (C,p2,p3)
+  \node[elemcentre] (E) at ($ 0.3333*(C) + 0.3333*(p2) + 0.3333*(p3) $) {};
+  % nodes
+  \foreach \p in {C,p1,p2,p3,p4,p5,p6} \node[meshnode] at (\p) {};
+  % labels
+  \node[nodelbl,above right=1pt of C] {node $n$: $(\conf{unod},\conf{vnod})$, $T$, $S$};
+  \node[elemlbl,below right=0pt of E] {element centre: $(u_e,v_e)$};
+  \node[font=\footnotesize,gray!60!black] at (2.05,0.62) {highlighted element};
+\end{tikzpicture}
+\caption{Anatomy of the horizontal mesh. Triangle vertices are \emph{nodes}
+(filled circles), where node-layout velocities and the scalar fields live; triangle
+centroids are \emph{elements} (the orange square), where element-layout velocities
+live. The six shaded triangles sharing the central node $n$ form its one-ring, the
+adjacency the localization search exploits (\cref{ch:localization}).}
+\label{fig:mesh-anatomy}
+\end{figure}
+
+\section{Vertical structure: interfaces and layers}\label{sec:mesh-vertical}
+
+In the vertical, the water column is divided by $K$ \emph{interfaces} into $K-1$
+\emph{layers} (\cref{fig:mesh-column}). \index{interface}\index{layer} The
+interfaces are the level boundaries; the layers are the volumes between them. The
+distinction matters because, again, different fields live in different places: the
+vertical velocity $\Wvel$ is defined \emph{at the interfaces}, whereas the
+three-dimensional horizontal velocity and the scalar fields are defined \emph{at
+the mid-layers}. For the \emph{core2} mesh there are $48$ interfaces and hence $47$
+layers, spanning depths from $0$ to approximately \SI{6250}{\metre}. The
+configuration key \conf{max\_levels} retains only the first $N$ interfaces from the
+surface downward (at least two in three dimensions, on either vertical family), which both saves memory
+and caps the depth a particle can reach; a run that follows water to the sea floor keeps the full
+column.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.0]
+  \def\xa{0} \def\xb{3.4}
+  % interface depths (increasing layer thickness with depth)
+  \foreach \y/\lab in {0/{$z_0=0$ (surface)},-0.5/{$z_1$},-1.1/{$z_2$},-1.8/{$z_3$},-2.6/{$z_4$},-3.5/{$z_5$}}{
+     \draw[interface] (\xa,\y)--(\xb,\y);
+     \node[interfacept] at (1.1,\y) {};
+     \node[font=\footnotesize,left] at (\xa,\y) {\lab};
+  }
+  \draw[interface] (\xa,-4.5)--(\xb,-4.5);
+  \node[interfacept] at (1.1,-4.5) {};
+  \node[font=\footnotesize,left] at (\xa,-4.5) {$z_6$};
+  % mid-layer markers
+  \foreach \y in {-0.25,-0.8,-1.45,-2.2,-3.05,-4.0}
+     \node[font=\footnotesize,lagelem!70!black] at (2.55,\y) {$\times$};
+  % local sea floor
+  \draw[dashed,laggreen,line width=0.9pt] (\xa,-4.05)--(\xb,-4.05);
+  \node[font=\footnotesize,laggreen,right] at (\xb,-4.05) {local floor (\conf{zbar\_n\_bottom})};
+  \fill[pattern=north east lines,pattern color=gray!45] (\xa,-4.05) rectangle (\xb,-4.55);
+  % depth axis
+  \draw[-{Stealth[length=5pt]},gray] (-1.65,0.0)--(-1.65,-4.3);
+  \node[gray,rotate=90,anchor=south,font=\footnotesize] at (-1.85,-2.1) {depth $\depx$ (positive down)};
+  % field-location annotations
+  \node[font=\footnotesize,interfacept,label={[font=\footnotesize]right:{interfaces: $\Wvel$}}] at (1.1,-2.05) {};
+  \node[font=\footnotesize,lagelem!70!black] at (2.55,-2.62) {};
+  \node[font=\footnotesize,right] at (2.75,-1.45) {mid-layers: $u,v$ (3-D), $T$, $S$};
+\end{tikzpicture}
+\caption{Anatomy of the vertical column. The $K$ interfaces (grey lines, open
+circles) bound $K-1$ mid-layers (orange crosses). The vertical velocity $\Wvel$ is
+stored at the interfaces; the three-dimensional horizontal velocity and the scalar
+fields are stored at the mid-layers. The local sea floor is given per node by
+\conf{zbar\_n\_bottom}; layers below it do not exist for that node and a particle
+cannot descend past it (\cref{ch:vertical}).}
+\label{fig:mesh-column}
+\end{figure}
+
+The engine treats FESOM2 levels as fixed depths (a \emph{z-level} vertical coordinate), the same
+everywhere. In FESOM2 itself the interfaces follow the free surface (the zstar coordinate), and the
+recorded depth is therefore the reference depth, within $|\eta|$ of the physical one
+(\cref{sec:vert-wsign}).
+The alternative supported family, used by the FESOM-C model, is a
+terrain-following \emph{sigma} coordinate in which the interface depths are a
+fixed fraction of the local water-column thickness and therefore vary in space and
+with the sea-surface height. The two families differ only in how an interface depth
+is computed; we defer the sigma geometry to \cref{ch:vertical}. HEALPix products and NEMO grids use
+z-levels.
+
+\section{Reading a mesh file}\label{sec:mesh-conventions}
+
+The FESOM2 reader accepts three mesh sources: a mesh-diagnostics NetCDF file, an ASCII mesh directory, and
+a Zarr store written by the region-extraction tool. It resolves the quantities of a diagnostics file by
+variable \emph{name} rather than by dimension, which lets it read three naming conventions --- node
+coordinates as \code{lon}/\code{lat} in degrees or packed as one \code{nodes} array in radians, and the
+connectivity as \code{elements}, \code{elem} or \code{face\_nodes}, oriented to $(E,3)$ by its axis of
+length three --- and applies a small number of unit and indexing conversions (\cref{tab:mesh-vars}). Packed
+coordinates are converted to degrees, trusting an explicit \code{units} attribute when present and otherwise
+inferring radians when the longitude magnitude does not exceed $2\pi$ and the latitude magnitude does not
+exceed $\pi/2$. The connectivity is shifted to zero-based indexing by its \code{start\_index} attribute
+(one, as FESOM2 writes it from Fortran, when absent). Depth-like quantities --- the interface levels and the
+per-node sea-floor depth --- are stored with a negative-downward sign and are converted to the positive-down
+convention by taking absolute values. Element centres are computed from the vertices, with the longitude
+averaged on the circle so that an element across the dateline gets a centre inside it. The model's element
+areas are kept when the file provides them.
+
+\begin{table}[t]
+\centering
+\caption{Quantities read from the FESOM2 mesh-diagnostic file and their conversion
+to the \fn{Mesh} structure.}
+\label{tab:mesh-vars}
+\small
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+File variable & \fn{Mesh} member & Conversion / convention \\
+\midrule
+\code{lon}, \code{lat} or \code{nodes} $(2,N)$ & \code{nodes\_lon/lat} & degrees; packed radians $\rightarrow$ degrees \\
+\code{elements}, \code{elem} or \code{face\_nodes} & \code{elem\_nodes}    & oriented to $(E,3)$; one-based $\rightarrow$ zero-based \\
+\code{nz} or \code{zbar}    & \code{sigma}, \code{z\_levels} & $|\cdot|$, positive-down interface depths \\
+\code{zbar\_n\_bottom}      & \code{depth}          & $|\cdot|$, per-node sea floor (positive-down) \\
+\code{elem\_area}           & element areas         & used directly when present \\
+\code{nod\_in\_elem2D} (+ count) & \code{node\_to\_elems} & one-based $\rightarrow$ zero-based; rebuilt if degenerate (\cref{sec:mesh-nodeelem}); required in a diagnostics file \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\codeanchor{Mesh-variable resolution and conversions are in \fn{\_resolve\_mesh\_vars},
+\fn{\_load\_mesh\_nc} and \fn{\_compute\_elem\_centres} (\srcfile{readers/fesom2.py}); the \fn{Mesh}
+dataclass and its \code{z\_levels} property are in \srcfile{core/mesh.py}.}
+
+\section{The node-to-element table and its reconstruction}\label{sec:mesh-nodeelem}
+
+The localization search requires, for each node, the list of elements that contain
+it; this is the \code{nod\_in\_elem2D} table in the mesh file. On the \emph{core2}
+mesh this table is effectively empty: of the $\num{733977}$ node--element incidences it should hold
+(three per element) only $54$ are present. \index{nod\_in\_elem2D@\code{nod\_in\_elem2D}} The consequence, if the
+table were used as read, is severe and silent. After the routine one-based to
+zero-based shift, every unpopulated entry becomes $-1$, so that $\num{126852}$ of
+the $\num{126858}$ nodes report no adjacent elements. The containing-element search
+of \cref{ch:localization} would then fail for every particle on the first step,
+flag each as having left the domain, and terminate normally --- producing an output
+file in which no particle ever moved, with no error raised.
+
+To prevent this, the reader detects a degenerate table and rebuilds it from the
+element connectivity, which is intact. The detector flags the table as degenerate on
+any of three independent signals: more than half of the nodes report no first
+element; an entry strictly inside a node's declared neighbour count is empty (the
+table and the count array disagree); or a neighbour count is negative or exceeds the
+maximum connectivity. On a positive verdict the engine prints a notice and
+reconstructs the node-to-element adjacency by a two-pass count-and-fill over the
+elements, after which the localization search behaves correctly. We note this
+behaviour explicitly because it is a precondition for any meaningful run on the
+\emph{core2} mesh, and because its failure mode --- a completed run with no motion
+--- is easy to misread as a physical result rather than a missing table.
+
+\codeanchor{The degeneracy detector \fn{\_nod\_in\_elem2d\_is\_degenerate} and the
+rebuild call are in \srcfile{readers/fesom2.py}; the reconstruction
+\fn{build\_node\_to\_elems} (a two-pass count-and-fill) is in \srcfile{core/mesh.py}.}
+
+\section{Other mesh sources}\label{sec:mesh-sources}
+
+The other readers produce the same \fn{Mesh} from different inputs (\cref{tab:mesh-sources,fig:mesh-sources}).
+
+\begin{table}[t]
+\centering\footnotesize\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{23mm}>{\raggedright\arraybackslash}p{29mm}>{\raggedright\arraybackslash}p{29mm}>{\raggedright\arraybackslash}p{17mm}>{\raggedright\arraybackslash}p{16mm}>{\raggedright\arraybackslash}p{14mm}@{}}
+\toprule
+source & nodes & elements & velocity layout & vertical & radius (m) \\
+\midrule
+FESOM2 & model nodes & triangles & node or element & z-level & \num{6367500} \\
+FESOM-C & model nodes & triangles, quadrilaterals & element (node when stored so) & sigma & \num{6400000} \\
+HEALPix, dual & wet pixel centres & corner cells: quadrilaterals, some triangles & node & z-level & \num{6371000} \\
+HEALPix, pixel & pixel corners & wet pixels (quadrilaterals) & element & two-dim. & \num{6371000} \\
+NEMO & wet T-points & quadrilaterals of four wet T-points & node & two-dim. & \num{6371000} \\
+\bottomrule
+\end{tabular}
+\caption{Mesh sources. The radius is the default of \conf{mesh.r\_earth}; it enters the fallback
+computation of element areas and, without effect on the values, the barycentric projection.}
+\label{tab:mesh-sources}
+\end{table}
+
+\paragraph{FESOM-C.} The FESOM-C reader takes the node coordinates, depths and vertex lists from the
+model's single output file, together with the element centres when present and the sigma levels. Its
+connectivity is sanitised on load: indices are shifted to zero-based, empty and repeated vertices are
+removed, and each row is compacted, so a triangle stored as a quadrilateral with a repeated vertex
+becomes $[a,b,c,-1]$.
+
+\paragraph{HEALPix, dual mesh.} A HEALPix product stores its fields at the centres of equal-area pixels.
+The default \emph{dual} mesh takes the wet pixel centres as nodes and builds one element around each pixel
+corner, joining the pixels that meet there: four pixels give a quadrilateral, and at the eight points of
+the sphere where only three pixels meet, a triangle. The cells are built from the pixel neighbour
+relations in integer arithmetic, each kept once; an all-wet sphere must give exactly two more elements than
+pixels, which the builder checks. A pixel is wet when the velocity at the first record is finite on the
+tracked level, restricted by \conf{mesh.crop\_bbox} and by a bathymetry variable when the store has one.
+The velocities live at the nodes, so the dual mesh needs \conf{uv\_interp: barycentric}.
+
+\paragraph{HEALPix, pixel mesh.} With \conf{mesh.healpix\_geometry: pixel} the elements are the wet pixels
+themselves, quadrilaterals whose nodes are the pixel corners; the velocities live at the element centres,
+so both least-squares schemes apply. A quadrilateral with straight edges approximates a pixel with curved
+edges, so near an edge a point may be assigned to the adjacent pixel. The pixel mesh is two-dimensional;
+the eight pixels that touch a pole are degenerate in the geographic frame and produce a warning.
+
+\paragraph{Structured grids and NEMO.} A logically rectangular grid becomes a mesh of quadrilaterals whose
+corners are four adjacent wet cell centres (T-points); a quadrilateral with a land corner is dropped, which
+draws the coastline, and a wet T-point that belongs to no quadrilateral is left out, since it could only be
+a dead end. The NEMO reader averages the C-grid velocities at the cell faces to the T-points, setting
+missing face values to zero first, which gives node-layout velocities. Its first version is two-dimensional
+and requires a grid whose axes are within $2^\circ$ of east and north.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=0.9]
+  % (a) HEALPix dual: pixel centres as nodes, a quad around a 4-valent corner, a triangle around a 3-valent one
+  \begin{scope}
+    \foreach \x/\y in {0/0,1.4/0,0/1.4,1.4/1.4} \draw[gray!50] (\x-0.7,\y-0.7) rectangle (\x+0.7,\y+0.7);
+    \fill[hilface] (0,0)--(1.4,0)--(1.4,1.4)--(0,1.4)--cycle;
+    \draw[meshedge] (0,0)--(1.4,0)--(1.4,1.4)--(0,1.4)--cycle;
+    \foreach \x/\y in {0/0,1.4/0,0/1.4,1.4/1.4} \node[meshnode] at (\x,\y) {};
+    \node[font=\footnotesize,align=center,text width=40mm] at (0.7,-1.35) {(a) dual: nodes at pixel\\centres, cell at a corner};
+  \end{scope}
+  % (b) pixel mesh: pixel as element, corners as nodes
+  \begin{scope}[xshift=5.2cm]
+    \fill[hilface] (-0.7,-0.7) rectangle (0.7,0.7);
+    \draw[meshedge] (-0.7,-0.7) rectangle (0.7,0.7);
+    \foreach \x/\y in {-0.7/-0.7,0.7/-0.7,0.7/0.7,-0.7/0.7} \node[meshnode] at (\x,\y) {};
+    \node[elemcentre] at (0,0) {};
+    \node[font=\footnotesize,align=center,text width=40mm] at (0,-1.35) {(b) pixel: element = pixel,\\velocity at its centre};
+  \end{scope}
+  % (c) structured grid: T-point quads, one land cell
+  \begin{scope}[xshift=8.6cm,yshift=-0.7cm]
+    \foreach \i in {0,1,2} \foreach \j in {0,1,2} {
+      \ifnum\i=2 \ifnum\j=2 \else \node[meshnode] at (\i*0.8,\j*0.8) {};\fi \else \node[meshnode] at (\i*0.8,\j*0.8) {};\fi }
+    \fill[hilface] (0,0) rectangle (0.8,0.8);
+    \fill[hilface] (0.8,0) rectangle (1.6,0.8);
+    \fill[hilface] (0,0.8) rectangle (0.8,1.6);
+    \draw[meshedge] (0,0) rectangle (0.8,0.8) (0.8,0) rectangle (1.6,0.8) (0,0.8) rectangle (0.8,1.6);
+    \node[rectangle,fill=gray!50,inner sep=2.2pt] at (1.6,1.6) {};
+    \node[font=\footnotesize,anchor=west] at (1.75,1.6) {land};
+    \node[font=\footnotesize,align=center,text width=40mm] at (0.8,-0.65) {(c) structured: quads of\\four wet T-points};
+  \end{scope}
+\end{tikzpicture}
+\caption{Three mesh sources on one \fn{Mesh}. (a) The HEALPix dual mesh joins the four pixel centres around
+a pixel corner into a quadrilateral (three centres give a triangle). (b) The pixel mesh makes each wet pixel
+an element, with nodes at its corners and the velocity at its centre. (c) A structured grid keeps the
+quadrilaterals whose four T-points are wet; one land point removes the quadrilateral in the corner.}
+\label{fig:mesh-sources}
+\end{figure}
+
+\codeanchor{\fn{\_sanitize\_connectivity} and \fn{FesomCReader.load\_mesh} (\srcfile{readers/fesomc.py});
+\fn{build\_healpix\_dual\_mesh}, \fn{build\_healpix\_pixel\_mesh} and \fn{HealpixReader.load\_mesh}
+(\srcfile{readers/healpix.py}); \fn{build\_structured\_mesh} and \fn{c\_grid\_to\_t}
+(\srcfile{readers/structured.py}); the NEMO adapter in \srcfile{readers/nemo.py}.}
+
+\section{Convex quadrilaterals and derived tables}\label{sec:mesh-derived}
+
+The quadrilateral weights of \cref{sec:hvel-quad} have no fall-back, so every quadrilateral must be convex.
+The FESOM-C reader, the structured-grid builder and the HEALPix dual builder check this when the mesh is
+loaded (the HEALPix pixel builder too, except for the eight pixels that touch a pole, which it only reports
+with a warning): each quadrilateral is projected onto the plane tangent to the sphere at its centre, and it fails
+when the cross products of consecutive edges change sign or one is zero within a relative tolerance of
+$10^{-9}$. The test does not depend on the winding direction or on a rotation of the frame, and a failure
+names the offending elements.
+
+Three further tables are built from the connectivity when a run needs them and are cached on the mesh:
+\begin{description}[font=\normalfont\itshape,style=nextline,leftmargin=1.5em]
+  \item[Element neighbours.] For each element, the element across each of its edges, or none at the coast;
+    an edge shared by more than two elements is an error. Used by the edge least-squares scheme and by
+    element tracking (\cref{sec:hvel-edge,sec:loc-walk}), and built when the run starts if either is on.
+  \item[Coastal flags.] An element is coastal when one of its edges belongs to no other element; used by
+    the beaching model (\cref{sec:life-beach}).
+  \item[Element areas.] Read from the model's mesh file when present (FESOM2 mesh diagnostics provide them;
+    ASCII meshes and regional extracts do not);
+    otherwise the spherical excess of the element's fan of triangles, times the square of the mesh radius.
+    Used only as ratios, in the element-to-vertex averages of the barycentric scheme.
+\end{description}
+The search structures of \cref{ch:localization} are built at the end of every loader.
+
+\codeanchor{\fn{find\_nonconvex\_quads}, \fn{validate\_quad\_convexity}, \fn{build\_elem\_neighbors},
+\fn{build\_boundary\_info} and \fn{build\_elem\_areas} in \srcfile{core/mesh.py}.}

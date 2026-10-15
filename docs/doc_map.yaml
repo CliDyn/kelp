@@ -1,0 +1,181 @@
+architecture:
+  code:
+  - src/kelp/tracking.py:run_tracking
+  - src/kelp/tracking.py:run_single_realization
+  - src/kelp/core/mesh.py:Mesh
+  - src/kelp/core/io.py:VelocityField
+  - src/kelp/core/particles.py:ParticleState
+  doc: docs/architecture.md
+  verified_at: v1.0.0
+beaching:
+  code:
+  - src/kelp/numerics/beaching.py:evaluate_beaching
+  - src/kelp/numerics/beaching.py:BeachRunConfig
+  - src/kelp/numerics/beaching.py:_u01
+  - src/kelp/tracking.py:_apply_beaching_hook
+  - src/kelp/core/mesh.py:build_boundary_info
+  doc: docs/beaching.md
+  verified_at: v1.0.0
+configuration:
+  code:
+  - src/kelp/core/config.py:load_config
+  - src/kelp/core/config.py:AppConfig
+  - src/kelp/readers/__init__.py:extract_time_info
+  - src/kelp/readers/fesom2.py:Fesom2Reader
+  - src/kelp/readers/fesomc.py:FesomCReader
+  - src/kelp/cli/main.py:main
+  doc: docs/configuration.md
+  verified_at: v1.0.0
+coordinate_frame:
+  code:
+  - src/kelp/core/rotation.py:euler_matrix
+  - src/kelp/core/rotation.py:rotate_vectors
+  - src/kelp/core/rotation.py:rotate_lonlat
+  - src/kelp/readers/fesom2.py:_apply_mesh_rotation
+  - src/kelp/tracking.py:_maybe_rotate_seeds
+  - src/kelp/tracking.py:_geo_view_for_record
+  - src/kelp/tracking.py:_validate_restart_frame
+  - src/kelp/readers/healpix.py:_apply_rotation
+  doc: docs/coordinate_frame.md
+  verified_at: v1.0.0
+diffusion:
+  code:
+  - src/kelp/numerics/diffusion.py:diffusion_uniform_step_meters
+  - src/kelp/numerics/diffusion.py:diffusion_em_step_meters
+  - src/kelp/numerics/diffusion.py:diffusion_m1_step_meters
+  - src/kelp/numerics/diffusion.py:_philox_uint64
+  - src/kelp/numerics/diffusion.py:_normal_pair
+  - src/kelp/numerics/diffusion.py:DiffusionStepArgs
+  - src/kelp/tracking.py:_resolve_composition
+  doc: docs/diffusion.md
+  verified_at: v1.0.0
+doc-sync:
+  code:
+  - docs/check_doc_sync.py
+  doc: docs/_doc_header.md
+  verified_at: v1.0.0
+field_sampling:
+  code:
+  - src/kelp/numerics/sampling.py:sample_field
+  - src/kelp/numerics/sampling.py:_combine_horizontal
+  - src/kelp/tracking.py:_sample_record_fields
+  - src/kelp/readers/fesom2.py:read_scalar_fields
+  doc: docs/field_sampling.md
+  verified_at: v1.0.0
+healpix:
+  code:
+  - src/kelp/readers/healpix.py:build_healpix_dual_mesh
+  - src/kelp/readers/healpix.py:HealpixReader
+  - src/kelp/readers/healpix.py:_open_healpix_store
+  - src/kelp/readers/healpix.py:_install_reference_na_shim
+  - utils/extract_healpix_region.py:extract_region
+  - src/kelp/numerics/integrators.py:_bary_fused_anchor_exact
+  - src/kelp/core/mesh.py:grid_hash_dense_for_elements
+  doc: docs/healpix.md
+  verified_at: v1.0.0
+interpolation:
+  code:
+  - src/kelp/numerics/interpolate.py:_interp_leastsq_core
+  - src/kelp/numerics/interpolate.py:_interp_barycentric_core
+  - src/kelp/numerics/vertical.py:interp_w_spatial
+  - src/kelp/core/mesh.py:_polygon_weights
+  doc: docs/interpolation.md
+  verified_at: v1.0.0
+io_and_time:
+  code:
+  - src/kelp/readers/__init__.py:get_reader
+  - src/kelp/readers/__init__.py:extract_time_info
+  - src/kelp/readers/__init__.py:_detect_engine
+  - src/kelp/readers/fesom2.py:open_dataset
+  - src/kelp/tracking.py:_VelCache
+  - src/kelp/tracking.py:_shift_to_midpoints
+  - src/kelp/writers.py:TrajectoryWriter
+  - src/kelp/writers.py:load_restart
+  - src/kelp/writers.py:write_restart_file
+  - src/kelp/readers/__init__.py:time_axis_epoch
+  - src/kelp/tracking.py:_record_clock_origin
+  - src/kelp/tracking.py:_release_arrays
+  - src/kelp/core/release.py:mask_inactive_velocity
+  doc: docs/io_and_time.md
+  verified_at: v1.0.0
+localization:
+  code:
+  - src/kelp/core/mesh.py:Mesh
+  - src/kelp/core/mesh.py:build_search
+  - src/kelp/core/mesh.py:build_grid_hash
+  - src/kelp/core/mesh.py:_grid_hash_nearest_widened
+  - src/kelp/core/mesh.py:_ensure_kdtree
+  - src/kelp/core/mesh.py:find_containing_elements
+  - src/kelp/core/mesh.py:_find_containing_element_local
+  - src/kelp/core/mesh.py:_walk_containing_element
+  - src/kelp/core/mesh.py:find_containing_elements_walk
+  - src/kelp/core/mesh.py:choose_grid_hash_cell
+  - src/kelp/core/mesh.py:apply_grid_hash_cell_rule
+  - src/kelp/core/mesh.py:describe_grid_hash
+  - src/kelp/core/mesh.py:_gh_sample_stats
+  doc: docs/localization.md
+  verified_at: v1.0.0
+performance:
+  code:
+  - src/kelp/tracking.py:run_single_realization
+  - src/kelp/core/io.py:LazyLerpField
+  - src/kelp/writers.py:TrajectoryWriter
+  doc: docs/performance.md
+  verified_at: v1.0.0
+running:
+  code:
+  - src/kelp/tracking.py:run_tracking
+  - src/kelp/core/config.py:TimeConfig
+  - src/kelp/cli/main.py:main
+  doc: docs/running.md
+  verified_at: v1.0.0
+shared_fields:
+  code:
+  - src/kelp/core/shared_fields.py:SharedFieldCache
+  - src/kelp/tracking.py:_shared_fields_tag
+  doc: docs/configuration.md
+  verified_at: v1.0.0
+time_integration:
+  code:
+  - src/kelp/numerics/integrators.py:euler_step
+  - src/kelp/numerics/integrators.py:rk2_step
+  - src/kelp/numerics/integrators.py:rk4_step
+  - src/kelp/numerics/integrators.py:get_integrator
+  - src/kelp/numerics/integrators.py:_make_stage_vels
+  - src/kelp/numerics/integrators.py:_run_fused_2d_tinterp
+  - src/kelp/core/io.py:LazyLerpField
+  doc: docs/time_integration.md
+  verified_at: v1.0.0
+validation_and_performance:
+  code:
+  - tests/test_3d_analytical.py
+  - tests/test_diffusion.py
+  - tests/test_integrators_time_aware.py
+  doc: docs/validation_and_performance.md
+  verified_at: v1.0.0
+velocity_interpolation:
+  code:
+  - src/kelp/numerics/interpolate.py:_interp_leastsq_core
+  - src/kelp/numerics/interpolate.py:_interp_barycentric_core
+  - src/kelp/numerics/interpolate.py:get_interpolator
+  - src/kelp/core/mesh.py:_polygon_weights
+  - src/kelp/core/mesh.py:_wachspress_weights_quad
+  doc: docs/velocity_interpolation.md
+  verified_at: v1.0.0
+vertical:
+  code:
+  - src/kelp/numerics/vertical.py:find_layer
+  - src/kelp/numerics/vertical.py:interp_w_spatial
+  - src/kelp/numerics/vertical.py:clamp_depth
+  - src/kelp/numerics/vertical_sigma.py:column_depth
+  - src/kelp/numerics/vertical_sigma.py:sigma_interfaces_to_z
+  - src/kelp/numerics/vertical_sigma.py:interp_w_sigma_spatial
+  - src/kelp/numerics/vertical_sigma.py:clamp_depth_sigma
+  doc: docs/vertical.md
+  verified_at: v1.0.0
+w_reconstruction:
+  code:
+  - src/kelp/w_reconstruct.py:reconstruct_w
+  - src/kelp/w_reconstruct.py:compare_variants
+  doc: docs/w_reconstruction.md
+  verified_at: v1.0.0

@@ -1,0 +1,274 @@
+\chapter{Particle Localization}\label{ch:localization}
+
+Before the velocity can be interpolated to a particle, the particle must be located on the mesh:
+the engine must identify the nearest node and, for most interpolation methods, the element that
+contains the position. On a regular latitude--longitude grid this is an indexing operation; on an
+unstructured mesh it is a search, performed for every particle at every evaluation site --- the
+start of a step, every Runge--Kutta stage (\cref{ch:integration}) and the final position. This
+chapter describes the nearest-node search by spatial hashing and the guarantee that the node it
+returns is the nearest one, the automatic choice of the hash cell, the containing-element test, and
+the alternative of tracking the containing element across edges.
+
+\section{Nearest node by spatial hashing}\label{sec:loc-nearest}
+
+A linear scan over all $N$ nodes would make every evaluation cost $O(N)$. Instead the engine builds a
+uniform \emph{grid hash} once, when the mesh is loaded, and scans only the nodes of a small window of
+cells around the query (\cref{fig:gridhash}). \index{grid hash}
+
+\paragraph{Construction.} Node longitudes are first placed on one branch --- $[0^\circ,360^\circ)$ or
+$[-180^\circ,180^\circ)$, whichever gives the smaller span; a mesh whose span exceeds $350^\circ$ on
+both branches is treated as cyclic in longitude. With cell side $c$, the grid starts one cell below
+the southernmost node, $\phi_{\min}=\min\phi-c$, and has $n_y=\lceil(\max\phi+c-\phi_{\min})/c\rceil$
+rows; a cyclic grid starts at $\lambda_{\min}=0$ with $n_x=\lceil 360/c\rceil$ columns, whose last
+(``seam'') cell is only $360-(n_x-1)c$ wide, and a non-cyclic grid carries one padding cell on each
+side. A query at $(\lambda,\phi)$ falls in the cell
+\begin{equation}\label{eq:loc-cell}
+  i=\left\lfloor\frac{(\lambda-\lambda_{\min})\bmod 360}{c}\right\rfloor,\qquad
+  j=\left\lfloor\frac{\phi-\phi_{\min}}{c}\right\rfloor,
+\end{equation}
+clamped to the grid; on a non-cyclic grid a query outside the domain that lies angularly closer to the
+western edge is folded to the negative side first, so the clamp picks the nearer edge. The nodes of every cell are stored contiguously (a compressed offset array and
+a node-index array), so a row of cells is one contiguous slice.
+
+\paragraph{Distance.} Distances are compared as squared chord lengths between points on the unit
+sphere, $\lVert\mathbf{r}_p-\mathbf{r}_n\rVert^2$ with
+$\mathbf{r}=(\cos\phi\cos\lambda,\;\cos\phi\sin\lambda,\;\sin\phi)$. Minimising the chord minimises the
+great-circle distance, without the dateline discontinuity or the polar distortion of a planar
+metric. The node vectors are computed once, when the hash is built, into a table of three numbers
+per node, so a scan reads coordinates instead of evaluating trigonometric functions per candidate;
+the table is filled with exactly the arithmetic the scans used before, so the nearest node found is
+bit-for-bit unchanged, ties included (the first node found wins a tie) --- provided Numba runs without
+Intel's vector math library, which the hash build checks on sampled nodes and warns about. The plain three-by-three
+window scan returns the nearest node among the nodes of the query cell and its eight neighbours.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=0.95]
+  \fill[lagblue!10] (1,1) rectangle (4,4);
+  \draw[help lines,gray!50] (0,0) grid (6,5);
+  \foreach \x/\y in {0.4/0.6,1.3/2.4,2.6/3.3,3.4/1.7,2.2/1.2,4.7/2.1,5.3/3.6,0.8/4.2,3.8/4.4,5.1/0.7,1.7/3.7,4.3/3.2}
+     \node[meshnode] at (\x,\y) {};
+  \node[drifter] (D) at (2.7,2.4) {};
+  \node[meshnode,label={[nodelbl]above:nearest}] (NN) at (2.6,3.3) {};
+  \draw[velarrow,densely dashed] (D)--(NN);
+  \node[font=\footnotesize,lagblue!60!black,anchor=south west] at (1.0,4.02) {3$\times$3 search window};
+  \node[drifter,label={[font=\footnotesize]right:query position}] at (7.0,3.2) {};
+  \node[meshnode,label={[font=\footnotesize]right:mesh node}] at (7.0,2.4) {};
+\end{tikzpicture}
+\caption{Nearest-node search by spatial hashing. Nodes are bucketed into uniform cells when the mesh
+is loaded. A query (the drifter) is first matched against the nodes of its own cell and the eight
+neighbouring cells (shaded); \cref{sec:loc-exact} gives the test that decides whether this window is
+enough.}
+\label{fig:gridhash}
+\end{figure}
+
+\codeanchor{Construction \fn{build\_grid\_hash} (with \fn{\_gh\_lon\_branch},
+\fn{\_gh\_grid\_geometry}, \fn{\_gh\_cell\_of}); node table \fn{\_node\_xyz\_fill} and its self-check
+\fn{\_node\_xyz\_selfcheck}; window scan \fn{\_grid\_hash\_nearest\_3x3}; batch query
+\fn{find\_nearest\_nodes}; all in \srcfile{core/mesh.py}.}
+
+\section{Choosing the cell}\label{sec:loc-cell}
+
+The reader of each mesh family proposes a cell of twice the mean node spacing,
+\begin{equation}\label{eq:loc-legacy}
+  c_{\text{legacy}}=\max\!\left(\ang{0.05},\;2\sqrt{A/N}\right),
+\end{equation}
+with $A$ the area of the mesh's longitude--latitude bounding box in square degrees. On a
+quasi-uniform mesh this puts a few dozen nodes in the window at every resolution. On a mesh whose
+resolution varies by orders of magnitude it does not: a cell sized for the coarse part holds
+thousands of nodes where the mesh is fine, and the scan turns into a linear pass over them.
+
+Every run therefore chooses the cell by measurement: the key
+\conf{mesh.grid\_hash\_cell\_rule} defaults to \conf{occupancy}. The rule samples up to \num{200000} element centres, finds each one's exact
+nearest node once, and evaluates the candidate cells $c_k=c_{\text{legacy}}/\sqrt{2}^{\,k}$,
+$k=0,\dots,12$, without rebuilding the hash: for every sample it counts the nodes the window holds,
+tests whether the window proves its answer (\cref{sec:loc-exact}), and estimates the cost of the query
+--- the nodes scanned, the cells visited and one certificate per widening, a certificate weighing as
+much as twenty cells. With the exact-anchor guard of \cref{sec:loc-exact} on (the default), the rule keeps
+the reader's cell unless the cheapest eligible candidate (at most 20\,\% of the queries widened, at most
+\SI{128}{MB} of offsets) is predicted to be at least 2.75 times cheaper; with the guard off it takes the
+smallest cell that leaves no window empty, holds a median of at least eight nodes per window and has at
+most half a percentage point more approximate anchors than the reader's cell. The ladder stops early where a candidate would need more than 64 rows of widening
+budget or too many cells. With the guard on, quasi-uniform meshes keep the reader's cell and structure-resolving
+meshes take a smaller one
+(\cref{sec:perf-anchor}). An explicit \conf{mesh.grid\_hash\_cell\_size} overrides the rule, and
+\conf{grid\_hash\_cell\_rule: legacy} keeps the reader's cell. The resolved cell and the rule are
+written to the output metadata, so any run can be repeated with its cell pinned.
+
+\codeanchor{\fn{choose\_grid\_hash\_cell} (the per-sample statistics in \fn{\_gh\_sample\_stats}),
+\fn{apply\_grid\_hash\_cell\_rule}, \fn{set\_grid\_hash\_cell} and the one-line report
+\fn{describe\_grid\_hash}, in \srcfile{core/mesh.py}; applied by \fn{run\_tracking} after the mesh is
+loaded.}
+
+\section{Exact nearest nodes}\label{sec:loc-exact}
+
+A non-empty three-by-three window does not guarantee that the node it returns is the nearest one: a
+closer node can lie just outside the window, most easily at high latitude, where a degree of longitude
+shrinks, or with a cell smaller than the local node spacing. A near-nearest anchor changes the
+interpolation stencil and, over time, the trajectory. With \conf{mesh.exact\_nearest: true} (the
+default) the engine proves every anchor.
+
+\paragraph{The certificate.} Let the window return a node at angular distance
+$\theta=\arccos(\sin\phi_p\sin\phi_n+\cos\phi_p\cos\phi_n\cos\Delta\lambda)$ from the query. Any closer
+node lies inside the spherical cap of radius $\theta$ around the query, whose half-extent is $\theta$
+in latitude and
+\begin{equation}\label{eq:loc-cap}
+  \Delta\lambda_{\text{cap}}=\arcsin\!\left(\frac{\sin\theta}{\cos\phi_p}\right)
+\end{equation}
+in longitude, unbounded when $|\phi_p|+\theta\ge 90^\circ$ (the cap reaches a pole). The answer is
+proven when the cap fits inside the latitude and longitude intervals the window actually searched ---
+taking into account the narrower seam cell of a cyclic grid, a window clipped at the grid edge (there
+are no nodes beyond it), and, on a non-cyclic grid, the $\pm360^\circ$ images of the cap
+(\cref{fig:loc-certificate}). The test returns which sides fail: the rows, the columns, or --- when the
+cap reaches a pole or an image of it meets the node range --- all columns.
+
+\paragraph{Widening.} An unproven window grows in the failing direction --- rows and columns
+independently, all columns only where required --- and is scanned again, new rows as contiguous slices,
+until the best node found is proven. An empty window grows as a square until the first node is found,
+or by whole rows in the polar cap, where a row's length $360^\circ\cos\phi$ is at most 32 cell widths. The growth has a budget: a query
+whose nearest node is farther away than the longest element edge (plus two cells) lies outside every
+element, so it keeps the best node seen and dies in that step; the budget, between 4 and 4096 rows, is
+derived from the mesh when the hash is built.
+
+\paragraph{One search for every path.} The batch query and every fused kernel's evaluation site call
+the same exact search, so fused and unfused paths return the same anchor bit for bit, ties included,
+and the fused kernels need no round trip through the batch path. With the guard off
+(\conf{exact\_nearest: false}; together with \conf{grid\_hash\_cell\_rule: legacy} this reproduces the
+nearest-node anchors of runs made before September 2026) the batch path keeps the plain window and
+repairs empty windows through a $k$-d tree, and the fused kernels widen an empty window ring by ring ---
+an approximate anchor. The two-dimensional barycentric kernels, and the least-squares kernels on HEALPix
+pixel meshes, are then enabled only on meshes that pass a density certificate (every cell of every
+element's bounding box has a non-empty window); the three-dimensional RK2 kernel instead flags a particle
+whose window is empty and re-runs it with the anchor of the batch search (\cref{sec:fused-identity}).
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=0.85]
+  \fill[lagblue!10] (1,1) rectangle (4,4);
+  \fill[lagelem!10] (4,1) rectangle (5,4);
+  \draw[help lines,gray!50] (0,0) grid (7,5);
+  \draw[lagblue,line width=0.9pt] (1,1) rectangle (4,4);
+  \draw[lagelem,line width=0.9pt,densely dashed] (1,1) rectangle (5,4);
+  \node[drifter] (Q) at (3.55,2.5) {};
+  \node[meshnode] (F) at (2.35,3.35) {};
+  \draw[kelp!70,line width=0.7pt] (Q) ellipse (1.46 and 1.46);
+  \draw[densely dotted] (Q)--(F);
+  \node[meshnode] (T) at (4.45,1.95) {};
+  \node[font=\footnotesize,anchor=west] at (7.2,4.2) {\tikz\draw[lagblue,line width=0.9pt](0,0)rectangle(0.3,0.2); searched 3$\times$3 window};
+  \node[font=\footnotesize,anchor=west] at (7.2,3.5) {\tikz\draw[kelp!70,line width=0.7pt](0.15,0.1)circle(0.12); cap of radius $\theta$};
+  \node[font=\footnotesize,anchor=west] at (7.2,2.8) {\tikz\draw[lagelem,line width=0.9pt,densely dashed](0,0)rectangle(0.3,0.2); widened by one column};
+  \node[font=\footnotesize,anchor=west] at (7.2,2.1) {\tikz\node[meshnode]{}; found node / true nearest};
+  \node[font=\footnotesize,fill=white,inner sep=1pt,above left=0pt and 0pt of F] {found};
+  \node[font=\footnotesize,fill=white,inner sep=1pt,right=2pt of T] {nearest};
+\end{tikzpicture}
+\caption{The exactness certificate. The window returns a node at angular distance $\theta$; a closer
+node can only lie in the cap of radius $\theta$ around the query. Here the cap crosses the window's
+eastern edge, so the window cannot prove its answer; it widens by one column, finds the true nearest
+node, and the smaller cap of the new answer fits inside the searched interval.}
+\label{fig:loc-certificate}
+\end{figure}
+
+\codeanchor{Cap extents \fn{\_cap\_extents}; certificate \fn{\_anchor\_provable\_rect} (and
+\fn{\_anchor\_provable} for the plain window); exact search \fn{\_grid\_hash\_nearest\_exact}; budget
+\fn{\_gh\_far\_rows\_for}; guard flag \fn{set\_exact\_nearest}; guard-off single-particle search
+\fn{\_grid\_hash\_nearest\_widened}; density certificate \fn{grid\_hash\_dense\_for\_elements}; all in
+\srcfile{core/mesh.py}. The fused kernels anchor each site through \fn{\_fused\_site\_anchor} in
+\srcfile{numerics/integrators.py}.}
+
+\section{Where localization runs}\label{sec:loc-where}
+
+Every evaluation site of the step re-queries the hash; no step path updates the anchor from the previous
+one (only the offsets of the diffusivity gradient, \cref{ch:diffusion}, start a local walk from the
+particle's node). A fused
+kernel anchors its start, its stages and its final position through the exact search and tests the
+final position for containment; the unfused paths query the batch search for the particles that
+moved and test their containment. A particle folded back into a periodic window
+(\cref{ch:lifecycle}) is re-anchored after the fold. On a HEALPix mesh in the geographic frame, points
+poleward of the first ring of pixel centres lie outside every element and are lost; the rotated frame
+of \cref{ch:frame} removes this limit.
+
+\section{The containing element}\label{sec:loc-contain}
+
+The nearest node does not by itself determine every interpolation stencil; several methods need the
+element that \emph{contains} the particle. The engine scans the elements of the nearest node's
+one-ring and tests each for containment (\cref{fig:contain}). If none contains the particle --- which
+can occur on an irregular mesh, where the nearest node is not always a vertex of the containing
+element --- the search widens to a second ring, scanning the elements adjacent to every vertex of the
+one-ring elements. A particle for which neither ring yields a containing element is taken to lie
+outside the domain; its step is undone and its status set to \code{OUTSIDE} (\cref{ch:lifecycle}).
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.25]
+  \coordinate (C)  at (2.00,1.55);
+  \coordinate (p1) at (0.35,1.50);
+  \coordinate (p2) at (1.15,0.20);
+  \coordinate (p3) at (2.95,0.35);
+  \coordinate (p4) at (3.70,1.70);
+  \coordinate (p5) at (2.75,2.95);
+  \coordinate (p6) at (1.00,2.80);
+  \foreach \a/\b in {p1/p2,p2/p3,p3/p4,p4/p5,p5/p6,p6/p1}
+     \fill[meshface] (C)--(\a)--(\b)--cycle;
+  \fill[hilface] (C)--(p3)--(p4)--cycle;
+  \foreach \a/\b in {p1/p2,p2/p3,p3/p4,p4/p5,p5/p6,p6/p1}{
+     \draw[meshedge] (C)--(\a); \draw[meshedge] (\a)--(\b);}
+  \node[drifter] (D) at (2.78,1.35) {};
+  \draw[densely dotted,kelp!70] (D)--(C);
+  \draw[densely dotted,kelp!70] (D)--(p3);
+  \draw[densely dotted,kelp!70] (D)--(p4);
+  \foreach \p in {C,p1,p2,p3,p4,p5,p6} \node[meshnode] at (\p) {};
+  \node[nodelbl,above left=0pt of C] {nearest node};
+  \node[font=\footnotesize,kelp!70!black,below right=-1pt of D] {drifter};
+  \node[font=\footnotesize] at (2.95,0.95) {sub-triangles};
+\end{tikzpicture}
+\caption{Containing-element search. The engine scans the one-ring of the nearest node and tests each
+element for containment. The drifter lies in the shaded triangle; the dotted segments split it into
+three sub-triangles whose signed areas, normalized by the whole, are the barycentric coordinates that
+decide containment.}
+\label{fig:contain}
+\end{figure}
+
+The containment test proceeds in three steps. First, the valid vertices of the candidate element are
+compacted, discarding the $-1$ padding and, on the mixed meshes of FESOM-C, the repeated vertex.
+Second, a dateline-safe bounding-box prefilter, in longitude differences wrapped to
+$[-180^{\circ},180^{\circ})$, rejects candidates that cannot contain the point. Third, the element and
+the point are projected to a local plane --- an equirectangular plane around the mean vertex,
+$x=\Delta\lambda\,R\cos\phi_0$, $y=\Delta\phi\,R$, with the mean longitude taken on the wrapped
+differences when the element straddles the dateline --- and the point is declared inside when its
+barycentric coordinates are all non-negative to within a small negative tolerance, so that a point
+exactly on an edge is inside and no particle falls between two neighbours. A near-degenerate triangle,
+whose area falls below a second tolerance, is rejected rather than divided by. A quadrilateral is
+tested on a fan of triangles, which is exact because quadrilaterals are required to be convex
+(checked when the mesh is loaded, \cref{ch:mesh}); its interpolation weights are the Wachspress
+coordinates of \cref{sec:hvel-quad}, computed separately.
+
+\codeanchor{The ring search is \fn{\_find\_containing\_element\_local}; the containment test is
+\fn{\_element\_contains} (bounding box) and \fn{\_polygon\_contains\_bool} (barycentric signs) on
+\fn{\_project\_to\_local\_xy}; the tolerances \code{\_BARY\_EPS} $=-10^{-6}$ and \code{\_AREA\_TOL}
+$=10^{-10}$ are module constants. All in \srcfile{core/mesh.py}.}
+
+\section{Tracking the element across edges}\label{sec:loc-walk}
+
+With \conf{numerics.elem\_search: walk} the containing element is searched once, when the run starts
+(or taken from the checkpoint of a resumed run), and afterwards carried from step to step: at every evaluation site the engine starts from
+the carried element and walks across edges towards the position. In an element with signed area $S$
+and compacted vertices $(x_k,y_k)$, the edge coordinates of the point are
+\begin{equation}\label{eq:loc-walk}
+  w_k=\frac{\operatorname{sgn}S}{|S|}\,\bigl[(x_{k+1}-x_k)(p_y-y_k)-(p_x-x_k)(y_{k+1}-y_k)\bigr],
+\end{equation}
+and the point is inside when $\min_k w_k\ge-10^{-6}$; otherwise the walk crosses the edge with the
+most negative $w_k$ into the neighbouring element. An acceptance within $10^{-2}$ of an edge is
+re-checked with the exact containment predicate of \cref{sec:loc-contain}. Every outcome that is not a
+clear containment --- a boundary edge, a two-element cycle, a degenerate element, or 256 steps --- falls
+back to the ring search of \cref{sec:loc-contain}, so the walk returns the same element as the ring
+search wherever that search is exhaustive and finds elements beyond the second ring where it is not.
+The carried element is written to checkpoints. On a 28\,000-element mesh the walk costs
+\SI{35}{ns} per particle against \SI{126}{ns} for the ring search; it runs on the unfused paths only
+(the fused kernels keep their own search), which is why it pays off for element-layout barycentric
+and edge least-squares interpolation and is left at \conf{local} on node-layout runs whose fused
+kernels would otherwise be switched off.
+
+\codeanchor{\fn{\_walk\_containing\_element} and \fn{find\_containing\_elements\_walk} in
+\srcfile{core/mesh.py}; the element neighbours come from \fn{build\_elem\_neighbors}; the tracking
+layer seeds and updates the carried elements (\fn{\_walk\_update\_elems} in
+\srcfile{numerics/integrators.py}).}

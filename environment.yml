@@ -1,0 +1,26 @@
+name: kelp
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.11
+  - numpy
+  - scipy
+  - xarray
+  - netcdf4
+  - pyyaml
+  - numba
+  - dask
+  - zarr
+  - healpy
+  - fsspec          # HEALPix kerchunk reference stores
+  - pandas
+  - pyarrow
+  - pip
+  # optional (plotting, testing)
+  - matplotlib
+  - cartopy
+  - imageio
+  - pyvista
+  - pytest
+  - pytest-cov

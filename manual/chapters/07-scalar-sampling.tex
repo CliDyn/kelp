@@ -1,0 +1,102 @@
+\chapter{Scalar Field Sampling Along Trajectories}\label{ch:sampling}
+
+Beyond advecting particles, the engine can record the value of model scalar fields
+--- temperature and salinity, for example --- at each
+particle position as the trajectory unfolds. This sampling is a diagnostic: it does
+not affect the motion, but it attaches a time series of water properties to every
+trajectory. The fields to sample are listed in the configuration key
+\conf{mode.sample\_vars} (a single name is accepted as a one-element list; an empty list switches
+sampling off and leaves the output byte-identical), and the horizontal method in
+\conf{numerics.sample\_interp}. This chapter
+describes what is sampled, where in the column the value is taken, how the horizontal
+combination reuses the interpolation machinery of \cref{ch:hvel,ch:vertical}, and why
+sampling is deliberately independent of the integration direction.
+
+\section{What is sampled, and when}\label{sec:samp-what}
+
+The sampled fields are node-based scalars, read from the same forcing dataset as the
+velocity. Each requested field is probe-read once at startup, before the output file is created; a
+field that is absent, or that is stored at element centres rather than nodes, raises a configuration
+error immediately rather than failing midway through a run. Each reader prepares the fields in its own
+way: the FESOM2 reader recognises mid-layer and interface fields by their vertical dimension and picks
+the tracked level in a two-dimensional run; the FESOM-C reader reduces sigma-layered fields to two
+dimensions with a node-aware reduction in a two-dimensional run; the HEALPix reader compacts pixels to nodes and fills each
+column downward from its deepest valid value, so that the bottom clamp reads bottom water, never a
+missing value (pixel geometry does not support sampling); the NEMO reader samples surface T-point
+fields only. Values are recorded at the
+trajectory output cadence (every \conf{output\_freq} steps, \cref{ch:output}), not at
+every integration step. A record is labelled with the time at the end of its step (\cref{eq:out-time}), and
+the scalar is taken at that instant as far as the forcing allows. When the velocity is reconstructed in time
+(\cref{ch:temporal}), the scalar is re-interpolated to the exact record time, so the
+sampled value is consistent with the recorded position; this re-interpolation is linear between
+the bracketing snapshots even when the velocity uses the monotone-cubic reconstruction. In the
+discrete-time mode the scalar is read from the snapshot at the end of the step --- the next snapshot, which the
+step already holds as the target of its Runge--Kutta stages --- so its instant is the record time as well.
+Only when no next snapshot exists, on the last step of a run that stops at the end of the forcing, is the
+snapshot at the start of the step used, one snapshot behind the record time; the variable's comment
+attribute says so. (Before output format~2 the discrete mode always sampled the start-of-step snapshot.)
+
+Each sampled field becomes a variable of the trajectory output with the dimensions of the positions,
+filled with missing values before its first record and in any record that does not carry it, and carrying
+the units and long name of the source variable, the positions as its coordinates, and a comment on the
+sampling instant; names that collide with the output's own variables, the release variables included, are
+refused. Checkpoints do not
+store sampled values. A field read internally for beaching (\cref{ch:lifecycle}) is written only when it
+is also listed in \conf{sample\_vars}. On a rotated mesh (\cref{ch:frame}) scalars are sampled in the
+rotated frame and written as they are, which is correct for scalars; a vector component listed as a
+sample stays in the rotated frame.
+
+\section{Vertical placement by field shape}\label{sec:samp-shape}
+
+The vertical treatment is selected by the shape of the field array, which encodes
+where the field lives in the column. A two-dimensional field, one value per node, is
+sampled horizontally only. A mid-layer field, with one value per layer per node, is
+interpolated linearly between the two bracketing mid-layer depths --- the midpoints of
+the layers, computed from the fixed interface depths on a z-level mesh or from the
+column geometry of \cref{eq:sigma} on a sigma mesh, and clamped to the first and last midpoint. On a
+z-level mesh each neighbour is evaluated no deeper than its own floor, as for the vertical velocity
+(\cref{sec:vert-whoriz}). On a sigma mesh each neighbour column is evaluated at the particle's
+\emph{depth}, capped at the column thickness, and not along the particle's sigma surface as the
+vertical velocity is; on a sloping bottom the sample therefore mixes neighbouring sigma levels, a
+limitation that remains to be removed. An interface field, with one value per interface per node, is
+handled by delegating to the vertical-velocity machinery of \cref{sec:vert-wprofile,sec:vert-whoriz},
+including its sigma-following evaluation. In that delegation the integration-direction
+factor is fixed to $+1$, for the reason given in \cref{sec:samp-direction}.
+
+\section{Horizontal combination and element type}\label{sec:samp-horiz}
+
+The horizontal combination offers the same four methods as the vertical velocity ---
+\conf{nearest}, \conf{leastsq}, \conf{barycentric}, and \conf{idw} --- and shares their
+behaviour with respect to the mesh. As with the vertical velocity, only the
+\conf{barycentric} method depends on the element type, using the Wachspress weights of
+\cref{sec:hvel-quad} on a quadrilateral and the triangular weights on a triangle; the
+other three combine surrounding node values irrespective of element shape. Each method
+falls back to the nearest node's value when its stencil is unusable. A particle that is not alive
+(including a beached or a not-yet-released one) and a particle without a nearest node are recorded as
+missing.
+
+Model fields often carry fill values at coastal or below-bottom nodes, and a linear combination would
+propagate them. The fitting methods therefore skip non-finite neighbours: the least-squares fit uses
+the finite ones and needs at least three; inverse-distance weighting drops them; a barycentric element
+with a non-finite vertex falls back to the nearest node's value. Under \conf{nearest}, and under
+\conf{idw} for a particle that coincides with a node, the sample is that node's raw value, a fill value
+included, because the sample point then \emph{is} that node; the least-squares fit has no such case and
+returns the plane through the finite neighbours even at a node. Interface fields, which go through the vertical-velocity
+machinery, are not filtered.
+
+\section{Independence from the integration direction}\label{sec:samp-direction}
+
+Sampling is a measurement of the instantaneous field and must not change sign when the
+run is integrated backward in time. The engine enforces this by fixing the
+direction factor to $+1$ in the sampling path, in contrast to the advection path, where
+the factor $\tdir$ carries the forward or backward direction into the interpolated
+velocity (\cref{sec:arch-direction}). The distinction matters specifically for an
+interface-located scalar, which is sampled through the vertical-velocity machinery:
+without the override it would inherit the velocity's direction sign and report a
+sign-flipped value on a backward run. A sampled temperature is a temperature regardless
+of the direction of integration.
+
+\codeanchor{Sampling is implemented in \fn{sample\_field} and the direction-free combine
+\fn{\_combine\_horizontal} (\srcfile{numerics/sampling.py}); the per-record sampling is
+driven by \fn{\_sample\_record\_fields} (\srcfile{tracking.py}); each reader's
+\fn{read\_scalar\_fields} prepares the fields and serves the startup probe.}

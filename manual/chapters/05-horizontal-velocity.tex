@@ -1,0 +1,410 @@
+\chapter{Horizontal Velocity Interpolation}\label{ch:hvel}
+
+Once a particle has been located (\cref{ch:localization}), the horizontal velocity must be
+interpolated from the surrounding mesh values to the particle position. \textsf{KELP} provides
+three schemes, selected by the configuration key \conf{uv\_interp}: a \emph{barycentric} scheme,
+which blends the values at the vertices of the containing element; a \emph{least-squares} scheme
+(the default), which fits a plane to the velocities at the element centres around the nearest node;
+and an \emph{edge least-squares} scheme, which fits the plane to the containing element and its
+edge neighbours, with a wall condition at the coast. The schemes are matched to the storage layout
+of the velocity (\cref{sec:mesh-anatomy,tab:hvel-layouts}): the two least-squares schemes read
+element-centre values, so supplying node-layout velocity to either is refused at startup. This
+chapter gives the three schemes explicitly, including the local planar frames in which they compute,
+and states the accuracy each achieves.
+
+\begin{table}[t]
+\centering\footnotesize\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{58mm}>{\raggedright\arraybackslash}p{16mm}>{\raggedright\arraybackslash}p{50mm}@{}}
+\toprule
+velocity source & layout & admissible \conf{uv\_interp} \\
+\midrule
+FESOM2 \code{u}/\code{v}; FESOM-C element fields; HEALPix pixel geometry & element & \conf{leastsq}, \conf{edge\_leastsq}, \conf{barycentric} \\
+FESOM2 \code{unod}/\code{vnod}; FESOM-C node fields; HEALPix dual mesh; NEMO (C-grid faces averaged to T-points) & node & \conf{barycentric} \\
+\bottomrule
+\end{tabular}
+\caption{Velocity layouts by source and the interpolation schemes each admits. The layout is detected
+from the field's dimensions; a metadata-only probe before the output file is created and a backstop
+on the first step reject a mismatch with a message naming the fix.}
+\label{tab:hvel-layouts}
+\end{table}
+
+\section{Projection to a local plane}\label{sec:hvel-projection}
+
+All three schemes compute in a local planar frame rather than directly in longitude and latitude, so
+that the spherical geometry is treated correctly away from the equator and across the dateline. The
+two families use different frames.
+
+\paragraph{Least-squares family.} The frame is centred on the particle $(\lonx_p,\latx_p)$ and scaled
+by the metric at the particle's latitude,
+\begin{equation}\label{eq:hvel-projection}
+  z_0 = \cos\latx_p\cdot M, \qquad
+  x_k = (\lonx_k-\lonx_p)\,z_0, \qquad
+  y_k = (\latx_k-\latx_p)\,M ,
+\end{equation}
+with $M=\SI{111120}{\metre}$ per degree of latitude. The factor $\cos\latx_p$ is the essential
+spherical correction: it shrinks the longitudinal axis so that a degree of longitude and a degree of
+latitude map to their physical lengths. Across the dateline the plain least-squares scheme shifts an
+element centre by one full turn only when the raw difference $\lonx_k-\lonx_p$ exceeds $\pm180^\circ$,
+which leaves every stencil away from the seam bit-identical to the original arithmetic; the edge
+least-squares scheme wraps every difference to $[-180^\circ,180^\circ)$.
+
+\paragraph{Barycentric scheme.} The frame is centred on the element: its centre is the mean of the
+vertices, with the longitudes accumulated as wrapped differences from the first vertex so that an
+element straddling the dateline keeps its shape, and a point maps to
+\begin{equation}\label{eq:hvel-projection-bary}
+  x_k = \Delta\lonx_k \cdot \frac{\pi}{180}\, R \cos\latx_0, \qquad
+  y_k = (\latx_k-\latx_0)\cdot \frac{\pi}{180}\, R ,
+\end{equation}
+where $(\lonx_0,\latx_0)$ is the frame centre, $\Delta\lonx_k$ the wrapped longitude difference and
+$R$ the mesh's Earth radius. The weights computed below are ratios of areas in this plane and are
+therefore independent of $R$; the radius serves only to keep the coordinates dimensionally
+consistent.
+
+\codeanchor{The projections are performed inline in \fn{\_interp\_leastsq\_core},
+\fn{\_interp\_edge\_leastsq\_core} and \fn{\_interp\_barycentric\_core}
+(\srcfile{numerics/interpolate.py}).}
+
+\section{Barycentric interpolation}\label{sec:hvel-bary}
+
+The barycentric scheme is the one scheme that serves node-layout velocity. The value at the particle
+is the weighted average of the velocities at the vertices of the containing element, with weights
+equal to the barycentric coordinates of the particle within it (\cref{fig:bary}); we give the
+triangle here and the quadrilateral in \cref{sec:hvel-quad}. Let the projected triangle have vertices $1,2,3$ at
+$(x_i,y_i)$ carrying velocities $(u_i,v_i)$, and let the particle project to
+$(x_p,y_p)$. The barycentric coordinate $\bwt{i}$ is the area of the sub-triangle
+\emph{opposite} vertex $i$ --- the sub-triangle formed by the particle and the other
+two vertices --- divided by the area of the whole triangle:
+\begin{equation}\label{eq:bary-area}
+  \bwt{i} = \frac{\operatorname{area}(\text{sub-triangle opposite } i)}
+                 {\operatorname{area}(\text{triangle})}, \qquad
+  \bwt{1}+\bwt{2}+\bwt{3}=1 .
+\end{equation}
+A particle coinciding with vertex $i$ therefore has $\bwt{i}=1$ and the other weights
+zero, and a particle on an edge has zero weight for the opposite vertex; the weights
+vary continuously across element boundaries. In implemented form the weights are the
+signed-area ratios
+\begin{align}\label{eq:bary-explicit}
+  D    &= (y_2-y_3)(x_1-x_3)+(x_3-x_2)(y_1-y_3), \notag\\
+  \bwt{1} &= \frac{(y_2-y_3)(x_p-x_3)+(x_3-x_2)(y_p-y_3)}{D}, \\
+  \bwt{2} &= \frac{(y_3-y_1)(x_p-x_3)+(x_1-x_3)(y_p-y_3)}{D}, \qquad
+  \bwt{3} = 1-\bwt{1}-\bwt{2}, \notag
+\end{align}
+in which $D$ is twice the signed area of the triangle; a triangle whose $|D|$ falls
+below a small tolerance is treated as degenerate and the interpolation reports
+failure rather than dividing by it.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.35]
+  \coordinate (N1) at (0.0,0.0);
+  \coordinate (N2) at (4.0,0.6);
+  \coordinate (N3) at (1.6,3.1);
+  \coordinate (P)  at (1.95,1.25);
+  % sub-triangles, one shade each
+  \fill[lagblue!12]  (P)--(N2)--(N3)--cycle;   % opposite N1 -> w1
+  \fill[lagelem!16]  (P)--(N3)--(N1)--cycle;   % opposite N2 -> w2
+  \fill[laggreen!14] (P)--(N1)--(N2)--cycle;   % opposite N3 -> w3
+  \draw[meshedge,line width=1pt] (N1)--(N2)--(N3)--cycle;
+  \draw[densely dotted,gray!70] (P)--(N1) (P)--(N2) (P)--(N3);
+  % sub-area labels
+  \node[font=\small,lagblue!60!black]  at (2.45,1.75) {$A_1\!\propto\!\bwt{1}$};
+  \node[font=\small,lagelem!65!black]  at (1.05,1.35) {$A_2\!\propto\!\bwt{2}$};
+  \node[font=\small,laggreen!50!black] at (2.0,0.55)  {$A_3\!\propto\!\bwt{3}$};
+  % velocity arrows at nodes
+  \draw[velarrow] (N1)--++(0.55,0.22); \draw[velarrow] (N2)--++(0.5,0.35);
+  \draw[velarrow] (N3)--++(0.45,0.3);
+  % nodes & drifter
+  \node[meshnode] at (N1) {}; \node[meshnode] at (N2) {}; \node[meshnode] at (N3) {};
+  \node[drifter] at (P) {};
+  \node[nodelbl,below left=-1pt of N1]  {$n_1:(u_1,v_1)$};
+  \node[nodelbl,right=1pt of N2]        {$n_2:(u_2,v_2)$};
+  \node[nodelbl,above=0pt of N3]        {$n_3:(u_3,v_3)$};
+  \node[font=\footnotesize,kelp!70!black,below right=-1pt of P] {drifter $P$};
+\end{tikzpicture}
+\caption{Barycentric interpolation of node-layout velocity. The three triangle
+vertices $n_1,n_2,n_3$ carry the node velocities $(u_i,v_i)$. The drifter $P$
+splits the triangle into three sub-triangles; the weight $\bwt{i}$ is the area of
+the sub-triangle \emph{opposite} vertex $i$ divided by the total area, so the
+nearer the particle lies to a vertex, the larger that vertex's weight. The
+interpolated velocity is $\bwt{1}(u_1,v_1)+\bwt{2}(u_2,v_2)+\bwt{3}(u_3,v_3)$.}
+\label{fig:bary}
+\end{figure}
+
+The interpolated velocity is then the weighted sum of the three vertex velocities,
+multiplied by the integration-direction factor of \cref{sec:arch-direction}:
+\begin{equation}\label{eq:bary-blend}
+  (U,V) = \tdir \sum_{i=1}^{3} \bwt{i}\,(u_i,v_i).
+\end{equation}
+For node-layout fields the vertex velocity $(u_i,v_i)$ is read directly from the
+node. For element-layout fields handled through the same routine, each vertex value
+is first formed as the area-weighted average of the velocities of the elements
+sharing that vertex, $u_n=\sum_{e\ni n}A_e u_e\,/\sum_{e\ni n}A_e$ (a vertex whose areas sum to zero
+fails the interpolation), and the blend \cref{eq:bary-blend} is applied to those vertex values. The scheme reproduces a
+constant field exactly in both layouts and a linearly varying field exactly in the
+node layout; in the element layout the vertex-averaging step makes it
+smoothing rather than linearly exact. The interpolated field is continuous across element edges.
+A quadrilateral element is handled by the same blend with Wachspress coordinates
+\citep{warren1996barycentric,floater2003mvc} in place of the triangular weights of
+\cref{eq:bary-area} (\cref{sec:hvel-quad}).
+
+\codeanchor{The barycentric blend is \fn{\_interp\_barycentric\_core}
+(\srcfile{numerics/interpolate.py}); the triangle weights
+\cref{eq:bary-explicit} are \fn{\_barycentric\_weights\_tri} and the Wachspress
+generalization \fn{\_wachspress\_weights\_quad} (\srcfile{core/mesh.py}).}
+
+\section{Least-squares interpolation (element layout)}\label{sec:hvel-leastsq}
+
+For element-layout velocity, the default scheme fits a plane to the velocities of
+the element centres surrounding the nearest node and evaluates that plane at the
+particle (\cref{fig:leastsq}). The stencil is the one-ring of elements about the
+nearest node; their centres, carrying the element velocities $(u_e,v_e)$, are the
+data. With the plane written $f(x,y)=a_0+a_1 x + a_2 y$ in the particle-centred
+frame of \cref{eq:hvel-projection} (so the particle sits at the origin), the
+coefficients minimize the residual
+\begin{equation}\label{eq:leastsq}
+  \min_{a_0,a_1,a_2}\ \sum_{e} \bigl(a_0 + a_1 x_e + a_2 y_e - f_e\bigr)^2 ,
+\end{equation}
+and because the frame is centred on the particle the interpolated value is simply
+the constant term, $U=\tdir\,a_0^{(u)}$ and $V=\tdir\,a_0^{(v)}$. The minimization
+reduces to a symmetric $3\times3$ system of normal equations, solved directly by
+Cramer's rule. Centring the coordinates on the particle is not cosmetic: it avoids the
+catastrophic cancellation that would arise from forming the normal equations with
+raw longitude and latitude values. The system is declared singular, and the interpolation fails, when
+\begin{equation}\label{eq:leastsq-guard}
+  |\det A|<10^{-30}\quad\text{or}\quad |\det A|<10^{-12}\,|a_{11}a_{22}a_{33}| ,
+\end{equation}
+the second test being relative to the scale of the metric entries: a stencil of fewer than three
+non-collinear centres --- a coastal node with only two elements, for instance --- has a determinant
+of pure rounding noise, which an absolute test alone would pass. The same guard protects the
+plane fits of the vertical velocity, the column height and the diffusivity; the scalar-sampling fit uses
+an absolute threshold of $10^{-12}$ with the same relative test. The scheme is
+exact for fields varying linearly over the stencil. Its stencil is the one-ring of the \emph{nearest
+node}, so the interpolated field jumps where the nearest node changes, and the anchor must be exact
+for two runs to agree (\cref{sec:loc-exact}).
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.2]
+  \coordinate (C)  at (2.00,1.55);
+  \coordinate (p1) at (0.35,1.50);
+  \coordinate (p2) at (1.15,0.20);
+  \coordinate (p3) at (2.95,0.35);
+  \coordinate (p4) at (3.70,1.70);
+  \coordinate (p5) at (2.75,2.95);
+  \coordinate (p6) at (1.00,2.80);
+  \foreach \a/\b in {p1/p2,p2/p3,p3/p4,p4/p5,p5/p6,p6/p1}{
+     \fill[meshface] (C)--(\a)--(\b)--cycle;
+     \draw[meshedge] (C)--(\a); \draw[meshedge] (\a)--(\b);}
+  % element centres of the one-ring (the leastsq data)
+  \foreach \a/\b in {p1/p2,p2/p3,p3/p4,p4/p5,p5/p6,p6/p1}
+     \node[elemcentre] at ($ 0.3333*(C)+0.3333*(\a)+0.3333*(\b) $) {};
+  \foreach \p in {C,p1,p2,p3,p4,p5,p6} \node[meshnode] at (\p) {};
+  \node[drifter] (D) at (2.25,1.5) {};
+  \node[nodelbl,above left=0pt of C] {nearest node};
+  \node[elemlbl] at (3.15,1.05) {element centres $(u_e,v_e)$};
+  \node[font=\footnotesize,kelp!70!black,below=1pt of D] {drifter};
+\end{tikzpicture}
+\caption{Least-squares interpolation of element-layout velocity. The data are the
+velocities at the centres (orange squares) of the one-ring of elements about the
+nearest node. A plane $f=a_0+a_1x+a_2y$ is fitted to them in a frame centred on the
+drifter, so the interpolated velocity is the fitted constant $a_0$. The scheme is
+exact for linearly varying fields over this stencil.}
+\label{fig:leastsq}
+\end{figure}
+
+The schemes are tied to the storage layout, and the engine enforces the match rather than silently
+producing a wrong answer. Because both least-squares schemes index velocities at element centres,
+supplying them with node-layout velocities such as \conf{unod}/\conf{vnod} is a category error; the
+engine detects the mismatch from the field's dimensions and raises a configuration error at startup,
+with the message that node-based velocities require \conf{uv\_interp}${}={}$\conf{barycentric}. The
+check is performed both during a metadata-only probe before any data is read and as a backstop on the
+first step, so the run fails fast and informatively rather than midway through.
+
+\codeanchor{The plane fit is \fn{\_interp\_leastsq\_core}
+(\srcfile{numerics/interpolate.py}); the layout-compatibility check that rejects
+node velocities under both least-squares schemes is \fn{\_validate\_uv\_compat}
+(\srcfile{tracking.py}), fed by each reader's \fn{probe\_uv\_layout}.}
+
+\section{Edge least-squares interpolation}\label{sec:hvel-edge}
+
+The edge least-squares scheme (\conf{uv\_interp: edge\_leastsq}) fits the same plane as
+\cref{eq:leastsq}, in the particle-centred frame, but over a different stencil: the centre of the
+element that contains the particle and the centres of the elements across each of its edges --- four
+points for a triangle, five for a quadrilateral (\cref{fig:edge-lsq}). The stencil follows the
+containing element rather than the nearest node, as in the finite-volume discretisation of the FESOM
+models, and it needs the containing element, so a particle outside every element fails the
+interpolation. The plane is exact for a linear field in the interior.
+
+At the coast an edge has no neighbour. It contributes a \emph{ghost} point instead: the own centre
+$\mathbf{c}$ mirrored across the edge, $\mathbf{g}=2\mathbf{f}-\mathbf{c}$, with $\mathbf{f}$ the foot of
+$\mathbf{c}$ on the edge. With $\hat{\mathbf{t}}$ the unit tangent of the edge and $\mathbf{u}$ the own
+velocity, the ghost carries
+\begin{equation}\label{eq:edge-ghost}
+  \mathbf{u}_g =
+  \begin{cases}
+    2(\mathbf{u}\cdot\hat{\mathbf{t}})\,\hat{\mathbf{t}}-\mathbf{u} & \text{free slip (default)},\\
+    -\mathbf{u} & \text{no slip},
+  \end{cases}
+\end{equation}
+selected by \conf{edge\_leastsq\_bc}. The free-slip ghost is the mirror image of the own velocity ---
+its tangential component kept and its normal component reversed --- so the fitted plane carries a
+flow parallel to the wall exactly and damps the flow through it. The no-slip ghost makes the plane
+vanish near the wall; being a single plane fitted to both sides, it overshoots on the interior side of
+a wall element and can reverse the flow near a corner between two walls, a property of the fit rather
+than a defect. A boundary edge of zero length contributes no point. The stencil stays well conditioned
+even on very thin elements, because the mirrored ghosts span both directions.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.25]
+  \coordinate (A) at (0,0); \coordinate (B) at (3,0); \coordinate (C) at (1.3,2.2);
+  \coordinate (D) at (3.6,2.3); \coordinate (E) at (-1.2,1.8);
+  \fill[pattern=north east lines,pattern color=gray!45] (-1.4,0)--(4.0,0)--(4.0,-1.25)--(-1.4,-1.25)--cycle;
+  \fill[meshface] (B)--(C)--(D)--cycle; \fill[meshface] (C)--(A)--(E)--cycle;
+  \fill[hilface] (A)--(B)--(C)--cycle;
+  \draw[meshedge] (B)--(D)--(C) (C)--(E)--(A);
+  \draw[laggreen,line width=1.2pt] (-1.4,0)--(4.0,0);
+  \node[font=\footnotesize,laggreen!70!black,fill=white,inner sep=1pt,anchor=north west] at (-1.35,-0.08) {coast (boundary edge)};
+  \foreach \p in {A,B,C,D,E} \node[meshnode] at (\p) {};
+  \node[elemcentre] (c) at (1.433,0.733) {};
+  \node[elemcentre] at (2.633,1.5) {};
+  \node[elemcentre] at (0.033,1.333) {};
+  \node[elemcentre,fill=white] (g) at (1.433,-0.733) {};
+  \draw[densely dotted,gray] (c)--(g);
+  \node[circle,fill=black,inner sep=0.8pt] at (1.433,0) {};
+  \node[font=\footnotesize,anchor=south west] at (1.46,0.0) {$\mathbf{f}$};
+  \draw[velarrow] (c)--++(0.55,-0.28);
+  \draw[velarrow] (g)--++(0.55,0.28);
+  \node[font=\footnotesize,anchor=east] at (1.36,0.78) {$\mathbf{c}$};
+  \node[font=\footnotesize,fill=white,inner sep=1pt,anchor=east] at (1.3,-0.78) {$\mathbf{g}=2\mathbf{f}-\mathbf{c}$};
+  \node[drifter] at (1.75,1.05) {};
+  \node[font=\footnotesize,fill=white,inner sep=1pt,anchor=west] at (2.1,-0.55) {$\mathbf{u}_g=2(\mathbf{u}\cdot\hat{\mathbf{t}})\hat{\mathbf{t}}-\mathbf{u}$};
+  \node[elemlbl,anchor=west] at (2.75,1.55) {neighbour centres};
+\end{tikzpicture}
+\caption{The edge least-squares stencil. The drifter lies in the shaded triangle; the plane is fitted
+to its centre $\mathbf{c}$ and the centres of the elements across its two interior edges. Its third
+edge is on the coast and contributes a ghost at the mirror image $\mathbf{g}$ of $\mathbf{c}$, carrying
+the mirrored velocity: the component along the wall is kept and the component into the wall reversed
+(free slip), or the whole velocity reversed (no slip).}
+\label{fig:edge-lsq}
+\end{figure}
+
+\codeanchor{\fn{\_interp\_edge\_leastsq\_core} (\srcfile{numerics/interpolate.py}); the edge
+neighbours are \fn{build\_elem\_neighbors} (\srcfile{core/mesh.py}), built once when the run
+starts.}
+
+\section{Interpolation on mixed meshes: quadrilateral elements}\label{sec:hvel-quad}
+
+The barycentric scheme of \cref{sec:hvel-bary} generalizes from the triangular meshes of FESOM2 to
+meshes with quadrilaterals: the mixed meshes of FESOM-C, the dual mesh built from a HEALPix grid
+(mostly quadrilaterals; an all-wet sphere has exactly eight triangles), the pixel geometry of a
+HEALPix grid and the meshes built from structured NEMO grids (quadrilaterals only). Every horizontal
+interpolator is split into a \emph{geometric weight stage}, which depends on the number of vertices of
+the containing element, and a \emph{value stage}, which depends only on the field layout. The plain
+least-squares scheme bypasses the geometric stage entirely --- it reads one velocity per element
+centre --- and is identical on triangles and quadrilaterals; the edge least-squares scheme differs only
+in the number of edges.
+
+Before the weight stage, the element's vertices are compacted: the $-1$ padding is removed, and a
+triangle that FESOM-C has stored as a quadrilateral with a repeated leading vertex is reduced to its
+three distinct vertices. A triangle on a mixed mesh is therefore interpolated by the triangular
+weights of \cref{eq:bary-explicit}, bit-for-bit as on a pure FESOM2 mesh; only a genuine four-vertex
+element takes the quadrilateral path.
+
+For a quadrilateral the weights are the Wachspress generalized barycentric coordinates
+\citep{warren1996barycentric,floater2003mvc}, the natural analogue of \cref{eq:bary-area} for a convex
+polygon (\cref{fig:wachspress}). With the four vertices $u_1,\dots,u_4$ in cyclic order, the particle
+$p$, and the doubled signed areas
+\begin{equation}\label{eq:wachspress}
+  A_k = 2\operatorname{area}(p,u_k,u_{k+1}), \qquad
+  C_k = 2\operatorname{area}(u_{k-1},u_k,u_{k+1}),
+\end{equation}
+the classical weight is $C_k/(A_{k-1}A_k)$, normalized over the vertices. The engine uses its
+\emph{product form}, the classical weight multiplied by $A_1A_2A_3A_4$,
+\begin{equation}\label{eq:wachspress-product}
+  \bwt{k} = \frac{C_k\,A_{k+1}\,A_{k+2}}{\sum_{j} C_j\,A_{j+1}\,A_{j+2}} ,
+\end{equation}
+which contains no division by an area that vanishes on an edge: on an edge it reduces exactly to
+linear interpolation along that edge and at a vertex to that vertex's indicator. Each term carries
+three signed areas, so a clockwise element negates every term and the normalization cancels it; no
+orientation handling is needed. The coordinates reproduce a linear field exactly, are smooth in the
+interior and give every vertex a non-zero weight.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.25]
+  \coordinate (v1) at (0.2,0.2);
+  \coordinate (v2) at (3.6,0.0);
+  \coordinate (v3) at (3.2,2.9);
+  \coordinate (v4) at (0.0,2.6);
+  \coordinate (P)  at (1.70,1.35);
+  \fill[lagblue!12]  (P)--(v1)--(v2)--cycle;
+  \fill[lagelem!16]  (P)--(v2)--(v3)--cycle;
+  \fill[laggreen!14] (P)--(v3)--(v4)--cycle;
+  \fill[gray!15]     (P)--(v4)--(v1)--cycle;
+  \draw[meshedge,line width=1pt] (v1)--(v2)--(v3)--(v4)--cycle;
+  \draw[densely dotted,gray!70] (P)--(v1) (P)--(v2) (P)--(v3) (P)--(v4);
+  \node[font=\small] at (1.83,0.50) {$A_1$};
+  \node[font=\small] at (2.78,1.42) {$A_2$};
+  \node[font=\small] at (1.63,2.20) {$A_3$};
+  \node[font=\small] at (0.70,1.38) {$A_4$};
+  \node[meshnode] at (v1) {}; \node[meshnode] at (v2) {};
+  \node[meshnode] at (v3) {}; \node[meshnode] at (v4) {};
+  \node[drifter] at (P) {};
+  \node[nodelbl,below left=-1pt of v1]  {$u_1$};
+  \node[nodelbl,below right=-1pt of v2] {$u_2$};
+  \node[nodelbl,above right=-1pt of v3] {$u_3$};
+  \node[nodelbl,above left=-1pt of v4]  {$u_4$};
+  \node[font=\footnotesize,kelp!70!black,right=1pt of P] {$p$};
+\end{tikzpicture}
+\caption{Wachspress interpolation on a quadrilateral element. The drifter $p$ splits the element into
+four fan triangles of doubled area $A_1,\dots,A_4$. The weight at vertex $k$ is proportional to
+$C_k A_{k+1} A_{k+2}$, where $C_k$ is the doubled area of the corner triangle $(u_{k-1},u_k,u_{k+1})$:
+the two fan triangles \emph{not} adjacent to vertex $k$ grow as $p$ approaches it.}
+\label{fig:wachspress}
+\end{figure}
+
+The formula needs no guard and has no fall-back because quadrilaterals are required to be convex:
+the FESOM-C reader, the builder of structured-grid meshes and the HEALPix builders check every
+quadrilateral when the mesh is loaded and name the offending elements if one is not convex.
+
+The \emph{containment} test of \cref{sec:loc-contain}, which decides whether a particle lies inside a
+quadrilateral, uses a fan of triangles --- never the Wachspress construction, which enters only the
+weight stage after containment has been established. The same vertex-count branch governs the
+\conf{barycentric} option of the vertical-velocity combine (\cref{sec:vert-whoriz}) and of scalar
+sampling (\cref{ch:sampling}); the \conf{nearest}, \conf{idw} and \conf{leastsq} options of those
+routines are independent of element shape. Element areas enter only when an element-layout vertex
+value is formed as an area-weighted average (\cref{sec:hvel-bary}). They are read from the model's mesh
+file when it provides them (FESOM2 mesh diagnostics do; ASCII meshes and regional extracts do not); otherwise they are computed on the sphere as the
+spherical excess of the element's fan of triangles times the square of the mesh radius. Because they
+appear only as ratios, their absolute scale is immaterial.
+
+\section{Common properties}\label{sec:hvel-common}
+
+\paragraph{Three dimensions.} In a three-dimensional run the horizontal velocity is piecewise constant
+in the vertical: each particle reads the layer found in \cref{sec:vert-layer}, and the scheme is applied
+to that layer's field without vertical interpolation.
+
+\paragraph{Time.} Between two snapshots the time-aware variants blend the two fields in time for each
+element or vertex they read, before the unchanged spatial formula (\cref{ch:temporal,ch:fused}).
+
+\paragraph{Failure.} A scheme that cannot interpolate --- a singular fit, no containing element, a
+degenerate triangle --- reports failure; the particle's step is undone, its status set to
+\code{OUTSIDE} and its failure reason to an interpolation failure (\cref{ch:lifecycle}).
+
+\paragraph{Element tracking.} With \conf{elem\_search: walk} (\cref{sec:loc-walk}) the barycentric and
+edge least-squares schemes receive the containing element from the walk and skip their own search; the
+plain least-squares scheme does not use it.
+
+\codeanchor{The weight dispatcher is \fn{\_polygon\_weights}; the triangular and Wachspress weights are
+\fn{\_barycentric\_weights\_tri} and \fn{\_wachspress\_weights\_quad}; the convexity check is
+\fn{validate\_quad\_convexity} with \fn{find\_nonconvex\_quads}; element areas are
+\fn{build\_elem\_areas}; all in \srcfile{core/mesh.py}. The vertex compaction is in
+\fn{\_interp\_barycentric\_core} (\srcfile{numerics/interpolate.py}).}
+
+\codenote{The projections use three radii: the barycentric horizontal-velocity kernel uses the mesh
+radius, the containment test and the vertical-velocity and scalar barycentric kernels use
+\SI{6371000}{\metre}, and the least-squares family uses \SI{111120}{\metre} per degree. The weights
+are ratios of areas in the projected plane and the least-squares value is the fitted constant, so the
+interpolated values do not depend on the radius; we record the difference only for fidelity to the
+source.}

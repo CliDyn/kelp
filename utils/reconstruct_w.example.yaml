@@ -1,0 +1,37 @@
+# Example config for W velocity reconstruction utility.
+# See docs/w_reconstruction.md for physics and derivation.
+#
+# Usage:
+#   python utils/reconstruct_w.py utils/reconstruct_w.example.yaml
+
+source:
+  meshpath: path/to/fesom.mesh.diag.nc   # or .zarr
+  u_path: path/to/u.fesom.2020.nc
+  v_path: path/to/v.fesom.2020.nc
+  ssh_path: path/to/ssh.fesom.2020.nc    # can be same as u_path if combined
+  w_ale_path: null                         # optional: path to w_ALE output
+
+output:
+  dir: path/to/output/
+  format: netcdf   # netcdf or zarr
+  # filename: w.reconstructed.nc  # optional, auto-generated if omitted
+
+# Method:
+#   divergence — Variant A: integrate continuity equation
+#   ale        — Variant B: heuristic ALE correction (requires w_ale_path)
+#   auto       — (default) always compute divergence; if w_ale available, also compute
+#                ALE variant and print comparison diagnostics
+method: auto
+
+# Apply linear bottom correction so w(H) = 0
+correct_bottom: true
+
+# Use depth-dependent nodal area from mesh diag (Tier 2, recommended).
+# If false, uses approximate constant area (Tier 1).
+use_nod_area: true
+
+# Limit depth levels (null = all)
+max_levels: null
+
+# Time range [start, stop] indices (null = all timesteps)
+time_range: null

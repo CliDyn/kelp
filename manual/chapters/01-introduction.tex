@@ -1,0 +1,144 @@
+\chapter{Introduction}\label{ch:intro}
+
+\textsf{KELP} is a Lagrangian particle-tracking engine for the velocity
+fields produced by unstructured-mesh ocean circulation models, with first-class
+support for the FESOM family: the Finite-volumE Sea ice--Ocean Model in its second
+version \citep[FESOM2;][]{danilov2017fesom2}, on purely triangular meshes, and its
+coastal relative FESOM-C, on mixed triangular--quadrilateral meshes. It also reads ocean fields
+remapped to the HEALPix grid and, in a first two-dimensional version, structured NEMO grids. Given a time sequence of stored model
+velocity snapshots and a set of release positions, it integrates the trajectories
+of passive particles either forward or backward in time, optionally in three
+dimensions and optionally subject to a stochastic eddy-diffusion term. This manual
+documents the numerical methods that the engine implements and links each method
+to the Python source that realizes it.
+
+\section{The Lagrangian transport problem}\label{sec:intro-lagrangian}
+
+In the Lagrangian description of transport one follows individual fluid parcels
+along their paths, in contrast to the Eulerian description, which records the flow
+at fixed locations. A passive particle carried by a velocity field
+$\velvec(\pos,t)$ obeys the ordinary differential equation
+\begin{equation}\label{eq:lagrangian-ode}
+  \frac{\dd \pos}{\dd t} = \velvec\!\bigl(\pos(t),\,t\bigr),
+  \qquad \pos(t_0)=\pos_0 ,
+\end{equation}
+where the position $\pos=(\lonx,\latx,\depx)$ collects longitude, latitude and
+depth, and the velocity $\velvec=(u,v,\Wvel)$ collects the two horizontal
+components and the vertical component. We adopt throughout the convention that
+depth $\depx$ and vertical velocity $\Wvel$ are positive downward, so that a
+positive $\Wvel$ deepens a particle. The particle is passive: it does not modify
+the flow, and \cref{eq:lagrangian-ode} is integrated as a one-way coupling from
+the stored model fields to the trajectory.
+
+Solving \cref{eq:lagrangian-ode} numerically poses two distinct subproblems.
+First, the right-hand side must be evaluated at the particle position $\pos(t)$,
+which in general falls between the mesh vertices at which the model stores its
+fields and between the discrete times at which snapshots are available; this
+requires interpolation in space and in time. Second, the differential equation
+must be advanced from one time level to the next with a controlled truncation
+error; this requires a time-integration scheme. The spatial-interpolation
+subproblem is the subject of \cref{ch:hvel,ch:vertical,ch:sampling}, the
+temporal-reconstruction subproblem of \cref{ch:temporal}, and the
+time-integration subproblem of \cref{ch:integration}. When the stochastic term is included, a
+backward run integrates the adjoint process --- the advection reversed, the diffusion not --- so that
+backward integration remains a well-posed random walk (\cref{ch:diffusion}). The remaining chapters treat
+the supporting machinery: locating a particle on the mesh (\cref{ch:localization}),
+the stochastic-diffusion extension of \cref{eq:lagrangian-ode}
+(\cref{ch:diffusion}), the treatment of domain boundaries and the sea floor
+(\cref{ch:lifecycle}), and the reading, writing, configuration and verification of
+the whole (\crefrange{ch:input}{ch:performance}); a final part describes the agent skills through which
+runs are set up and analysed (\cref{ch:skills}).
+
+For a broad survey of Lagrangian ocean analysis --- its applications, its
+numerical pitfalls, and the conventions adopted in the field --- we refer the
+reader to \citet{vansebille2018lagrangian}; the present manual is concerned
+specifically with how \textsf{KELP} solves \cref{eq:lagrangian-ode} on an
+unstructured mesh.
+
+\section{Unstructured-mesh ocean models and the FESOM family}\label{sec:intro-fesom2}
+
+FESOM2 discretizes the ocean horizontally on an unstructured triangular mesh and
+vertically on a set of fixed depth levels \citep{danilov2017fesom2}; its coastal
+relative FESOM-C uses a \emph{mixed} mesh, in which an element may be a triangle or
+a quadrilateral, together with a terrain-following vertical coordinate.
+\textsf{KELP} supports both, and represents the other sources on the same kind of mesh: a HEALPix
+product becomes either a mesh whose nodes are the pixel centres (quadrilaterals, with triangles at the
+eight points where only three pixels meet) or a mesh whose elements are the pixels themselves, and a
+structured NEMO grid becomes a mesh of quadrilaterals (\cref{ch:mesh}). We therefore treat an element as
+a triangle or a quadrilateral throughout. The unstructured
+horizontal mesh permits the spatial resolution to vary smoothly across the domain
+--- fine where the dynamics demand it, coarse elsewhere --- but it removes the
+regular row-and-column addressing of a latitude--longitude grid. As a result,
+identifying the element that contains a given particle position is itself a
+search problem rather than an arithmetic indexing operation; we treat it in
+\cref{ch:localization}.
+
+A second feature of the unstructured mesh bears directly on interpolation: the
+model stores different quantities at different geometric locations. The two
+horizontal velocity components may be defined either at the element vertices
+(``node-layout'' fields, such as the FESOM2 variables \conf{unod} and
+\conf{vnod}, the HEALPix pixel-centre mesh and the NEMO grids) or at the element centroids
+(``element-layout'' fields, such as the FESOM2 variables \conf{u} and \conf{v} and the FESOM-C
+velocities). The
+vertical velocity and other interface quantities are defined at the vertical
+interfaces that bound the depth layers, while scalar fields such as temperature
+and salinity are defined at the nodes. Each storage location calls for a
+different interpolation stencil, a distinction that recurs throughout
+\crefrange{ch:hvel}{ch:sampling} and that we render explicitly in every schematic.
+
+The engine ships with ready configurations that make these choices concrete: global two-dimensional
+runs on node velocities, a regional three-dimensional run with vertical velocity and sampled temperature
+and salinity, a structured-grid run and HEALPix runs. Where this manual quotes a size it is usually that of
+the FESOM2 \emph{core2} global mesh (\num{126858} nodes, 48 vertical interfaces reaching to about
+\SI{6250}{\metre}). The object of this document is the engine, not any experiment run with it.
+
+\section{Scope and purpose}\label{sec:intro-scope}
+
+This manual is a numerical and implementation reference. For each component we
+state the governing equations, give the discrete formulae exactly as implemented
+(including the sign conventions, the clamping rules, and the degenerate-case
+fallbacks that a working code must contain), illustrate the geometry of the
+computation with a schematic, and cite the source location. We do not report
+scientific results, and we do not attempt to assess the physical realism of any
+particular simulation; our goal is to characterize what the engine computes and
+how, not to interpret the trajectories it produces.
+
+The engine is accompanied by an extensive automated test suite of about \num{2500} tests. The large majority of these guard low-level invariants --- array
+shapes, configuration parsing, byte-for-byte reproducibility --- and are not
+individually informative. A small number, by contrast, verify the numerical
+physics against independent references: convergence under step refinement in
+time-dependent eddy flows, conservation of a
+vertical streamfunction under continuity-consistent flow, reversibility of
+the integrator under time reversal (to within a small tolerance), and agreement with closed-form analytic flows.
+We discuss these by name in \cref{ch:validation} as evidence that the numerics
+behave as specified, without reproducing their internals.
+
+\section{How this manual is organized}\label{sec:intro-org}
+
+The chapters follow the order in which the engine processes a single integration
+step, so that reading the manual front to back traces one time step through the
+solver. \Cref{ch:arch} gives the overall architecture --- the data structures and
+the per-step pipeline --- and serves as the map to which the later chapters
+refer. The pairs and groups that follow treat, in turn, the mesh and particle
+localization; spatial interpolation of velocity and of scalars; time integration
+and temporal reconstruction; stochastic diffusion and the particle lifecycle; and
+finally the data, configuration, validation and performance layers. A last part, ``Working with
+KELP'', describes the agent skills that turn a described experiment into a run and its output into
+figures and statistics (\cref{ch:skills}). The appendices provide an exhaustive configuration-key reference, the symbol list,
+the source-code map, and a glossary. Readers seeking a particular topic should
+consult the front-matter guide ``How to use this manual'' or the source-code map
+in \cref{app:codemap}.
+
+\section{Conventions}\label{sec:intro-conv}
+
+We summarize the principal conventions here and state them in full in the
+front-matter section ``Notation and conventions''. Depth and vertical velocity are
+positive downward. Angles are in degrees and velocities in SI units unless stated
+otherwise. The integration direction is carried by the factor $\tdir=\pm1$, with
+the time step $\dt$ kept positive. The spherical metric converts advective velocities to
+angular increments through $\zzero=\cos(\latx)\,\Mlat$ and
+$\Mlat=\SI{111120}{\metre\per\degree}$; diffusive kicks move along great circles instead
+(\cref{sec:diff-sphere}). Model files that store the vertical velocity positive upward are converted when
+they are read (\cref{sec:vert-wsign}). Fields are identified throughout as living
+at nodes, at element centres, or at vertical interfaces. The complete symbol list
+is given in \cref{app:notation}.

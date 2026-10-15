@@ -1,0 +1,211 @@
+\chapter{Agent Skills: the Operating Layer}\label{ch:skills}
+
+The preceding chapters describe what the engine computes. This chapter describes the layer
+through which the engine is most often \emph{operated}: a set of \emph{agent skills}, plain
+Markdown instruction files that an AI coding agent loads when a request matches them, and that
+turn a described task --- ``release particles near a point, backward, in three dimensions'',
+``show where the decades differ'', ``why is this run slow'' --- into the concrete artefacts the
+engine consumes: seeds, a configuration, job scripts, an analysis script, a figure script. The
+skills contain no numerics of their own. They encode the order of operations and the checks that
+past campaigns showed to be necessary, and they point to the documentation of
+\cref{ch:arch,ch:input,ch:output,ch:performance} for everything else.
+
+\section{What a skill is}\label{sec:skills-what}
+
+A skill is a directory under \srcfile{.claude/skills/} whose entry point is a file
+\srcfile{SKILL.md}. The file opens with a two-field header: a \emph{name} and a
+\emph{description}. The description states only \emph{when} the skill applies --- the requests,
+symptoms and boundary cases that should trigger it --- and deliberately does not summarise the
+procedure, because an agent that finds the procedure in the description tends to act on the
+summary and skip the body. The body is the procedure: an ordered workflow, the decisions that need
+judgement with the condition that selects each option, and the checks that must hold. Longer
+material --- templates, complete code recipes, measured tables, the history behind a rule --- lives
+in files under \srcfile{references/} next to the skill, one level deep, and is read only when the
+step that needs it names it. Two checks are shipped as runnable programs under \srcfile{scripts/}
+(\cref{sec:skills-scripts}). An agent therefore reads a short entry file for every task and the
+detail only for the task at hand.
+
+\codeanchor{The seven skills are \srcfile{.claude/skills/kelp-run/}, \srcfile{kelp-config/},
+\srcfile{kelp-experiment/}, \srcfile{kelp-analysis/}, \srcfile{kelp-visualize/},
+\srcfile{kelp-diagnose/} and \srcfile{kelp-bench/}, each with a \srcfile{SKILL.md}; reference files in
+their \srcfile{references/} subdirectories; the two check scripts in
+\srcfile{kelp-run/scripts/}. The figure helpers the visualisation skill relies on are in
+\srcfile{gallery/figure\_helpers.py}.}
+
+\section{The seven skills}\label{sec:skills-seven}
+
+\Cref{tab:skills} lists the skills with the request that triggers each and what it hands back.
+They divide the work along the life of a study: setting up one run, writing its configuration,
+organising a campaign of many jobs, reading the output, drawing it, diagnosing performance, and
+benchmarking a machine.
+
+\begin{table}[t]
+\centering\footnotesize\setlength{\tabcolsep}{4pt}
+\caption{The KELP agent skills. ``Hands back'' names the artefacts a skill produces; every skill
+that prepares a computation stops before launching it (\cref{sec:skills-gate}).}
+\label{tab:skills}
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{29mm}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X@{}}
+\toprule
+Skill & Use it when & Hands back \\
+\midrule
+\code{kelp-run} & a tracking experiment is described (release location, direction, 2-D or 3-D,
+diffusion, beaching, sampling, time window), or a dataset is used for the first time &
+seed generator, configuration, verification commands and the run command; for a new dataset the
+vertical-velocity sign and record-0 checks \\
+\code{kelp-config} & a YAML configuration is written, edited, reviewed or debugged, or the engine
+opened the wrong file, ignored a key or failed at startup & the configuration, a validation script
+for generated or campaign configurations, a decision summary \\
+\code{kelp-experiment} & an experiment is big (millions of particles, several processes or nodes),
+long (beyond one job's wall clock), on a large mesh that may need cropping, or a speed and memory
+showcase & a campaign folder with its rules file, report skeleton, ledger, config generator and
+config check, job scripts, the resumable chain driver \\
+\code{kelp-analysis} & anything is read or computed from trajectory output (maps, cohort fractions,
+section crossings, run comparisons, reversibility, time-step ladders, costs from logs) & an
+analysis script with the reading pattern, masks and denominators, and a plan whose numbers are
+placeholders until the script prints them \\
+\code{kelp-visualize} & a figure, animation or video is made from trajectory output or its caches,
+or colours, palettes, labels or render speed need changing & a render script (extract, cache,
+render), its commands, a caption file for each figure \\
+\code{kelp-diagnose} & a run is slower than documented, silent, scales oddly with mesh size, costs
+milliseconds per particle, or a proposed speed fix needs vetting & a diagnosis along a decision tree
+and the measurement legs that decide it \\
+\code{kelp-bench} & a machine is benchmarked or compared with the reference rows & one table row
+from the self-contained single-node benchmark \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The skills cross-reference one another rather than repeating each other
+(\cref{fig:skills-routing}). \code{kelp-run} is the entry point for a single run and defers the
+YAML mechanics to \code{kelp-config}; \code{kelp-experiment} sits above both and owns the
+campaign order of operations; \code{kelp-analysis} owns the reading of trajectory output, which
+\code{kelp-visualize} uses for its caches; \code{kelp-diagnose} is entered from the phase timings
+that a verbose run prints and compares them with the measured rows of \srcfile{docs/performance.md}, and
+\code{kelp-bench} produces one machine's row of the portable benchmark (\srcfile{benchmarks/single\_node/}).
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[node distance=5mm and 7mm,
+  sk/.style={rectangle,rounded corners=2pt,draw=lagblue,fill=lagblue!8,align=center,
+             inner sep=3pt,minimum height=8mm,text width=29mm,font=\small},
+  doc/.style={rectangle,rounded corners=2pt,draw=lagelem,fill=lagelem!8,align=center,
+             inner sep=3pt,minimum height=7mm,text width=41mm,font=\footnotesize},
+  req/.style={rectangle,rounded corners=2pt,draw=gray!60,fill=gray!6,align=center,
+             inner sep=3pt,text width=112mm,font=\footnotesize},
+  lk/.style={-{Stealth[length=4pt]},line width=0.7pt,draw=lagblue!70}]
+  \node[req] (req) {a request: ``set up this run'' \;/\; ``plan this campaign'' \;/\; ``read this output''
+    \;/\; ``draw this'' \;/\; ``why is it slow''\\[-1pt]
+    \textit{matched against each skill's description (when to use), not its content}};
+  \node[sk, below left=9mm and 26mm of req.south] (exp) {\code{kelp-experiment}\\\footnotesize campaign layer};
+  \node[sk, below=of exp] (run) {\code{kelp-run}\\\footnotesize one run};
+  \node[sk, below=of run] (cfg) {\code{kelp-config}\\\footnotesize the YAML};
+  \node[sk, below=9mm of req.south] (ana) {\code{kelp-analysis}\\\footnotesize read output};
+  \node[sk, below=of ana] (viz) {\code{kelp-visualize}\\\footnotesize figures, videos};
+  \node[sk, below right=9mm and 26mm of req.south] (dia) {\code{kelp-diagnose}\\\footnotesize performance};
+  \node[sk, below=of dia] (ben) {\code{kelp-bench}\\\footnotesize one machine};
+  \node[doc, below=8mm of cfg] (d1) {\srcfile{docs/configuration.md}};
+  \node[doc, below=8mm of viz] (d2) {\srcfile{gallery/} helpers};
+  \node[doc, below=8mm of ben] (d4) {\srcfile{benchmarks/single\_node}};
+  \node[doc, below=4mm of d4] (d3) {\srcfile{docs/performance.md}};
+  \draw[lk] (req.south) -- ++(0,-3mm) -| (exp.north);
+  \draw[lk] (req.south) -- (ana.north);
+  \draw[lk] (req.south) -- ++(0,-3mm) -| (dia.north);
+  \draw[lk] (exp) -- (run);  \draw[lk] (run) -- (cfg);
+  \draw[lk] (ana) -- (viz);
+  \draw[lk,dashed] (cfg) -- (d1); \draw[lk,dashed] (viz) -- (d2); \draw[lk,dashed] (ben) -- (d4);
+  \draw[lk,dashed] (dia.east) -- ++(5mm,0) |- (d3.east);
+  \draw[lk,dashed] (exp.east) to[out=0,in=180] (d3.west);
+\end{tikzpicture}
+\caption{How requests reach the skills. A request is matched against the skills' descriptions; the
+selected \srcfile{SKILL.md} then points to the neighbouring skill it builds on (solid) and to the
+documentation it defers to (dashed). Reference files under each skill's \srcfile{references/} are
+opened only from the step that names them.}
+\label{fig:skills-routing}
+\end{figure}
+
+\section{How the skill text is written}\label{sec:skills-design}
+
+The skills are read by agents of different strength, and the way a rule is phrased decides whether
+it is followed. The text therefore follows a small set of conventions.
+
+\paragraph{Defaults and checks.} Each skill that produces a product opens with a short paragraph
+that separates two kinds of guidance. \emph{Defaults} are the choices that worked in past work ---
+a palette, a background, a layout, which tables to write, how an event is counted, which
+uncertainty to quote. They are written as ``by default \dots; if the owner asks for something else,
+do that'', because a default stated as a mandate makes a careful agent refuse what the owner
+explicitly asked for. \emph{Checks} protect correctness whatever the style: the colour map's ends
+agree with the label (an assertion in the script), dead particles are masked by status, lead times
+are measured from each particle's own release, every number carries its denominator, cohorts the run
+does not cover are dropped or censored, and a claim about a whole run is guarded by an assertion that
+its last record is the run's end. Each check states its scope in the same sentence, so that
+relaxing a default cannot silently relax the check. A handback ends with a section that lists every
+default not used (with the owner's choice) and every check skipped (with the condition that did not
+hold).
+
+\paragraph{The launch gate.}\label{sec:skills-gate} The skills that prepare a run or a batch job (\code{kelp-run}, \code{kelp-config},
+\code{kelp-experiment}) stop before starting it; the benchmark skill asks before running on a cluster
+node. The prepared command is shown, and the agent asks for an explicit
+confirmation of that command; a request that merely describes the run (``run it on 128 cores'') is
+not a confirmation. The last line of their handback states that nothing was run.
+
+\paragraph{Checks keyed to their condition.} A pre-launch check applies where its stated condition
+holds: the vertical-velocity sign check for a three-dimensional run on a velocity not used before,
+the record-0 check for a dataset not used before, the grid-hash cell check for a release in a
+refined region of a non-uniform mesh. A check whose condition does not hold is skipped, with one
+line saying why; the launch gate holds for every run.
+
+\paragraph{Runnable code, no example numbers as answers.} Code blocks in the skills are complete
+enough to run and were run before they were written down. Measured constants --- memory per particle and
+throughput --- live in \srcfile{docs/performance.md} (a few per-event costs and the output sizing rule in
+the skills' reference files, labelled as single measurements); a skill states the recipe that
+derives the number for the task at hand and labels any quoted value as the measurement it came from.
+A number from a worked example is never a substitute for the reader's own measurement.
+
+\paragraph{Short entry files, reference files on demand.} Each \srcfile{SKILL.md} holds the routing,
+the ordered workflow, the decision predicates and the checks; long templates and recipes live in
+\srcfile{references/}. Two rules keep the split safe: the call line of every helper stays in the entry
+file (a reader that never opens the reference still calls the helper correctly), and a reference that
+depends on another links to it.
+
+\section{The check scripts}\label{sec:skills-scripts}
+
+Two pre-launch checks recur for every new dataset and are shipped as scripts, run from the clone
+with the absolute path of the configuration.
+
+\paragraph{Vertical-velocity sign.} \srcfile{w\_sign.py} loads the mesh and the dataset through the
+configured reader with \conf{mode.w\_positive} forced to \code{up}, so that the negated internal
+velocity is the file's own value (\cref{sec:vert-wsign}); it averages the file's vertical velocity
+from \ang{2}\,S to \ang{2}\,N and from \ang{150}\,W to \ang{100}\,W, at the level nearest \SI{50}{m}, over records 1--30, and prints the mean with the sign
+it implies. Equatorial upwelling makes the sign unambiguous there: a positive mean means the file
+stores upward velocity. A store that does not cover this box stops with a request for another region
+of known up- or downwelling. The configuration keeps \conf{w\_positive: auto} until the printed value
+is written in, and the run script refuses \code{auto} for such a run.
+
+\paragraph{Record 0.} \srcfile{record0.py} prints the fraction of exactly zero surface elevation at
+the first, middle and last record. A model archive whose first record is the initial state of a cold
+start shows a fraction near one there; the run then starts after the spin-up, which a periodic
+forcing signal needs hours of records to develop --- skipping one record is not a spin-up.
+
+\codeanchor{\srcfile{.claude/skills/kelp-run/scripts/w\_sign.py} and \srcfile{record0.py}; both use
+\fn{load\_config}, \fn{get\_reader} and the reader's \fn{load\_mesh}, \fn{open\_dataset} and
+\fn{read\_velocities}; \code{w\_sign.py} also uses \fn{unrotate\_lonlat} for a rotated mesh.}
+
+\section{Skills and the documentation}\label{sec:skills-docs}
+
+The skills are procedure; the documentation is reference. Option semantics, defaults and validation
+rules are authoritative in \srcfile{docs/configuration.md}; the pipeline in
+\srcfile{docs/architecture.md}; costs and sizing in \srcfile{docs/performance.md}; the restart
+mechanics in \srcfile{docs/io\_and\_time.md}. A skill cites these rather than restating them, so that
+a change in the engine is documented once. Where a skill and the documentation disagree, the
+documentation and --- behind it --- the source take precedence, as throughout this manual.
+
+\section{Maintaining a skill}\label{sec:skills-maintain}
+
+A skill changes when a campaign shows that a step was missing, a rule was wrong, or a phrase led a
+reader astray. Four practices keep the text reliable. Every code block in an edited skill is run
+before it is committed. A changed rule is exercised by having a separate agent carry out a
+representative task with the edited skill, and the artefact it produces --- not its summary --- is
+reviewed, including a task in which the owner departs from a default on purpose, so that a new rule
+does not override the owner. The review of an edit lists the errors the edit itself introduced, which
+is where most new defects come from. Finally, the skills ship with the public engine: they carry
+engineering practice and generic rules, and no study results.

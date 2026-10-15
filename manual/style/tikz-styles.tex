@@ -1,0 +1,34 @@
+% =====================================================================
+%  style/tikz-styles.tex — reusable TikZ styles for the schematics.
+%  Convention used throughout the schematics:
+%    * mesh NODE          -> filled blue circle
+%    * element CENTRE     -> filled orange square
+%    * vertical INTERFACE -> grey horizontal rule / open marker
+%    * the DRIFTER        -> red five-pointed star
+% =====================================================================
+\tikzset{
+  meshnode/.style     ={circle,fill=lagnode,draw=lagnode,inner sep=0pt,minimum size=4pt},
+  meshnodeopen/.style ={circle,draw=lagnode,fill=white,line width=0.7pt,inner sep=0pt,minimum size=4.5pt},
+  elemcentre/.style   ={rectangle,fill=lagelem,draw=lagelem,inner sep=0pt,minimum size=4pt},
+  interfacept/.style  ={circle,draw=gray!70,fill=white,inner sep=0pt,minimum size=3.5pt},
+  drifter/.style      ={star,star points=5,star point ratio=2.3,fill=kelp,draw=kelp!60!black,inner sep=0pt,minimum size=8pt},
+  meshedge/.style     ={draw=gray!65,line width=0.7pt},
+  meshface/.style     ={draw=gray!65,line width=0.7pt,fill=lagblue!5},
+  hilface/.style      ={draw=lagblue,line width=1.0pt,fill=lagblue!12},
+  weightlbl/.style    ={font=\small\itshape,text=black},
+  nodelbl/.style      ={font=\footnotesize,text=lagnode!75!black},
+  elemlbl/.style      ={font=\footnotesize,text=lagelem!70!black},
+  interface/.style    ={draw=gray!55,line width=0.6pt},
+  velarrow/.style     ={-{Stealth[length=4pt]},line width=0.8pt,draw=lagblue},
+  % pipeline / flowchart
+  flowbox/.style      ={rectangle,rounded corners=2pt,draw=lagblue,fill=lagblue!8,
+                        align=center,inner sep=4pt,minimum height=8mm,text width=44mm,font=\small},
+  sidebox/.style      ={rectangle,rounded corners=2pt,draw=lagelem,fill=lagelem!8,
+                        align=left,inner sep=5pt,text width=50mm,font=\footnotesize},
+  flowarrow/.style    ={-{Stealth[length=5pt]},line width=1pt,draw=lagblue},
+  looparrow/.style    ={-{Stealth[length=5pt]},line width=1pt,draw=lagblue!55,dashed},
+  % particle-status state machine
+  statebox/.style     ={rectangle,rounded corners=3pt,draw=black,align=center,
+                        inner sep=4pt,minimum width=24mm,minimum height=8mm,font=\small},
+  trans/.style        ={-{Stealth[length=5pt]},line width=0.9pt},
+}

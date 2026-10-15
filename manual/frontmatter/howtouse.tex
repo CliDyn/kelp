@@ -1,0 +1,38 @@
+\chapter*{How to use this manual}
+\addcontentsline{toc}{chapter}{How to use this manual}
+
+This manual is designed for selective, non-linear reading: a reader with a
+specific question should be able to turn directly to the relevant chapter without
+reading the preceding material. To that end we adopt a consistent internal
+structure and several navigation aids.
+
+\paragraph{Chapter structure.} Each chapter opens with a short statement of what
+the component does and where it sits in the per-step pipeline
+(\cref{ch:arch}). It then develops the governing equations and the discrete
+formulae as implemented, accompanied by a schematic that shows which mesh
+entities (nodes, element centres, vertical interfaces) supply values and how they
+are combined. Each substantive claim about the implementation is followed by a
+\textbf{Source} callout naming the file and the function or line range that
+realizes it, so that the manual and the code can be read side by side.
+
+\paragraph{Finding a topic.} Three routes are provided. The table of contents
+lists every section. \Cref{app:codemap} is a source-code map: it lists, per
+subsystem, the authoritative source symbols and the manual section that explains
+them, so a reader starting from the code can find the corresponding text. The
+index collects symbols, configuration keys, and function names.
+
+\paragraph{Conventions and symbols.} The sign and unit conventions used
+throughout (positive-downward depth, the integration-direction factor, the
+spherical metric, the distinction between fields stored at nodes, at element
+centres, and at vertical interfaces) are stated once in the front matter section
+that follows, and the complete symbol list is given in \cref{app:notation}.
+
+\paragraph{Worked configuration.} Where a concrete size clarifies a choice, we refer to the FESOM2
+\emph{core2} global mesh; the ready configurations shipped with the engine cover two-dimensional global runs,
+a three-dimensional regional run, a structured-grid run and HEALPix runs. The examples illustrate the engine;
+they are not the subject of this document.
+
+\paragraph{Setting up a run.} A reader who wants to run an experiment rather than study the numerics can start
+from \cref{ch:skills}, which describes how a described experiment becomes seeds, a configuration and a run
+command, and how the output is turned into statistics and figures; \cref{app:config} lists every configuration
+key.

@@ -1,0 +1,162 @@
+\chapter{Temporal Reconstruction of the Velocity Field}\label{ch:temporal}
+
+The integration schemes of \cref{ch:integration} require the velocity not only at
+arbitrary positions but at arbitrary times --- at the half-step and full-step instants
+of the Runge--Kutta stages --- whereas the model stores it only at discrete snapshots.
+The engine bridges this gap by reconstructing the velocity in time between snapshots.
+This chapter describes the two modes of operation (one snapshot per step, or
+sub-stepping with interpolation), the linear and monotone-cubic reconstructions, and the
+central consequence that the temporal reconstruction can cap the order of the spatial
+scheme. The handling of the snapshot times themselves --- including the shift applied to
+time-averaged forcing --- belongs to the forcing reader and is described in
+\cref{ch:input}.
+
+\section{Discrete and interpolated modes}\label{sec:temp-modes}
+
+The key \conf{temporal\_interp} selects between two modes. In the \emph{discrete} mode (the default),
+each integration step advances by one stored snapshot; the displacement uses the step \conf{numerics.dt},
+which must therefore equal the record spacing (taken from the file's time axis when it is not set; a
+different step, or irregular record times such as calendar months, are refused when the run starts), and
+the Runge--Kutta stages are
+still ordered in time, the next snapshot being supplied so that the stages see the correct time
+progression across the step. In the \emph{interpolated} mode, the time step may be smaller than the
+snapshot interval, and the velocity at each stage time is reconstructed from the bracketing snapshots.
+Sub-stepping in the interpolated mode is the means by which a fine step can be taken against coarsely
+sampled forcing, for example a sub-daily step against daily-mean fields. The interpolated mode needs a
+physical time axis: a file without a decodable time coordinate is refused unless the snapshot spacing
+is given as \conf{numerics.file\_dt}.
+
+\section{Linear reconstruction}\label{sec:temp-linear}
+
+The default reconstruction is linear in time. For a time $t$ falling between snapshots at $t_a$ and $t_b$
+carrying velocity fields $\velvec_a$ and $\velvec_b$, the reconstructed field is
+\begin{equation}\label{eq:temp-linear}
+  \velvec(t) = (1-\interpfrac)\,\velvec_a + \interpfrac\,\velvec_b, \qquad
+  \interpfrac = \frac{t-t_a}{t_b-t_a}.
+\end{equation}
+A step starting at $t$ between two snapshots receives the field at its start, with
+$\interpfrac_0=(t-t_a)/(t_b-t_a)$, and a \emph{target} snapshot $\velvec_T$ toward which its stages
+move: the next snapshot, $t_b$, when integrating forward, and the previous one, $t_a$, when integrating
+backward; a backward step that starts exactly on a snapshot brackets downward, so it has a real target
+rather than none. The stage with time fraction $c_k$ (\cref{sec:int-schemes}) samples
+\begin{equation}\label{eq:temp-stage}
+  \velvec_k=(1-\interpfrac_k)\,\velvec(t)+\interpfrac_k\,\velvec_T,\qquad
+  \interpfrac_k=\frac{c_k\,\dt}{\Delta t_T},
+\end{equation}
+with $\Delta t_T$ the time from the step's start to the target snapshot; \cref{eq:temp-stage} is
+\cref{eq:temp-linear} evaluated at $t\pm c_k\dt$. The engine never forms $\velvec(t)$ as a whole field
+unless a consumer asks for it: the velocity handed to a step between two snapshots is a lazy view that
+blends a field on its first use, and the fused kernels blend each element or vertex they read
+(\cref{eq:fused-nested}).
+
+A step longer than the time to its target snapshot, $\dt>\Delta t_T$, would place its later stages
+beyond the bracketing pair. Such a step runs on a steady velocity --- the field at its start --- and the
+engine warns once per realization and reports the number of such steps at the end of a verbose run.
+This happens at the end of the record, on a start between snapshots, and whenever $\dt$ does not
+divide the snapshot interval: every step that straddles a snapshot then runs steady.
+
+\section{The order cap, and monotone-cubic reconstruction}\label{sec:temp-pchip}
+
+A linear reconstruction in time is itself only second-order accurate, and this caps the
+\emph{time}-truncation error of the whole integration at order $\dt^2$ irrespective of
+the spatial scheme. The practical consequence is important: under linear reconstruction,
+RK4 collapses onto RK2 --- the fourth-order spatial scheme delivers no benefit --- unless
+the step is taken much smaller than the snapshot interval. The remedy, short of finer
+sub-stepping, is a higher-order reconstruction in time, selected by
+\conf{temporal\_reconstruction}${}={}$\conf{pchip}.
+
+The PCHIP reconstruction (\cref{fig:temporal}) fits a monotone piecewise-cubic Hermite
+interpolant \citep{fritsch1980monotone} through four consecutive snapshots
+$t_{n-1},t_n,t_{n+1},t_{n+2}$, evaluating it within the central interval
+$[t_n,t_{n+1}]$. On that interval, with local coordinate $s=(t-t_n)/h_1$ and
+$h_1=t_{n+1}-t_n$, the value is the Hermite combination
+\begin{equation}\label{eq:pchip}
+  f(t) = h_{00}(s)\,f_n + h_{10}(s)\,h_1 m_n + h_{01}(s)\,f_{n+1} + h_{11}(s)\,h_1 m_{n+1},
+\end{equation}
+with the standard cubic basis $h_{00}=2s^3-3s^2+1$, $h_{10}=s^3-2s^2+s$,
+$h_{01}=-2s^3+3s^2$, $h_{11}=s^3-s^2$. The slope at an interior snapshot is the weighted harmonic
+mean of the two adjacent secants $d_-$ and $d_+$ over intervals $h_-$ and $h_+$
+\citep{fritsch1984method},
+\begin{equation}\label{eq:pchip-slope}
+  m=\frac{w_1+w_2}{w_1/d_-+w_2/d_+},\qquad w_1=2h_++h_-,\quad w_2=h_++2h_-,
+\end{equation}
+and zero wherever the two secants differ in sign or either vanishes. This makes the interpolant
+monotone between samples and prevents the spurious overshoots that an unconstrained cubic would
+introduce. The property holds for each component separately: the cubic does not preserve linear
+relations between components or between snapshots --- a vanishing divergence, rotation equivariance, a
+window mean --- which the linear reconstruction does preserve. Because the reconstruction is now cubic in time, the fourth-order spatial
+scheme is no longer masked: RK4 separates from RK2 at coarse snapshot cadence. The PCHIP
+stencil requires four consecutive snapshots, so on the first and last interval of the
+record, and across a cyclic seam, the engine falls back to the linear reconstruction, with one warning
+per realization. The reconstruction applies to the horizontal and vertical velocity and the sea-surface
+height; the diffusivities stay linear in time, and sampled scalars are re-interpolated linearly to
+the record time (\cref{sec:samp-what}). PCHIP is active
+only with \conf{temporal\_interp: true} (otherwise it warns that it has no effect) and only for the
+multistage schemes RK2 and RK4; the Euler step has no stage times to reconstruct.
+
+The two-dimensional least-squares kernels and the three-dimensional barycentric RK2 kernel evaluate the
+cubic inline for each element or vertex they read (\cref{ch:fused}). Every other configuration
+reconstructs whole fields at each distinct stage time --- the two midpoint stages of RK4 share one ---
+with a parallel loop over the field that is bit-identical to the plain array expression; one such blend
+of a global field takes about \SI{46}{ms} at eight threads.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.0]
+  % axes
+  \draw[-{Stealth[length=5pt]},gray] (-0.2,0)--(7.2,0) node[right,font=\footnotesize,black]{time};
+  \draw[-{Stealth[length=5pt]},gray] (0,-0.2)--(0,3.0) node[above,font=\footnotesize,black]{$\velvec$};
+  % snapshot points
+  \coordinate (s0) at (0.6,1.0);
+  \coordinate (s1) at (2.6,2.3);
+  \coordinate (s2) at (4.6,1.5);
+  \coordinate (s3) at (6.6,2.5);
+  % PCHIP smooth curve through all four
+  \draw[laggreen,line width=1.1pt,smooth] plot coordinates {(0.6,1.0) (1.6,1.75) (2.6,2.3) (3.6,2.0) (4.6,1.5) (5.6,1.8) (6.6,2.5)};
+  % linear chord on central interval [t_n, t_{n+1}] = s1..s2
+  \draw[lagblue,line width=1.0pt,densely dashed] (s1)--(s2);
+  % central interval shading
+  \draw[gray!55,densely dotted] (2.6,0)--(2.6,2.3);
+  \draw[gray!55,densely dotted] (4.6,0)--(4.6,1.5);
+  % query substep
+  \coordinate (q) at (3.6,0);
+  \draw[gray!55,densely dotted] (3.6,0)--(3.6,2.02);
+  \node[font=\footnotesize,below] at (3.6,0) {$t$};
+  \node[circle,fill=lagblue,inner sep=1.3pt] at (3.6,1.9) {};
+  \node[circle,fill=laggreen,inner sep=1.3pt] at (3.6,2.0) {};
+  % snapshot markers + labels
+  \foreach \p in {s0,s1,s2,s3} \node[interfacept] at (\p) {};
+  \node[font=\footnotesize,below] at (0.6,-0.02) {$t_{n-1}$};
+  \node[font=\footnotesize,below] at (2.6,-0.02) {$t_{n}$};
+  \node[font=\footnotesize,below] at (4.6,-0.02) {$t_{n+1}$};
+  \node[font=\footnotesize,below] at (6.6,-0.02) {$t_{n+2}$};
+  \node[font=\footnotesize,laggreen!60!black] at (5.7,2.25) {PCHIP (4-point)};
+  \node[font=\footnotesize,lagblue!70!black] at (3.05,2.45) {linear (2-point)};
+\end{tikzpicture}
+\caption{Temporal reconstruction within the interval $[t_n,t_{n+1}]$. The linear
+reconstruction (dashed) joins the two bracketing snapshots; the monotone-cubic PCHIP
+reconstruction (solid) uses four consecutive snapshots and follows the curvature of the
+sampled series. At a sub-step time $t$ the two differ, and only the cubic lets a
+fourth-order spatial scheme realize its order. PCHIP is monotone, so it introduces no
+overshoot between samples.}
+\label{fig:temporal}
+\end{figure}
+
+\section{Read-ahead}\label{sec:temp-prefetch}
+
+Reconstruction in time requires several snapshots to be in memory at once --- two for the linear scheme,
+four for PCHIP. Snapshots stay in a small cache as long as the current bracket or stencil needs them, so
+a PCHIP run reads one new snapshot each time its bracket advances. The key \conf{prefetch\_size} controls
+how many consecutive snapshots are read in a single bulk operation: a value above one reads a window ahead
+in the direction of travel, reducing the number of separate reads on large meshes where input dominates
+the cost (\cref{ch:performance}), while a value of one reads one snapshot at a time; the trajectories are
+bit-identical either way. Read-ahead is disabled under cyclic forcing, where the wrap-around would
+otherwise thrash the cache, and when snapshots are shared between processes through
+\conf{shared\_fields\_dir} (\cref{ch:input}).
+
+\codeanchor{The reconstructions are in \srcfile{numerics/temporal\_reconstruct.py} (the slopes
+\fn{\_fc\_slope}, the Hermite evaluation and the parallel whole-field blend \fn{\_pchip\_blend4}); the
+lazy linear view \fn{LazyLerpField} and its blend are in \srcfile{core/io.py}; the stage fields of the
+unfused paths are built by \fn{\_make\_stage\_vels} and \fn{make\_stage\_vels\_recon}; the bracket and
+stencil resolution (\fn{\_resolve\_time\_bracket}, \fn{\_resolve\_recon\_stencil}), the step payload
+(\fn{\_build\_vel\_payload}) and the read-ahead cache (\fn{\_VelCache}) are in \srcfile{tracking.py}.}

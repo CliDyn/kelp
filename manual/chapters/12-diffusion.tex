@@ -1,0 +1,174 @@
+\chapter{Stochastic Diffusion}\label{ch:diffusion}
+
+The resolved velocity field carries particles by advection, but it omits the mixing done by motions below
+the model's resolution. The engine can represent this unresolved mixing as a random walk superimposed on
+the advective step, turning the trajectory equation into a stochastic differential equation. This chapter
+sets out the random-walk model and its treatment of the integration direction, how a horizontal kick moves
+a particle on the sphere, the three horizontal schemes, the way the diffusivity and its gradient are
+sampled from the mesh, the vertical random walk, the counter-based random-number generator that makes the
+result reproducible and restart-safe, and how the kicks compose with the integrators. Diffusion is off by
+default; when disabled it is byte-for-byte identical to a purely advective run.
+
+\section{The random-walk model}\label{sec:diff-model}
+
+A diffusivity $K_h$ spreads an ensemble of particles so that its variance grows linearly in time,
+$\sigma^2 = 2K_h t$. The corresponding increment added to a particle over a step combines the
+deterministic advective displacement with a random kick (\cref{fig:diffusion}):
+\begin{equation}\label{eq:diff-step}
+  \Delta x = u\,\dt \;+\; \xi\,\sqrt{2K_h\,\lvert\dt\rvert},
+\end{equation}
+where $\xi$ is a standard normal random variate drawn independently per component. With a spatially varying
+diffusivity a drift term $\partial_x K_h\,\lvert\dt\rvert$ joins them (\cref{sec:diff-schemes}). The signs
+follow three rules. The advective term carries the signed step, so it reverses under backward integration.
+The random term uses $\sqrt{\lvert\dt\rvert}$ and spreads the ensemble in \emph{either} direction. The
+drift uses $\lvert\dt\rvert$ too: it belongs to the diffusion, not to the advection, so a backward run
+integrates the adjoint process, $-u+\nabla K_h$ plus the same noise. (A drift that reversed with the step
+would leave a backward ensemble in a closed column with a stationary density proportional to $K^{-2}$
+instead of a uniform one.) Diffusion is intrinsically irreversible; a backward run does not un-mix what a
+forward run mixed, and the backward cloud is not a validated probability distribution of source positions.
+The diffusivity may be anisotropic, with independent zonal and meridional components $K_x,K_y$.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.15]
+  \node[meshnode,label={[font=\footnotesize]below:$x_n$}] (A) at (0,0) {};
+  \draw[-{Stealth[length=6pt]},lagblue,line width=1.2pt] (A)--(2.6,0.7) node[midway,above,font=\footnotesize,lagblue!70!black]{$u\,\dt$};
+  \coordinate (B) at (2.6,0.7);
+  \node[circle,fill=lagblue,inner sep=1.2pt] at (B) {};
+  \foreach \a in {20,70,130,200,255,310,350,160,95}
+     \draw[densely dotted,kelp!75] (B)--($(B)+(\a:0.62)$);
+  \draw[dashed,kelp,line width=0.8pt] (B) circle (0.62);
+  \node[font=\footnotesize,kelp!70!black] at (3.95,0.7) {$\xi\sqrt{2K_h|\dt|}$};
+  \foreach \a in {30,110,240,330} \node[drifter,scale=0.5] at ($(B)+(\a:0.62)$) {};
+  \node[font=\footnotesize,gray] at (1.0,-0.55) {deterministic};
+  \node[font=\footnotesize,gray] at (3.0,-0.45) {stochastic kick};
+\end{tikzpicture}
+\caption{One diffusive step. The deterministic advective displacement $u\,\dt$ (blue) carries the particle
+from $x_n$; a random kick of typical size $\sqrt{2K_h|\dt|}$ (dashed circle) is then added, scattering the
+realized endpoint (stars). The advective term reverses under backward integration; the kick, scaling with
+$\sqrt{|\dt|}$, spreads the ensemble either way.}
+\label{fig:diffusion}
+\end{figure}
+
+\section{Kicks on the sphere}\label{sec:diff-sphere}
+
+A kick is a displacement $(d_x,d_y)$ in metres, east and north. Added to longitude and latitude through the
+metric of \cref{eq:int-displacement}, it would be a random walk on the longitude--latitude chart, which lacks
+the drift $-K\tan\latx/R_M$ that a random walk on the sphere has: its particles would spread uniformly in
+latitude rather than in area and would accumulate toward the poles. The engine therefore moves every
+horizontal kick along the great circle. With $d=\sqrt{d_x^2+d_y^2}$, $\delta=d/R_M$ and the metric radius $R_M=\Mlat\cdot180/\pi$,
+the position $\mathbf{r}=(\cos\latx\cos\lonx,\cos\latx\sin\lonx,\sin\latx)$ and the tangent displacement
+\begin{equation}\label{eq:diff-tangent}
+  \mathbf{t}=d_x\,(-\sin\lonx,\ \cos\lonx,\ 0)+d_y\,(-\sin\latx\cos\lonx,\ -\sin\latx\sin\lonx,\ \cos\latx),
+\end{equation}
+the kicked position is
+\begin{equation}\label{eq:diff-expmap}
+  \mathbf{r}'=\mathbf{r}\cos\delta+\frac{\mathbf{t}}{d}\sin\delta ,
+\end{equation}
+converted back to longitude and latitude. The east and north directions are taken at the stored longitude,
+so the map is regular through a pole. For an anisotropic diffusivity the sphere adds one more term, a
+northward drift $(K_x-K_y)\tan\latx\,\lvert\dt\rvert/R_M$ (with the latitude capped at $\pm89.9^\circ$); with
+$K_x=K_y$ it vanishes and the uniform scheme is free of any drift.
+
+\codeanchor{\fn{sphere\_displace}, \fn{sphere\_displace\_arrays} and \fn{anisotropic\_metric\_drift\_m} in
+\srcfile{numerics/diffusion.py}.}
+
+\section{The three horizontal schemes}\label{sec:diff-schemes}
+
+The key \conf{diffusion.scheme} selects among three realizations of increasing fidelity to a spatially
+varying diffusivity. The \conf{uniform} scheme uses a constant diffusivity taken from the configuration
+(\conf{kh\_zonal}, \conf{kh\_meridional}) and adds the kick of \cref{eq:diff-step} with no gradient term.
+The \conf{em} scheme (Euler--Maruyama) reads a spatially varying diffusivity from the dataset and adds the
+Itô drift, per component,
+\begin{equation}\label{eq:diff-em}
+  \Delta x = u\,\dt+\partial_x K_x\,\lvert\dt\rvert + \sqrt{2K_x\lvert\dt\rvert}\;\xi_1 ,
+\end{equation}
+the drift being what prevents particles from accumulating spuriously in regions of low diffusivity and so
+keeps the scheme consistent with the diffusion equation. The \conf{m1} scheme (Milstein) adds the next
+term, $\tfrac12\partial_x K_x\,\lvert\dt\rvert\,(\xi_1^2-1)$; it is rigorous only for a separable diagonal
+diffusivity and warns once whenever the field varies in space, for which \conf{em} is the safer
+choice. With Euler (the combined composition) the diffusive part --- drift, Milstein term and noise ---
+moves the particle along the great circle from the start of the step (\cref{sec:diff-sphere}) and the
+advective part is added on the chart; with RK2 and RK4 (the split composition) the kick is applied at the
+position the deterministic step reached. Where the diffusivity is constant, \conf{em} and \conf{m1} draw
+the same normals as \conf{uniform}; only where the kick is applied differs.
+
+\section{Sampling the diffusivity}\label{sec:diff-sampling}
+
+The spatially varying schemes require both the diffusivity and its spatial gradient at the particle. The
+diffusivity is read from node or element variables, their layout detected from the dimensions, and it must
+not be negative. The value is obtained by the least-squares plane fit of \cref{sec:hvel-leastsq}, gated on
+containment. The gradient is obtained by central differencing of that value over an offset
+\conf{dres\_m} --- by default the median edge of up to \num{5000} sampled elements, clipped to
+\SIrange{100}{50000}{\metre} --- with a fallback chain to a one-sided difference and then to the analytic
+gradient of the fitted plane should the central difference be unavailable near a boundary.
+
+\section{Vertical diffusion}\label{sec:diff-vertical}
+
+In three dimensions on a z-level or sigma mesh, a vertical diffusivity $A_z$ adds a vertical random walk
+(\conf{az\_enabled}, with a constant \conf{az\_const} or, on FESOM2 z-level output, a field \conf{var\_az}
+on the interfaces). Its increment in positive-down depth is
+\begin{equation}\label{eq:diff-az}
+  \Delta\depx=\frac{\partial A_z}{\partial\depx}\,\lvert\dt\rvert+\sqrt{2A_z\lvert\dt\rvert}\;\xi ,
+\end{equation}
+with the drift mandatory: without it a walk in a non-uniform $A_z$ would collect particles where $A_z$ is
+small \citep{visser1997random}. The field is taken from the nearest node's column, linear between
+interfaces, with the depth clamped to the wet part of the column; the gradient is the slope of the same
+linear segment --- on an interface, the segment above --- so that the value that sets the noise and the
+gradient that sets the drift belong to one interpolant. A kick that leaves the column is reflected, not
+clamped: with the column $[a,b]$, $L=b-a$ and $y=(\depx-a)\bmod 2L$, the new depth is $a+y$ for $y\le L$
+and $a+2L-y$ otherwise, which handles any number of bounces. A clamp would pile particles up at the
+boundaries; the reflection keeps a well-mixed column well mixed, which the tests check in a diffusivity
+that varies tenfold over the column, in both directions of integration. The column is the surface to the
+nearest node's floor on a z-level mesh and the particle's end-of-step column less $z_{0b}$ on a sigma mesh,
+the same bounds as the depth clamp of \cref{sec:vert-clamp}. The vertical kick composes only with the
+\conf{uniform} horizontal scheme, runs after the deterministic step and the horizontal kick, and with no
+source configured the facility is dormant.
+
+\codeanchor{\fn{diffusion\_az\_step\_meters}, \fn{az\_column\_value\_gradient}, \fn{reflect\_depth} and the
+loops \fn{\_loop\_az\_kick\_zlevel} and \fn{\_loop\_az\_kick\_sigma} (\srcfile{numerics/diffusion.py});
+applied by \fn{\_apply\_split\_az\_kick} (\srcfile{numerics/integrators.py}).}
+
+\section{Reproducibility: counter-based random numbers}\label{sec:diff-rng}
+
+The random kicks are generated not by a sequential pseudo-random stream but by a \emph{counter-based}
+generator \citep{salmon2011philox}, in which each draw is a stateless hash of an integer key. The key is the
+tuple of the configuration seed, the realization index, the \emph{original} particle index, the global step
+index, and the component --- zero for the horizontal pair, one for the vertical kick --- from which a 64-bit
+hash produces a uniform pair that is converted to a normal pair. Because each draw depends only on its key
+and not on the order in which draws are issued, the result is bit-for-bit identical regardless of the
+number of threads or the order of execution, and it is identical across a restart --- the same step index
+regenerates the same kick. The particle index in the key must be the original, fixed index, not a
+compacted index that shifts as particles die, or the stream would change when the live set changes. A run
+over one shard of a larger release (\cref{sec:perf-shard}) adds the global index of its first particle,
+\conf{data.particle\_offset} or the header that the splitting tool writes into each shard file, so a
+particle draws the same numbers in the shard as in the unsharded run.
+
+\section{Composition with the integrator}\label{sec:diff-composition}
+
+How the stochastic kick combines with the deterministic step depends on the scheme and the integrator
+(\conf{diffusion.composition}, resolved when the run starts). The \conf{uniform} scheme composes by
+\emph{splitting}: the deterministic step (of any integrator, including RK45) is taken first and the kick
+added afterward. The \conf{em} and \conf{m1} schemes with the Euler integrator \emph{combine}: the
+stochastic differential equation replaces the Euler step as a whole; this mode needs element-layout
+least-squares velocities. The same schemes with RK2 or RK4 use an opt-in split
+(\conf{composition: split\_rk}), taking the Runge--Kutta step and then the kick, with the diffusivity
+sampled at the start or, by default, at the end of the step (\conf{kh\_eval\_position}) and the kick applied
+at the post-step position; the engine warns once that this is a pragmatic extension rather than a rigorous
+scheme. The spatially varying schemes do not combine with RK45.
+
+The kicked position is checked like any other: a kick that leaves the mesh returns the particle to its
+position at the \emph{start} of the step with status \code{OUTSIDE}. In three dimensions only the
+\conf{uniform}/split combination is available for the horizontal kick; the depth is clamped again at the
+kicked position, and on a sigma mesh the particle keeps its fraction of the column. The combined and
+split-with-Runge--Kutta modes raise an explicit error in three dimensions rather than apply an unvalidated
+scheme. In time, the diffusivities are interpolated linearly with the velocity payload and are not included
+in the monotone-cubic reconstruction.
+
+\codeanchor{The schemes, the drift, and the Milstein term are \fn{diffusion\_uniform\_step\_meters},
+\fn{diffusion\_em\_step\_meters} and \fn{diffusion\_m1\_step\_meters}; the counter-based generator --- a
+keyed SplitMix64 hash in the counter-based spirit of \citet{salmon2011philox} --- and the Box--Muller pair
+are in the same module, \srcfile{numerics/diffusion.py}. The composition is resolved by
+\fn{\_resolve\_composition} (\srcfile{tracking.py}) and applied by \fn{\_apply\_split\_diffusion\_kick},
+\fn{\_apply\_combined\_em\_step} and \fn{\_apply\_split\_rk\_em\_kick} (\srcfile{numerics/integrators.py});
+the default offset is \fn{\_compute\_default\_dres\_m} (\srcfile{tracking.py}).}

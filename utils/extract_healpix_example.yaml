@@ -1,0 +1,48 @@
+# Example config for utils/extract_healpix_region.py — cut a regional
+# pixel subset out of a HEALPix store into a self-describing Zarr extract
+# (docs/healpix.md §4).  The kelp healpix reader consumes the extract
+# exactly like an original store (it finds `healpix_index` inside).
+#
+# The eta recipe is resolved AT EXTRACTION: ssh from source.eta_path (or
+# the auto-derived 3D->2D filename sibling) is merged in, so the extract
+# is a single self-contained store — no ncinput_eta needed downstream.
+#
+#   python utils/extract_healpix_region.py utils/extract_healpix_example.yaml --dry-run
+
+source:
+  # any carrier: kerchunk *.parq / plain Zarr / NetCDF
+  path: path/to/ng5/3D_daily_healpix512_ocean.parq
+  eta_path: null          # null -> auto 3D->2D sibling; set explicitly to pin
+  # var_u: my_u           # velocity names outside the aliases (run needs the
+  # var_v: my_v           # same mode.var_u/var_v on the extract)
+  # healpix_zoom: 9       # only needed when the store has no healpix crs attrs
+  # vertical interface table (aux3d path or inline metres): written INTO the
+  # extract (level_interfaces_m) so 3-D runs need no mesh.levels — set it
+  # when extracting for 3-D:
+  levels: path/to/NG5/aux3d.out   # the mesh's aux3d.out (from the model's mesh directory)
+
+region:
+  bbox: [-70.0, 20.0, -75.0, -50.0]   # [W, E, S, N]; W > E = across the dateline
+  # max_levels: 40         # keep only the first K level-axis entries (3-D stores)
+  halo_layers: 1          # pixel rings added around the bbox so the dual
+                          # mesh inside the working area matches the
+                          # whole-store build (particles die at the edge)
+
+variables: [avg_uoe, avg_von]   # null -> u/v aliases (+ ssh auto-merged);
+                                # for 3-D runs list w and T/S explicitly:
+                                # [avg_uoe, avg_von, avg_wo, avg_thetao, avg_so]
+
+time:
+  start: null             # integer indices into the time axis (null = all)
+  stop: null
+  step: null
+
+
+
+output:
+  path: path/to/weddell_z9.zarr      # must end in .zarr
+  time_chunk: 8
+
+metadata:
+  subset_name: weddell_z9
+  description: Weddell Sea sector of ng5-production zoom 9 for kelp

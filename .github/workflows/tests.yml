@@ -1,0 +1,47 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[all]'
+      - name: Fast suite with a skip budget
+        env:
+          NUMBA_NUM_THREADS: "4"
+          NUMBA_CACHE_DIR: .tmp/numba
+        run: |
+          set -o pipefail
+          python -m pytest tests -m "not slow" -q -p no:cacheprovider -rs 2>&1 | tee pytest.log
+          python - <<'EOF'
+          import re, sys
+          log = open("pytest.log").read()
+          # Scan the WHOLE log: anything printed after pytest's summary line
+          # (a numba/atexit message, "Exception ignored in:") would hide it.
+          if "passed" not in log and "failed" not in log:
+              sys.exit("no pytest summary line found in pytest.log")
+          hits = re.findall(r"(\d+) skipped", log)
+          n = int(hits[-1]) if hits else 0      # pytest omits the token at zero
+          # Baseline on a runner with the [all] extras and no KELP_TEST_* data:
+          # 33 (25 data-gated + 8 PLOT_3D).  A missing extra skips 100+.
+          budget = 60
+          print(f"skipped: {n} (budget {budget})")
+          sys.exit(1 if n > budget else 0)
+          EOF

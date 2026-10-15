@@ -1,0 +1,55 @@
+source:
+  mesh: path/to/fesom.mesh.diag.nc
+  input: path/to/velocity_dir_or_combined.nc
+  u_path: null
+  v_path: null
+  w_path: null
+  ssh_path: null
+
+region:
+  mode: bbox
+
+  # bbox mode
+  bbox:
+    min_lon: 10.0
+    max_lon: 20.0
+    min_lat: -40.0
+    max_lat: -30.0
+
+  # center_radius mode
+  center:
+    lon: 11.0743
+    lat: -34.2617
+  radius_km: 150.0
+
+  # polygon mode
+  polygon_path: null
+  polygon_format: geojson
+
+  # Optional mesh-topology padding near the boundary.
+  halo_layers: 0
+
+time:
+  start: null
+  stop: null
+  step: 1
+
+output:
+  dir: path/to/output_subset
+  format: netcdf
+
+  # For NetCDF:
+  #   split    -> mesh.nc + u/v/w/ssh files
+  #   combined -> one velocity file + mesh.nc
+  layout: split
+
+  copy_source_attrs: true
+  write_config_copy: true
+  embed_config_text: true
+  write_manifest: true
+
+metadata:
+  subset_name: agulhas_region
+  description: Regional FESOM2 subset for kelp
+  created_by: extract_fesom_region
+  notes: ""

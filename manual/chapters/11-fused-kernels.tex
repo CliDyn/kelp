@@ -1,0 +1,149 @@
+\chapter{Fused and Unfused Integration Kernels}\label{ch:fused}
+
+The per-particle operations of a step --- locate, interpolate, integrate, apply the boundary
+condition (\cref{fig:pipeline}) --- are realized by two interchangeable implementations. This
+chapter describes the two paths, which configurations take which, and the guarantee that relates
+them. The distinction is an implementation matter and does not change the numerics of the preceding
+chapters; we document it because it decides the cost of a step (\cref{ch:performance}).
+
+\section{Two implementations of one step}\label{sec:fused-two}
+
+In the \emph{fused} path the entire step for a particle --- the nearest-node search at every
+evaluation site, the spatial and temporal interpolation, the integrator update and the containment
+check --- is carried out within one just-in-time-compiled kernel that loops over the particles in
+parallel, with no intermediate arrays (\cref{fig:fused}); two exceptions are the adaptive RK45 step,
+which tests containment after its kernel, and the three-dimensional RK2 kernel, which receives its start
+anchor from the batch search. In the \emph{unfused} path the same
+operations are separate routines, called in turn from Python, with the intermediate quantities
+passed between them as whole arrays: all stage-one positions, then all stage-one velocities, and so
+on. Each of these passes is itself a parallel compiled loop --- the stage interpolations of RK2 and
+RK4 feed the stage positions to the vectorised interpolators --- so the unfused path also uses every
+core; it pays for the extra passes over memory and, on a time-dependent flow, for materialising the
+velocity field at each stage time. The fused path exists for speed; the unfused path exists for
+generality, covering every combination of options for which no fused kernel is provided. Without
+Numba every step is unfused.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[node distance=3mm and 7mm]
+  \node[flowbox,text width=26mm] (u1) {\footnotesize locate (all)};
+  \node[flowbox,below=of u1,text width=26mm] (u2) {\footnotesize interpolate (all)};
+  \node[flowbox,below=of u2,text width=26mm] (u3) {\footnotesize integrate (all)};
+  \node[flowbox,below=of u3,text width=26mm] (u4) {\footnotesize boundary (all)};
+  \draw[flowarrow] (u1)--(u2); \draw[flowarrow] (u2)--(u3); \draw[flowarrow] (u3)--(u4);
+  \node[font=\footnotesize,above=1pt of u1] {\textbf{Unfused path}};
+  \node[flowbox,fill=laggreen!10,draw=laggreen,text width=40mm,minimum height=20mm,anchor=east]
+    (F) at ($(u2.west)!0.5!(u3.west)+(-30mm,0)$)
+    {\textbf{Fused kernel}\\[3pt]\footnotesize per particle:\\\footnotesize locate $\cdot$ interpolate $\cdot$\\\footnotesize integrate $\cdot$ boundary\\[3pt]\footnotesize (one compiled loop)};
+  \draw[{Stealth[]}-{Stealth[]},gray,thick] (F.east) -- node[above,font=\footnotesize,align=center]{bit-identical\\results} (F.east -| u2.west);
+\end{tikzpicture}
+\caption{The two implementations of a single step. The fused kernel (left) performs all
+per-particle operations inside one compiled loop; the unfused path (right) runs the same operations
+as separate parallel passes over all particles. Where both exist they produce bit-identical
+trajectories.}
+\label{fig:fused}
+\end{figure}
+
+\section{Which path applies}\label{sec:fused-which}
+
+\Cref{tab:fused-kernels} lists the fused kernel families and the conditions under which the step
+functions choose them; every other configuration runs on the unfused path. In short: the
+two-dimensional least-squares runs are fused for every integrator and every temporal treatment, except
+Euler with \conf{em}/\conf{m1} diffusion (whose combined stochastic step replaces it) and, with the exact
+guard off, HEALPix pixel meshes that fail the density certificate;
+two-dimensional barycentric runs on node-layout velocities are fused when the flow is time-dependent,
+reconstructed linearly and without element tracking;
+three-dimensional runs are fused for Euler with least-squares velocities and for RK2 with node-layout
+barycentric velocities on a z-level mesh. Among the paths that stay unfused are three-dimensional
+RK4, every three-dimensional sigma-mesh run, element-layout barycentric and edge least-squares
+interpolation, steady barycentric runs, and the \conf{idw} and \conf{leastsq} vertical combines of the
+three-dimensional RK2 kernel. The last one matters in practice: the default
+\conf{w\_interp: leastsq} keeps a node-layout three-dimensional RK2 run unfused, and setting
+\conf{w\_interp} to \conf{nearest} or \conf{barycentric} moves it onto the fused kernel.
+
+\begin{table}[t]
+\centering\footnotesize\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{30mm}>{\raggedright\arraybackslash}p{21mm}>{\raggedright\arraybackslash}p{73mm}@{}}
+\toprule
+kernel family & integrators & conditions \\
+\midrule
+2-D least squares, steady & Euler, RK2, RK4 & \conf{uv\_interp: leastsq} (element layout) \\
+2-D least squares, time-aware & Euler, RK2, RK4 & as above; RK2 and RK4 with the next snapshot, Euler with a velocity between two snapshots, blended per element \\
+2-D least squares, PCHIP & RK2, RK4 & as above, with \conf{temporal\_reconstruction: pchip} \\
+2-D barycentric, time-aware & RK2, RK4 & \conf{uv\_interp: barycentric}, node layout, next snapshot present, linear in time, no carried element \\
+3-D Euler & Euler & z-level mesh, \conf{uv\_interp: leastsq}, \conf{w\_interp} \conf{nearest} or \conf{leastsq} \\
+3-D RK2 barycentric & RK2 & z-level mesh, node layout, \conf{uv\_interp: barycentric}, \conf{w\_interp} \conf{nearest} or \conf{barycentric}, no carried element; steady, linear or PCHIP \\
+adaptive & RK45 & two-dimensional, element-layout least squares; this scheme has no unfused twin \\
+\bottomrule
+\end{tabular}
+\caption{The fused kernel families and the configurations that select them. ``Carried element''
+refers to \conf{elem\_search: walk} (\cref{sec:loc-walk}): the barycentric kernels keep their own
+search, so a walk run takes the unfused path, while the least-squares kernels run and ignore the
+carried element.}
+\label{tab:fused-kernels}
+\end{table}
+
+The three-dimensional RK2 kernel evaluates per particle: the stage-one anchor and layer, the
+horizontal velocity by barycentric interpolation with the temporal blend applied at each vertex, and
+the vertical velocity $W_1$ --- computed before the horizontal verdict, so that a particle that dies
+on the horizontal interpolation reports the same vertical velocity on both paths; the midpoint
+$\mathbf{x}_{1/2}$ and $z_{1/2}=z+W_1\,\Delta t/2$; the stage-two anchor, layer and velocities; the end
+position with $z_{\text{new}}=z+W_2\,\Delta t$; the containment test; and the clamp of the depth to the
+water column. At one million particles on a mesh of \num{196000} nodes and 70 levels it was measured
+1.30 times faster than the unfused path at 16 threads (a development measurement not kept in the
+repository); the gain grows with the mesh and field size, while
+scattered per-particle reads dominate both paths (\cref{sec:perf-schemes}). The two-dimensional
+barycentric kernels remove the per-stage materialisation of the whole node field: on a
+four-million-node mesh an RK4 step fell from \SI{83}{ms} to \SI{9}{ms} at eight threads, independent of
+the mesh size.
+
+\section{Bit-identity}\label{sec:fused-identity}
+
+Where a fused and an unfused implementation of the same configuration both exist, they produce
+bit-identical trajectories, statuses and failure reasons, which the test suite checks
+(\cref{ch:validation}). Three things make it hold.
+
+\paragraph{The temporal blend.} Rather than materialising the field at each stage time, the fused
+kernels apply a nested two-level blend inline,
+\begin{equation}\label{eq:fused-nested}
+  \mathbf{u}_k=(1-\alpha_k)\bigl[(1-\alpha_0)\,\mathbf{u}_A+\alpha_0\,\mathbf{u}_B\bigr]+\alpha_k\,\mathbf{u}_T ,
+\end{equation}
+where $A$ and $B$ are the snapshots bracketing the step's start, $\alpha_0$ is the start's position in
+that bracket, and $T$ is the stage \emph{target} snapshot the step moves toward --- the later bracket
+snapshot when integrating forward, the earlier one when integrating backward, which is why the target
+is passed separately from the bracket. \Cref{eq:fused-nested} performs the same floating-point
+operations as stepping on the materialised field of \cref{eq:temp-linear}; with $\alpha_0=0$ it
+collapses to a single blend, and the barycentric kernels short-circuit the end-point fractions exactly
+as the unfused stage construction does, so the identity holds for non-finite values too.
+
+\paragraph{The anchors.} Every evaluation site of a fused kernel --- the start, each stage and the
+final position --- finds its nearest node through the exact search of \cref{sec:loc-exact}, the same
+function the unfused batch query calls, so the two paths anchor every particle to the same node, ties
+included. This is the default (\conf{mesh.exact\_nearest: true}). With the guard off, the fused
+kernels widen an empty window ring by ring --- an approximate anchor --- and identity rests on gates
+instead: the two-dimensional barycentric kernels (and the least-squares kernels on HEALPix pixel
+meshes) run only on meshes that pass the density certificate of \cref{sec:loc-exact}, with a warning
+and a fall-back to the unfused path otherwise; the three-dimensional RK2 kernel flags a particle whose
+stage window is empty, repairs the flagged positions with the batch search and re-runs only those
+particles through the kernel with the repaired anchor, for up to two rounds, before a last-resort
+unfused re-run of the remainder. The least-squares kernels on FESOM-family meshes and the fused
+three-dimensional Euler kernel have no such gate: with the guard off they agree with the unfused path
+only where no three-by-three window is empty, which holds in the domain interior of quasi-uniform meshes.
+
+\paragraph{The diagnostics.} Each fused kernel records why a particle failed --- interpolation failure
+or out of bounds --- in a per-particle scratch array at its failure branches, and the caller merges it
+into the sticky failure-reason field (\conf{mode.track\_failure\_reason}, \cref{ch:lifecycle}) exactly
+as the unfused path does. A failed particle keeps its start position and anchor on both paths, and
+frozen particles are copied verbatim.
+
+\codeanchor{The fused kernels are the \fn{\_fused\_*} functions of \srcfile{numerics/integrators.py};
+their runners are \fn{\_run\_fused\_2d}, \fn{\_run\_fused\_euler\_2d\_pair},
+\fn{\_run\_fused\_2d\_tinterp}, \fn{\_run\_fused\_2d\_bary\_tinterp}, \fn{\_run\_fused\_2d\_pchip},
+\fn{\_run\_fused\_euler\_3d} and \fn{\_run\_fused\_rk2\_3d\_bary\_tinterp}/\fn{\_pchip}; the adaptive
+scheme is \fn{\_rk45\_kernel\_2d}. The dispatch lives in \fn{euler\_step}, \fn{rk2\_step} and
+\fn{rk4\_step}; the anchor of each site is \fn{\_fused\_site\_anchor}; the guard-off gates are
+\fn{\_bary\_fused\_anchor\_exact} and \fn{\_leastsq\_fused\_anchor\_exact}, and the repair loop
+\fn{\_run\_fused\_3d\_with\_heal}; failure reasons are merged by \fn{\_merge\_fused\_failure}. The
+unfused stage interpolation goes through \fn{\_interp\_uv\_at}. The inline blends are the
+\fn{\_interp\_*\_tinterp} and \fn{\_interp\_*\_pchip4} cores of \srcfile{numerics/interpolate.py}
+and, for the vertical velocity, of \srcfile{numerics/vertical.py}.}

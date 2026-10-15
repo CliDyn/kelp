@@ -1,0 +1,158 @@
+# ==========================================================================
+# kelp configuration template
+#
+# Copy this file and adjust for your setup.  Full option-by-option
+# reference with file-discovery rules and pitfalls: docs/configuration.md
+#
+# Fields marked [REQUIRED] must be set.  Everything else has a default.
+# Gotchas (details in docs/configuration.md §1):
+#   - unknown/misspelled keys are SILENTLY IGNORED (no typo protection);
+#   - all five sections must be present; an empty one must be `section: {}`;
+#   - relative paths resolve relative to THIS file's directory, ~ expands.
+# ==========================================================================
+
+# --- Tracking mode --------------------------------------------------------
+mode:
+  Fdrift2D: true              # 2D surface tracking [default: true]
+  Fdrift3D: false             # 3D tracking (set Fdrift2D: false) [default: false]
+  time_dir: 1.0               # +1.0 forward, -1.0 backward [default: 1.0]
+  Vpuls: false                # FESOM-C 2D pulsation velocity [default: false]
+
+  # Variable name overrides — set when the dataset uses non-standard names.
+  # Auto-detection: FESOM2 u/v (+aliases ua/u_vel/va/v_vel in single-file
+  # mode); FESOM-C 2D u2d/v2d else u/v, 3D u/v.  W: FESOM2 w/wo/wvel
+  # (silently absent if not found — check the name for 3D runs!),
+  # FESOM-C w (Wvel; w_cart is refused).  Eta: FESOM2 ssh/eta/zos, FESOM-C
+  # eta (missing → zeros).  W sign: mode.w_positive (auto = file attrs, else up).
+  # var_u: unod               # node-layout u/v need uv_interp: barycentric
+  # var_v: vnod
+  # var_w: w
+  # var_eta: ssh
+
+  # 2D tracking in layered (3D) input — pick ONE:
+  # sigma_layer: 0            # vertical layer index to track in (0 = surface)
+  # sigma_mean: false         # FESOM-C: thickness-weighted vertical mean
+
+  # max_levels: 25            # 3D: keep only the upper N interfaces (>= 2)
+
+  # Scalar fields sampled along trajectories (node-based dataset vars):
+  # sample_vars: [temp, salt]
+
+# --- Numerical parameters ------------------------------------------------
+numerics:
+  # dt: integration step (s).  Omit → auto = file step.
+  # temporal_interp false → dt must equal the file step (discrete mode);
+  # temporal_interp true  → dt may be smaller (sub-stepping).
+  # dt: 3600.0
+  # file_dt: 3600.0           # set only when the file has no usable time axis
+
+  integrator: euler           # euler / rk2 / rk4 / rk45 (adaptive, 2D leastsq) [default: euler]
+  output_freq: 1              # record every N steps [default: 1]
+  temporal_interp: false      # lerp velocity between file snapshots [default: false]
+  # temporal_reconstruction: linear  # linear (default) / pchip (4-snapshot cubic; with prefetch, >= 4 covers it)
+  checkpoint_freq: 0          # restart checkpoint every N steps (needs output_path)
+  # output_flush_every: 0     # NetCDF: buffer N records then flush so the file reads mid-run; 0 = keep open
+
+  # uv_interp: leastsq        # leastsq (default; element-layout u/v only) / barycentric / edge_leastsq
+  # edge_leastsq_bc: freeslip # edge_leastsq boundary ghosts: freeslip / noslip (inert for other methods)
+  # elem_search: local        # local (default) / walk (track the containing element across edges;
+                              #   pays off on unfused runs: element-layout barycentric, edge_leastsq;
+                              #   node-layout barycentric with a next snapshot runs fused only under local)
+  # periodic_lon: [0.0, 10.0] # periodic fold window (idealized channels; mesh needs a ghost band past the window; strictly inside (-180,180))
+  # periodic_lat: [0.0, 2.0]  # same for latitude (doubly-periodic boxes; strictly inside (-90,90))
+  # w_interp: leastsq         # 3D W: nearest / leastsq / barycentric / idw
+  # sample_interp: leastsq    # sample_vars: nearest / leastsq / barycentric / idw
+  # Dmin: 0.5                 # min water-column height, m (sigma meshes only)
+  # z0b_min: 0.1              # bottom clamp distance, m (sigma meshes only)
+  # Dch: 1.0                  # nearest-node search radius, deg (reserved, currently unused)
+  # --- big-mesh I/O (TODO 5.2/5.3; default off = byte-identical) ---
+  # velocity_float32: true    # keep u/v/w float32 -> halve each processed snapshot's memory
+  # prefetch_size: 8          # read N snapshots per disk read (>=4 recommended with pchip);
+  #                           #   the window holds every dataset variable at full depth,
+  #                           #   in the on-disk dtype, for N records
+
+  # Stochastic horizontal diffusion (docs/configuration.md §3.1):
+  # diffusion:
+  #   enabled: true
+  #   scheme: uniform         # uniform / em / m1 (em+m1 read Kh from the dataset)
+  #   kh_zonal: 100.0         # m^2/s, uniform only
+  #   kh_meridional: 100.0
+  #   seed: 42
+  #   # composition: split_rk # REQUIRED for em/m1 + rk2/rk4 (auto otherwise)
+  #   # var_kh_zonal: Kh_zonal
+  #   # var_kh_meridional: Kh_meridional
+  #   # dres_m: 1000.0        # Kh gradient offset, m (default mesh-derived)
+  #   # kh_eval_position: end # split_rk only: sample Kh at 'start' or 'end' of step
+  #   # az_enabled: true      # vertical Az kick (3D only; Ito drift + reflective boundaries)
+  #   # az_const: 1.0e-4      # m^2/s, used when var_az unset (works on all readers)
+  #   # var_az: Av            # 3D Az field from the dataset (FESOM2 z-level only, v1)
+
+  # Beaching model (docs/configuration.md §3.2):
+  # beaching:
+  #   enabled: true
+  #   criteria: [depth]       # depth / coastal_element / on_failure / stochastic
+  #   depth_min: 0.3          # m
+  #   use_eta: false          # true needs an ssh/eta/zos variable in the data
+  #   dry_mask_var: null      # node var; >0.5 = dry
+  #   zone_depth: null        # stochastic-zone height, m (null -> 2*depth_min)
+  #   t_beach: 86400.0        # s; stochastic beaching timescale
+  #   resuspension: never     # never / auto / stochastic / auto_or_stochastic
+  #   rewet_hysteresis: 0.1   # m above depth_min for auto release
+  #   min_wet_steps: 1        # wet steps required before resuspension
+  #   t_resuspend: null       # s; stochastic resuspension timescale (required for stochastic resuspension)
+  #   seed: null              # counter-RNG seed (null -> numerics.diffusion.seed)
+
+# --- Mesh source ----------------------------------------------------------
+mesh:
+  type: fesomc                # [REQUIRED] fesomc / fesom2 / healpix / nemo
+  meshpath: path/to/mesh.nc   # [REQUIRED] fesom2: mesh-diag .nc, .zarr store,
+                              #   or ASCII dir (nod2d.out/elem2d.out);
+                              # fesomc: single NetCDF with lon/lat/nv/sigma_lev
+  # rotation: fesom2          # FESOM2 + HEALPix (fesomc/nemo reject): pole-safe rotated frame for
+                              #   Arctic/transpolar runs (null / fesom2 / [a,b,g])
+  # r_earth: 6367500.0        # only to match a non-default model build
+  # grid_hash_cell_size: 0.005  # nearest-node hash cell (deg), (0, 45); null = the
+                              #   run chooses it (grid_hash_cell_rule). Pin a cell
+                              #   for a release confined to a refined region, or
+                              #   when the rule keeps a cell that leaves 1e4-1e5
+                              #   nodes per window (~100x slower steps); the
+                              #   choice is printed and stamped in the output.
+  # grid_hash_cell_rule: occupancy  # occupancy (default: measured choice) / legacy
+                              #   (the reader's mean-spacing cell)
+  # exact_nearest: true       # exact nearest-node anchors for any cell (default);
+                              #   false + grid_hash_cell_rule: legacy reproduces
+                              #   pre-2026-09-14 anchors bit for bit
+
+# --- Input / output -------------------------------------------------------
+data:
+  # Prefer EXPLICIT files (see docs/configuration.md §5.1 for the directory
+  # discovery rules and their traps — prefix globs, first-match-only, ...).
+  ncinput: path/to/u.nc       # [REQUIRED] velocity file (or u-file if split)
+  # ncinput_v: path/to/v.nc   # separate v file
+  # ncinput_w: path/to/w.nc   # separate w file (3D)
+  inicloud: particles.dat     # [REQUIRED] seeds: "lon lat [depth] [release_sec]"
+                              #   ('# comments'; release_sec = delayed-release
+                              #   offset in seconds, optional — see time.n_pulses)
+  # output_path: tracks.zarr  # .zarr → Zarr, otherwise NetCDF; empty = in-memory
+  time_averaging: instant     # SET EXPLICITLY: mean (time-averaged output,
+                              #   timestamps shifted to window midpoints)
+                              #   or instant (snapshots)
+
+# --- Time control ----------------------------------------------------------
+time:
+  start_time_idx: 0           # first file time index [default: 0]
+  n_steps: 100                # [REQUIRED*] number of integration steps
+  # start_date: "2020-01-15T00:00"  # alternative: ISO datetime (raw file
+  #                           # timestamp; needs temporal_interp to start
+  #                           # between snapshots)
+  # duration_days: 30         # with start_date: n_steps = days*86400/dt
+  on_exhausted: stop          # stop / cycle (wrap around = periodic forcing)
+  num_runs: 1                 # realizations; output files get _r0, _r1, ...
+  # run_interval: 0           # file-index shift between realizations
+  # end_time_idx: 10          # legacy alternative to n_steps
+  # --- delayed / staggered release (TODO 2.5) ---
+  # n_pulses: 5               # re-release the seed set 5 times (same coords);
+  # pulse_interval: 86400     #   one pulse every 86400 s. Total particles =
+  #                           #   n_pulses * (seeds). Frozen until release ->
+  #                           #   NaN output until then. Composes with the
+  #                           #   per-particle release_sec seed column.
