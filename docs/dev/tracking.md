@@ -1,7 +1,7 @@
 # Developer notes — orchestration and CLI (`tracking.py`, `cli/main.py`)
 
 > **Covers:** `tracking.py` — `run_tracking`, `run_single_realization`, `track_particles`, the record clock, the temporal-interp payload, beaching / sampling / rotation / edge-walk hooks, fail-fast checks; `cli/main.py` — the `kelp run|info` commands.
-> **Does not cover:** the config keys ([config.md](config.md)); the writer ([writers.md](writers.md)); the integrators ([integrators.md](integrators.md)); the user guide [../running.md](../running.md) and [../architecture.md](../architecture.md).
+> **Does not cover:** the config keys ([config.md](config.md)), where periodic windows, the `start_date` resolution, the shared-fields tag and the grid-hash / exact-guard calls of `run_tracking` are also described; the writer ([writers.md](writers.md)); the integrators ([integrators.md](integrators.md)); the surface elevation of the sigma step and the snapshot cache ([readers.md](readers.md)); the user guide [../running.md](../running.md) and [../architecture.md](../architecture.md).
 > **Code:** `src/kelp/tracking.py:run_tracking`, `src/kelp/tracking.py:run_single_realization`, `src/kelp/tracking.py:track_particles`, `src/kelp/cli/main.py:main` (authoritative implementation).
 > **Verified at:** see `docs/doc_map.yaml` (stamped via check_doc_sync --bless).
 

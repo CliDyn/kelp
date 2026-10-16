@@ -2,7 +2,7 @@
 
 > **Covers:** `core/config.py` — the YAML → `AppConfig` loader, the config dataclasses and their load-time checks, and the engine behaviour behind several keys: the automatic grid-hash cell (`MeshConfig.grid_hash_cell_rule`) and the exact nearest-node guard (`MeshConfig.exact_nearest`), which carry most of the internals of the nearest-node search in `core/mesh.py` and of the fused kernels; the node-shared snapshot cache (`NumericsConfig.shared_fields_dir`, the only notes on `core/shared_fields.py`); beaching, periodic windows, rotation, the time window; `DiffusionConfig`.
 > **Does not cover:** the user-facing option reference ([../configuration.md](../configuration.md)); the mesh search code and its other caches ([mesh.md](mesh.md)); the integrators ([integrators.md](integrators.md)); the diffusion kernels ([numerics.md](numerics.md)).
-> **Code:** `src/kelp/core/config.py:load_config`, `src/kelp/core/config.py:AppConfig`, `src/kelp/core/config.py:MeshConfig`, `src/kelp/core/config.py:DiffusionConfig` (authoritative implementation).
+> **Code:** `src/kelp/core/config.py:load_config`, `src/kelp/core/config.py:AppConfig`, `src/kelp/core/config.py:MeshConfig`, `src/kelp/core/config.py:DiffusionConfig`, `src/kelp/core/mesh.py:choose_grid_hash_cell`, `src/kelp/core/mesh.py:find_nearest_nodes`, `src/kelp/core/shared_fields.py:SharedFieldCache` (authoritative implementation).
 > **Verified at:** see `docs/doc_map.yaml` (stamped via check_doc_sync --bless).
 
 Developer notes, level 2 — index: [README.md](README.md). The text below is the module notes of `CLAUDE.md` as of v1.0.0, moved verbatim; "above", "below" or "the config section" in it may point into another file of this folder.

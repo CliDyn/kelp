@@ -1,6 +1,7 @@
 # Instructions for AI agents
 
-This project uses `CLAUDE.md` as the single source of truth for LLM development instructions.
+This project uses `CLAUDE.md` as the single source of truth for LLM development instructions;
+the per-module notes it points to live in `docs/dev/`.
 
 **Read `CLAUDE.md` before doing anything.** It contains:
 

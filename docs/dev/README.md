@@ -50,22 +50,29 @@ Paths are below `src/kelp/`.
   `integrators.py`, and Numba invalidates only on the caller's file — wipe
   `src/**/__pycache__` after editing `mesh.py`. Notes: [mesh.md](mesh.md); the cell
   rule and the exact guard in [config.md](config.md) (`MeshConfig.grid_hash_cell_rule`,
-  `MeshConfig.exact_nearest`).
+  `MeshConfig.exact_nearest`); the in-kernel exact search as the fused kernels use it
+  in [integrators.md](integrators.md); the local projection, the vertex weights and
+  the seam-safe projection origin as the interpolators use them in
+  [numerics.md](numerics.md).
 - **`core/particles.py`** — `ParticleState` (immutable: `.replace()` returns a new
   state), `ParticleStatus` (ALIVE, BEACHED, OUTSIDE, NOT_RELEASED),
   `FailureReason`. A new optional per-particle array goes into `_OPTIONAL_ARRAYS`;
   split a state with `.subset()`, never field by field. Notes: [core.md](core.md).
 - **`core/particles_gen.py`** — seeding: a regular grid over the mesh, or a
   metric-scaled circle around a point; raises when no candidate lies inside the
-  mesh. Notes: [core.md](core.md).
+  mesh. Notes: [core.md](core.md); the search rebuild after the filter keeps a pinned
+  grid-hash cell: [mesh.md](mesh.md).
 - **`core/release.py`** — delayed and staggered release: particles are allocated
   up front as `NOT_RELEASED` and frozen until their release step; output masking
   of dormant particles and inactive velocities. The trivial schedule returns a
-  plain state (byte-identical runs). Notes: [core.md](core.md).
+  plain state (byte-identical runs). Notes: [core.md](core.md); the pulse keys in
+  [config.md](config.md) (`TimeConfig`); the seed-file header `# kelp particle_offset N`
+  and its checks in [numerics.md](numerics.md) (diffusion, "Shards").
 - **`core/io.py`** — `VelocityField` (u/v on elements or nodes, `w` positive down
   at interfaces, optional Kh, Az and sampled scalars) and `LazyLerpField`, which
   blends a field between two snapshots only when it is first read. Notes:
-  [core.md](core.md).
+  [core.md](core.md); the cost of the eager blend it replaced: [tracking.md](tracking.md)
+  (temporal-interp mode).
 - **`core/rotation.py`** — Euler rotated-frame primitives (`v_rot = R @ v_geo`;
   `"fesom2"` = (50, 15, −90)); plain numpy, run once per mesh load or snapshot,
   never in particle loops. Notes: [core.md](core.md); how tracking uses the frame:
@@ -80,10 +87,12 @@ Paths are below `src/kelp/`.
 - **`numerics/interpolate.py`** — u/v interpolation registry: `leastsq` (default;
   least-squares fit centred on the particle), `barycentric`, `edge_leastsq`; Numba
   kernels with a Python fallback. Node-layout u/v need `barycentric` (the fail-fast
-  is in [tracking.md](tracking.md)). Notes: [numerics.md](numerics.md).
+  is in [tracking.md](tracking.md)). Notes: [numerics.md](numerics.md); the
+  time-blending kernel twins the fused integrators call: [integrators.md](integrators.md).
 - **`numerics/vertical.py`** — z-level layers, depth clamping and W interpolation
   (vertical first, then `nearest`, `leastsq`, `barycentric` or `idw` across the
-  neighbours, bottom-aware). Notes: [numerics.md](numerics.md).
+  neighbours, bottom-aware). Notes: [numerics.md](numerics.md); the `w_interp`
+  validation against its method map: [config.md](config.md).
 - **`numerics/vertical_sigma.py`** — sigma-coordinate (FESOM-C) column geometry,
   layers, and W sampled along the particle's sigma level. Notes:
   [numerics.md](numerics.md); the sigma step itself in [readers.md](readers.md)
@@ -96,35 +105,51 @@ Paths are below `src/kelp/`.
   thread order and restarts), the uniform, Euler–Maruyama and Milstein kernels, Kh
   interpolation and gradients, the vertical Az kick. Trap: the particle key is the
   original state index plus the shard offset, never the alive-compacted index.
-  Notes: [numerics.md](numerics.md); `DiffusionConfig` in [config.md](config.md).
+  Notes: [numerics.md](numerics.md); `DiffusionConfig` in [config.md](config.md); how
+  the Kh and Az fields are read in [readers.md](readers.md) and carried in
+  [core.md](core.md) (`VelocityField`); the `--seed` override in
+  [tracking.md](tracking.md) (`cli/main.py`).
 - **`numerics/beaching.py`** — beaching decisions (four combinable criteria,
   resuspension) in plain numpy; the status changes are applied by the hook in
   `tracking.py`. Notes: [numerics.md](numerics.md); the hook in
-  [tracking.md](tracking.md); the options in [config.md](config.md).
+  [tracking.md](tracking.md); the options in [config.md](config.md); the dry mask in
+  multi-year FESOM2 input in [readers.md](readers.md).
 - **`numerics/sampling.py`** — scalar fields (temperature, salinity, …) sampled at
   particle positions for the output; direction-free (backward equals forward).
   Notes: [numerics.md](numerics.md); when samples are taken: [tracking.md](tracking.md).
 - **`numerics/integrators.py`** — Euler, RK2, RK4, RK45: fused Numba kernels and
   unfused paths, failure handling (`OUTSIDE` + `failure_reason`), diffusion
   composition, time-aware stages. `step(...)` returns a new state. Notes:
-  [integrators.md](integrators.md); the exact anchor search inside the fused kernels
-  in [config.md](config.md) (`MeshConfig.exact_nearest`).
+  [integrators.md](integrators.md); also: the sigma step (integration of the
+  particle's sigma fraction) in [readers.md](readers.md) (the `fesomc.py` 3-D W
+  bullet); the M1 warning, the all-dead early exit and the sigma bypass of the
+  fused 3-D Euler kernel in [numerics.md](numerics.md); the exact anchor search inside
+  the fused kernels in [config.md](config.md) (`MeshConfig.exact_nearest`) and
+  [mesh.md](mesh.md); the stage helpers, the lazy payload and the failure-reason
+  merge in [core.md](core.md) (`core/io.py`, `core/particles.py`); the edge walk in
+  [tracking.md](tracking.md).
 
 ### readers/
 
 - **`readers/__init__.py`** — the registry (`get_reader("fesomc" | "fesom2" | "nemo" |
   "healpix")`) and shared helpers: engine detection, the time axis and its epoch,
-  the sign rule for W in the file. Notes: [readers.md](readers.md).
+  the sign rule for W in the file. Notes: [readers.md](readers.md); the W sign from
+  `mode.w_positive` in [config.md](config.md); the time units the output takes from
+  the axis in [tracking.md](tracking.md) and [writers.md](writers.md).
 - **`readers/fesom2.py`** — FESOM2: NetCDF mesh diagnostics in several
   conventions, ASCII or Zarr meshes; single files, directories, multi-year
   `<var>.fesom.<year>.nc`; W is negated (FESOM2 writes it positive up). Notes:
-  [readers.md](readers.md).
+  [readers.md](readers.md); how `mesh.rotation` is resolved in [config.md](config.md)
+  (`MeshConfig.rotation`).
 - **`readers/fesomc.py`** — FESOM-C: one NetCDF on sigma coordinates; 3-D W =
   −`Wvel`; rejects `mesh.rotation`. Notes: [readers.md](readers.md).
 - **`readers/healpix.py`** — HEALPix stores (Zarr, NetCDF, kerchunk): the mesh is
   built from the data (dual or pixel geometry; the dual geometry has node-layout
   u/v and needs `uv_interp: barycentric`), regional extracts, rotation, 2-D and
-  3-D. Notes: [readers.md](readers.md); topic doc [../healpix.md](../healpix.md).
+  3-D. Notes: [readers.md](readers.md); the pixel geometry, `crop_bbox`, `levels`,
+  `healpix_zoom`, `ncinput_eta` and the rotation in [config.md](config.md)
+  (`MeshConfig.rotation` and the healpix-only keys bullet); topic doc
+  [../healpix.md](../healpix.md).
 - **`readers/structured.py`** — maps a logically rectangular grid onto a quad
   `Mesh` (a quad of four neighbouring cell centres is kept only when all four are
   wet; the nodes are the wet cell centres that belong to at least one such quad).
@@ -138,7 +163,13 @@ Paths are below `src/kelp/`.
   realizations → writer), `run_single_realization`, `track_particles`; the record
   clock, the lazy temporal-interp payload, the beaching, sampling, rotation and
   edge-walk hooks, fail-fast checks before the writer exists. Notes:
-  [tracking.md](tracking.md).
+  [tracking.md](tracking.md); also: periodic windows (`NumericsConfig.periodic_lon`),
+  the `start_date` resolution (`TimeConfig`), the shared-fields tag
+  (`NumericsConfig.shared_fields_dir`) and the grid-hash / exact-guard calls of
+  `run_tracking` in [config.md](config.md); the time bracket and the PCHIP stencil in
+  [integrators.md](integrators.md); the lazy payload in [core.md](core.md)
+  (`core/io.py`); the sampling instant in [numerics.md](numerics.md); the surface
+  elevation of the sigma step and the snapshot cache in [readers.md](readers.md).
 - **`writers.py`** — trajectory output, format 2 (CF trajectory; NetCDF4 or Zarr by
   file extension), checkpoints and standalone restart files. A NetCDF file is
   locked while open; `numerics.output_flush_every` makes it readable mid-run. Notes:
@@ -147,12 +178,14 @@ Paths are below `src/kelp/`.
   positive down. Notes: [numerics.md](numerics.md).
 - **`cli/main.py`** — the `kelp run|info` console script; `--temporal-interp` and
   `--checkpoint-freq` default to None so the YAML values pass through. Notes:
-  [tracking.md](tracking.md).
+  [tracking.md](tracking.md); what `kelp info` applies and prints (the grid-hash
+  cell) in [config.md](config.md) and [mesh.md](mesh.md).
 
 ### visualization/
 
-Matplotlib helpers, no core module depends on them. Notes (the package exports):
-[visualization.md](visualization.md).
+Matplotlib helpers, no core module depends on them. Notes (what the package
+exports): [visualization.md](visualization.md). Per file (module contents, not all
+of them exported):
 
 - **`visualization/core.py`** — `TrajectoryDataset` (load and access trajectory
   files), `display_coords`.

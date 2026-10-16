@@ -2,7 +2,7 @@
 
 > **Covers:** the matplotlib helpers in `visualization/` and what they export.
 > **Does not cover:** figure recipes and the figure contract (the `kelp-visualize` skill, `.claude/skills/kelp-visualize/`).
-> **Code:** `src/kelp/visualization/core.py:TrajectoryDataset` (authoritative implementation).
+> **Code:** `src/kelp/visualization/core.py:TrajectoryDataset`, `src/kelp/visualization/plot_2d.py:plot_field`, `src/kelp/visualization/stats.py:compute_presence_density_mesh` (authoritative implementation).
 > **Verified at:** see `docs/doc_map.yaml` (stamped via check_doc_sync --bless).
 
 Developer notes, level 2 — index: [README.md](README.md). The text below is the module notes of `CLAUDE.md` as of v1.0.0, moved verbatim; "above", "below" or "the config section" in it may point into another file of this folder.

@@ -1,7 +1,7 @@
 # Developer notes — integrators (`numerics/integrators.py`, `numerics/temporal_reconstruct.py`)
 
 > **Covers:** `numerics/integrators.py` — Euler / RK2 / RK4 / RK45, the fused and unfused paths, failure handling, diffusion dispatch, time-aware stages; and the PCHIP temporal reconstruction of `numerics/temporal_reconstruct.py`, described inside it.
-> **Does not cover:** the exact nearest-node search inside the fused kernels ([config.md](config.md), `MeshConfig.exact_nearest`); the interpolation and diffusion kernels ([numerics.md](numerics.md)); the topic doc [../time_integration.md](../time_integration.md).
+> **Does not cover:** the exact nearest-node search inside the fused kernels ([config.md](config.md), `MeshConfig.exact_nearest`); the sigma step on FESOM-C meshes ([readers.md](readers.md), the `fesomc.py` 3-D W bullet); the interpolation and diffusion kernels, the M1 warning and the sigma bypass of the fused 3-D Euler kernel ([numerics.md](numerics.md)); the topic doc [../time_integration.md](../time_integration.md).
 > **Code:** `src/kelp/numerics/integrators.py:get_integrator`, `src/kelp/numerics/integrators.py:rk4_step`, `src/kelp/numerics/temporal_reconstruct.py:reconstruct_pchip` (authoritative implementation).
 > **Verified at:** see `docs/doc_map.yaml` (stamped via check_doc_sync --bless).
 
