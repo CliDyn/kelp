@@ -6,7 +6,7 @@ description: Use when a KELP run is slower than the documented cost, silent or a
 # Diagnosing a slow, silent or anomalously scaling KELP run
 
 Every node below is a measurement plus a decision rule. Quote a measured number
-from `docs/performance.md` or CLAUDE.md, or label a number
+from `docs/performance.md`, CLAUDE.md or `docs/dev/`, or label a number
 "unmeasured" — never invent thresholds. Write BOTH outcomes of every
 measurement. Never write a tool's output — not as an assumption, not as an
 "example": copy its column names and leave the values blank; an example

@@ -181,7 +181,8 @@ makes the thing usable.
 ## Documentation
 
 - **[`CLAUDE.md`](CLAUDE.md)** — the package as an agent needs to see it:
-  module contracts, data shapes, conventions, what is and is not implemented.
+  conventions, what is and is not implemented, and the way into the per-module
+  notes in [`docs/dev/`](docs/dev/README.md) (module contracts, data shapes, traps).
 - **[`docs/`](docs/)** — the topic documentation. Start at
   [`docs/architecture.md`](docs/architecture.md) for the data flow and the core
   data structures. The full YAML reference is
@@ -411,7 +412,8 @@ There is also a **structured-grid foundation** (`readers/structured.py`,
 `readers/nemo.py`) that maps a logically rectangular C-grid onto a quad mesh.
 It is early work: two-dimensional only, restricted to grids whose axes line up
 with east and north, and not part of what we run day to day. It refuses rather
-than guesses whenever those limits are exceeded. See
+than guesses whenever those limits are exceeded. See the `nemo.py` notes in
+[`docs/dev/readers.md`](docs/dev/readers.md) and "Remaining work" in
 [`CLAUDE.md`](CLAUDE.md) for its exact scope before relying on it.
 
 ## Licence and citation
