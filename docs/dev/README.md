@@ -4,7 +4,8 @@ Level 1 of the developer guide. `CLAUDE.md` (level 0) is read in every session;
 this index and the notes files (level 2) are read on demand:
 
 - **before changing code or tests of a module** — read its entry below, then every
-  notes file the entry names;
+  notes file the entry names, then search for every other mention (the `grep`
+  below);
 - **during a run**, when a fine detail of a module matters (a default, a fail-fast,
   a metadata attribute, a known trap).
 
