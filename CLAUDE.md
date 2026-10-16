@@ -163,8 +163,9 @@ import graph live in `docs/dev/`. They are read on demand and never imported int
 this file:
 
 - **before changing code or tests of a module**: read
-  [`docs/dev/README.md`](docs/dev/README.md) (one entry per module, naming every
-  notes file that describes it), then those notes;
+  [`docs/dev/README.md`](docs/dev/README.md) (one entry per module: what it does,
+  its main trap, its notes file and the main other places), then those notes, and
+  find every other mention with `grep -n '<module or function>' docs/dev/*.md`;
 - **during a run**: open them when a fine detail of a module matters (a default,
   a fail-fast, a metadata attribute, a known trap).
 

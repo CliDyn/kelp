@@ -9,7 +9,10 @@ this index and the notes files (level 2) are read on demand:
   a metadata attribute, a known trap).
 
 The notes files are the module notes of `CLAUDE.md` as of v1.0.0, moved verbatim.
-Some modules are described in more than one file; each entry lists all of them.
+They refer to each other: a module's contract is sometimes written down under
+another module's heading. Each entry below names the module's own notes file and
+the main other places. To find every mention of a module or a function, search
+the notes: `grep -n '<module or function name>' docs/dev/*.md`.
 The topic documentation for users is one level up, in `docs/` (entry point
 [../architecture.md](../architecture.md)).
 
@@ -60,8 +63,9 @@ Paths are below `src/kelp/`.
   split a state with `.subset()`, never field by field. Notes: [core.md](core.md).
 - **`core/particles_gen.py`** — seeding: a regular grid over the mesh, or a
   metric-scaled circle around a point; raises when no candidate lies inside the
-  mesh. Notes: [core.md](core.md); the search rebuild after the filter keeps a pinned
-  grid-hash cell: [mesh.md](mesh.md).
+  mesh. Notes: [core.md](core.md); the grid-hash cell pin that survives search
+  rebuilds: [mesh.md](mesh.md) (the filter builds the search only when the mesh has
+  none, and keeps an existing one).
 - **`core/release.py`** — delayed and staggered release: particles are allocated
   up front as `NOT_RELEASED` and frozen until their release step; output masking
   of dormant particles and inactive velocities. The trivial schedule returns a
@@ -188,14 +192,14 @@ exports): [visualization.md](visualization.md). Per file (module contents, not a
 of them exported):
 
 - **`visualization/core.py`** — `TrajectoryDataset` (load and access trajectory
-  files), `display_coords`.
+  files), `display_coords`. Notes: [visualization.md](visualization.md).
 - **`visualization/plot_2d.py`** — `plot_mesh`, `plot_mesh_nodes`, `plot_field`,
-  `plot_trajectories`, `plot_diagnostics`.
+  `plot_trajectories`, `plot_diagnostics`. Notes: [visualization.md](visualization.md).
 - **`visualization/plot_3d.py`** — `plot_mesh_3d`, `plot_trajectories_3d`
-  (pyvista/vtk when available, else matplotlib), `build_pyvista_mesh`.
-- **`visualization/animation.py`** — `TrajectoryAnimator`.
+  (pyvista/vtk when available, else matplotlib), `build_pyvista_mesh`. Notes: [visualization.md](visualization.md).
+- **`visualization/animation.py`** — `TrajectoryAnimator`. Notes: [visualization.md](visualization.md).
 - **`visualization/stats.py`** — `compute_presence_probability`,
-  `compute_presence_density_mesh`, `compute_status_ratios`.
+  `compute_presence_density_mesh`, `compute_status_ratios`. Notes: [visualization.md](visualization.md).
 
 ## Dependency graph (imports)
 
