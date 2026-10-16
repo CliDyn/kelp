@@ -142,11 +142,15 @@ Paths are below `src/kelp/`.
   the axis in [tracking.md](tracking.md) and [writers.md](writers.md).
 - **`readers/fesom2.py`** — FESOM2: NetCDF mesh diagnostics in several
   conventions, ASCII or Zarr meshes; single files, directories, multi-year
-  `<var>.fesom.<year>.nc`; W is negated (FESOM2 writes it positive up). Notes:
-  [readers.md](readers.md); how `mesh.rotation` is resolved in [config.md](config.md)
-  (`MeshConfig.rotation`).
+  `<var>.fesom.<year>.nc`; W is turned positive down by `resolve_w_sign` —
+  negated by default, since FESOM2 writes it positive up, unless `mode.w_positive`
+  or the file's CF metadata say otherwise (e.g. a reconstructed W, stamped
+  `positive="down"`). Notes: [readers.md](readers.md); the sign precedence and how
+  `mesh.rotation` is resolved in [config.md](config.md) (`ModeConfig.w_positive`,
+  `MeshConfig.rotation`).
 - **`readers/fesomc.py`** — FESOM-C: one NetCDF on sigma coordinates; 3-D W =
-  −`Wvel`; rejects `mesh.rotation`. Notes: [readers.md](readers.md).
+  −`Wvel` by default (the sign through `resolve_w_sign`, as for FESOM2); rejects
+  `mesh.rotation`. Notes: [readers.md](readers.md).
 - **`readers/healpix.py`** — HEALPix stores (Zarr, NetCDF, kerchunk): the mesh is
   built from the data (dual or pixel geometry; the dual geometry has node-layout
   u/v and needs `uv_interp: barycentric`), regional extracts, rotation, 2-D and
@@ -172,8 +176,9 @@ Paths are below `src/kelp/`.
   (`NumericsConfig.shared_fields_dir`) and the grid-hash / exact-guard calls of
   `run_tracking` in [config.md](config.md); the time bracket and the PCHIP stencil in
   [integrators.md](integrators.md); the lazy payload in [core.md](core.md)
-  (`core/io.py`); the sampling instant in [numerics.md](numerics.md); the surface
-  elevation of the sigma step and the snapshot cache in [readers.md](readers.md).
+  (`core/io.py`); the `comment` the sampled variables get in [writers.md](writers.md);
+  the surface elevation of the sigma step and the cache's rule for an all-NaN W
+  record in [readers.md](readers.md).
 - **`writers.py`** — trajectory output, format 2 (CF trajectory; NetCDF4 or Zarr by
   file extension), checkpoints and standalone restart files. A NetCDF file is
   locked while open; `numerics.output_flush_every` makes it readable mid-run. Notes:
