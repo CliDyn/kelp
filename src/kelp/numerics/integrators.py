@@ -4507,6 +4507,19 @@ def _run_fused_rk2_3d_bary_tinterp(state, vel, vel_next, dt_to_next, mesh,
             "payload (alpha0 == 0.0) is not supported by the fused "
             "kernel — use the unfused path")
 
+    # one placement for every field the kernel reads (a lazy vel's raw
+    # parents first, so a bad parent is named; the target), before any
+    # other check reads a field: it picks the kernel; the shape guard and,
+    # depth-linear, the record check follow below
+    site = "_run_fused_rk2_3d_bary_tinterp"
+    named = []
+    if hasattr(vel, "vel_a"):
+        named += [("vel.vel_a", vel.vel_a), ("vel.vel_b", vel.vel_b)]
+    named.append(("vel", vel))
+    if vel_next is not None:
+        named.append(("vel_next", vel_next))
+    placement = _fused_3d_uv_placement(site, named)
+
     if vel_next is None:
         vel_a_full = getattr(vel, "vel_a", vel)
         u_a = vel_a_full.u; v_a = vel_a_full.v; w_a = vel_a_full.w
@@ -4535,18 +4548,6 @@ def _run_fused_rk2_3d_bary_tinterp(state, vel, vel_next, dt_to_next, mesh,
         # would materialize whole-field blends the kernel never needs
         _fused_3d_optional_payload_checks(vel_a_full, vel_b_full)
         _fused_3d_optional_payload_checks(vel_a_full, vel_next)
-
-    # one placement for every field the kernel reads (a lazy vel's raw
-    # parents first, so a bad parent is named; the target); it picks the
-    # kernel; then the shape guard and, depth-linear, the record check
-    site = "_run_fused_rk2_3d_bary_tinterp"
-    named = []
-    if hasattr(vel, "vel_a"):
-        named += [("vel.vel_a", vel.vel_a), ("vel.vel_b", vel.vel_b)]
-    named.append(("vel", vel))
-    if vel_next is not None:
-        named.append(("vel_next", vel_next))
-    placement = _fused_3d_uv_placement(site, named)
 
     _fused_3d_bary_field_checks(
         mesh,
@@ -4837,11 +4838,14 @@ def _euler_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
         vel_w = _sigma_stage_field(vel, eta0)
         H0 = _sigma_col_H(mesh, state.lon, state.lat, nn_full, eta0, alive,
                           w_interp, Dmin)
-    if is3d:
+    if is3d and getattr(vel, "uv_vertical", "layer") == "layer":
         interp_layer = _compute_layers(
             mesh, vel_w, state.z, nn_full, alive,
             Dmin=Dmin, z0b_min=z0b_min, H_col=H0,
         )
+    elif is3d:
+        # depth-linear u/v read the stage depth (state.z), not a layer
+        interp_layer = 0
     else:
         interp_layer = layer
 
@@ -5224,11 +5228,14 @@ def _rk2_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
         vel_k1 = _sigma_stage_field(vel_k1, eta0)
         H1 = _sigma_col_H(mesh, state.lon, state.lat, nn1, eta0, alive,
                           w_interp, Dmin)
-    if is3d:
+    if is3d and getattr(vel_k1, "uv_vertical", "layer") == "layer":
         interp_layer1 = _compute_layers(
             mesh, vel_k1, state.z, nn1, alive,
             Dmin=Dmin, z0b_min=z0b_min, H_col=H1,
         )
+    elif is3d:
+        # depth-linear u/v read the stage depth (state.z), not a layer
+        interp_layer1 = 0
     else:
         interp_layer1 = layer
 
@@ -5277,12 +5284,15 @@ def _rk2_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
                               moves1, w_interp, Dmin)
             z_mid = np.where(moves1, s_mid * H2, state.z)
             vel_k2_w = _sigma_stage_field(vel_k2, eta_mid)
-        if is3d:
+        if is3d and getattr(vel_k2, "uv_vertical", "layer") == "layer":
             layers_mid = _compute_layers(
                 mesh, vel_k2_w, z_mid, nn_mid_full, moves1,
                 Dmin=Dmin, z0b_min=z0b_min, H_col=H2 if sig3d else None,
             )
             layer_arg = layers_mid
+        elif is3d:
+            # depth-linear u/v read the stage depth (z_mid), not a layer
+            layer_arg = 0
         else:
             layer_arg = layer
 
@@ -5605,12 +5615,15 @@ def _rk4_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
             if s is not None:
                 z = np.where(mask, s * H_out, z)
             vel_at_stage = _sigma_stage_field(vel_at_stage, eta_stage)
-        if is3d:
+        if is3d and getattr(vel_at_stage, "uv_vertical", "layer") == "layer":
             layers_local = _compute_layers(
                 mesh, vel_at_stage, z, nn_full_local, mask,
                 Dmin=Dmin, z0b_min=z0b_min, H_col=H_col,
             )
             layer_arg = layers_local
+        elif is3d:
+            # depth-linear u/v read the stage depth (z), not a layer
+            layer_arg = 0
         else:
             layer_arg = layer
         stage_elems = prev_elems

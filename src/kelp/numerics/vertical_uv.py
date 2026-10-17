@@ -16,8 +16,11 @@ with ``lower_k = p[k]`` for level data and ``lower_k = z_{k+1}`` (the
 layer's lower level: the :func:`kelp.numerics.vertical.find_layer` rule, so
 a partial bottom layer is never read) for layer data, and ``D_i`` the
 reader's declaration ``mesh.metadata["uv_data_last"][i]`` when present
-(the last finite point of the field's own vertical axis; ``-1`` = no data,
-then only point 0 is used).  A non-finite ``depth_i`` gives ``last_i = 0``.
+(the last finite point of the field's own vertical axis).  ``-1`` declares
+the surface only: point 0 is the only one read, and the record check
+requires it to be finite — a column with no data at all must not be a mesh
+node, or must carry a finite surface value.  A non-finite ``depth_i``
+gives ``last_i = 0``.
 
 Above ``p[0]`` and below ``p[last_i]`` the value of that point is used (no
 extrapolation); in between, the two bracketing points are blended.  The
@@ -140,8 +143,9 @@ def _build_depth_points(sigma, depth, decl, placement: str,
                 f"shape ({n_nodes},), got dtype {dl.dtype} shape {dl.shape}")
         if dl.size and int(dl.min()) < -1:
             raise ValueError(
-                "mesh.metadata['uv_data_last'] must be >= -1 (-1 = no data "
-                f"in the column), got minimum {int(dl.min())}")
+                "mesh.metadata['uv_data_last'] must be >= -1 (-1 = surface "
+                "only: point 0 is read and must be finite), got minimum "
+                f"{int(dl.min())}")
         last = np.minimum(last, dl.astype(np.int64))
     last = np.maximum(last, 0).astype(np.int32)
     p.setflags(write=False)
@@ -158,7 +162,8 @@ def depth_points(mesh: Mesh, placement: str) -> DepthPoints:
         A z-level mesh (``vertical_coord == "zlevel"``) with its level
         depths in ``mesh.sigma`` (the engine reads ``|mesh.sigma|``, i.e.
         ``mesh.z_levels``) and bed depths in ``mesh.depth``; optional
-        reader declaration ``mesh.metadata["uv_data_last"]`` (int ``(N,)``).
+        reader declaration ``mesh.metadata["uv_data_last"]`` (int ``(N,)``;
+        ``-1`` = surface only, whose value must be finite).
     placement : str
         ``"level"`` or ``"layer_linear"``.
 

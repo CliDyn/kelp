@@ -106,7 +106,7 @@ def test_layer_linear_requires_node_and_k_minus_1():
 
 
 def test_depth_linear_needs_node_layout_without_w():
-    # Ruling R8: node layout belongs to the placement, with or without w
+    # node layout belongs to the placement, with or without w
     for placement in ("level", "layer_linear"):
         with pytest.raises(ValueError, match="node"):
             VelocityField(u=np.zeros((K - 1, E)), v=np.zeros((K - 1, E)),

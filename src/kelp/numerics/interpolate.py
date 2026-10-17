@@ -1377,24 +1377,28 @@ def _tinterp_point_uv(u_a, v_a, u_b, v_b, u_t, v_t, k, nd, alpha0, alpha):
     which reproduce the unfused ``_make_stage_vels`` / ``_blend`` values bit
     for bit.  The endpoint stages (``alpha`` within 1e-12 of 0 or 1, the
     thresholds of ``_make_stage_vels``) skip the blend, so a non-finite
-    value in the unused endpoint never turns into NaN (0 * inf).  Returns
-    float64 ``(u, v)``."""
+    value in the unused endpoint never turns into NaN (0 * inf).  Every
+    stored value is widened to float64 before any arithmetic, as ``_blend``
+    widens the arrays: without JIT a float32 numpy scalar would otherwise
+    keep the blend in float32 (NEP 50); compiled, the widening is exact and
+    changes no bit.  Returns float64 ``(u, v)``."""
     if alpha < 1e-12:
         if alpha0 == 0.0:
             return float(u_a[k, nd]), float(v_a[k, nd])
         beta0 = 1.0 - alpha0
-        return (beta0 * u_a[k, nd] + alpha0 * u_b[k, nd],
-                beta0 * v_a[k, nd] + alpha0 * v_b[k, nd])
+        return (beta0 * float(u_a[k, nd]) + alpha0 * float(u_b[k, nd]),
+                beta0 * float(v_a[k, nd]) + alpha0 * float(v_b[k, nd]))
     if alpha > 1.0 - 1e-12:
         return float(u_t[k, nd]), float(v_t[k, nd])
     beta = 1.0 - alpha
     if alpha0 == 0.0:
-        return (beta * u_a[k, nd] + alpha * u_t[k, nd],
-                beta * v_a[k, nd] + alpha * v_t[k, nd])
+        return (beta * float(u_a[k, nd]) + alpha * float(u_t[k, nd]),
+                beta * float(v_a[k, nd]) + alpha * float(v_t[k, nd]))
     beta0 = 1.0 - alpha0
-    ua0 = beta0 * u_a[k, nd] + alpha0 * u_b[k, nd]
-    va0 = beta0 * v_a[k, nd] + alpha0 * v_b[k, nd]
-    return beta * ua0 + alpha * u_t[k, nd], beta * va0 + alpha * v_t[k, nd]
+    ua0 = beta0 * float(u_a[k, nd]) + alpha0 * float(u_b[k, nd])
+    va0 = beta0 * float(v_a[k, nd]) + alpha0 * float(v_b[k, nd])
+    return (beta * ua0 + alpha * float(u_t[k, nd]),
+            beta * va0 + alpha * float(v_t[k, nd]))
 
 
 @njit(cache=True)

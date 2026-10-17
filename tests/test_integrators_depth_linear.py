@@ -344,6 +344,29 @@ def test_stage_overshoot_clamped(placement, integrator, end):
     _assert_step(out, st, dlon, dlat)
 
 
+@pytest.mark.parametrize("integrator", ["euler", "rk2", "rk4"])
+def test_unfused_depth_linear_skips_layer_lookup(monkeypatch, integrator):
+    """The unfused stages of a depth-linear step read their own depth, so
+    no per-stage layer lookup (``_compute_layers``) runs; a layer field of
+    the same step still looks its layers up.  (RK2 with ``elem_search:
+    walk`` is unfused; Euler with barycentric u/v and RK4 always are.)"""
+    mesh = _deep_mesh()
+    calls = []
+    real = I._compute_layers
+
+    def spy(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+    monkeypatch.setattr(I, "_compute_layers", spy)
+    kw = dict(uv_interp="barycentric", w_interp="nearest")
+    for vel, expect_calls in ((_deep_field("level", 0.004), False),
+                              (_layer_field(0.004), True)):
+        calls.clear()
+        STEPS[integrator](_state(mesh=mesh, walk=True), vel, mesh, 600.0,
+                          1.0, **kw)
+        assert bool(calls) is expect_calls, (vel.uv_vertical, len(calls))
+
+
 # ---------------------------------------------------------------------------
 # Recorded velocity
 # ---------------------------------------------------------------------------

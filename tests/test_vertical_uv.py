@@ -1,6 +1,6 @@
 """Tests for ``kelp.numerics.vertical_uv``: the depth-linear u/v data-point
 table, the per-node last usable point, the bracket/read helpers and the
-record check (depth-linear engine, Task 3).
+record check.
 
 All synthetic: a 4-node z-level mesh (levels ``[0, 10, 20, 30]`` m) and
 hand-built node-layout fields.
@@ -151,7 +151,7 @@ def test_declared_prefix_caps_last():
     dp = vu.depth_points(mesh, "level")
     # geometric [3, 2, 1, 0] capped by the declaration [0, 2, 1, 1]
     assert_bitwise(dp.last, np.array([0, 2, 1, 0], dtype=np.int32), "last")
-    # -1 (no data in the column) -> point 0 only
+    # -1 (surface only) -> point 0 only, and it must be finite (below)
     mesh.metadata["uv_data_last"] = np.array([-1, 5, 1, 1], dtype=np.int32)
     dp2 = vu.depth_points(mesh, "level")
     assert dp2 is not dp
@@ -258,9 +258,9 @@ def test_bracket_invariants_random():
 
 
 def test_exact_level_and_bed_depths():
-    """Review Focus 3: a particle exactly at a data point or exactly at the
-    bed reads the stored value bit for bit, with NaN stored at every point
-    below the last usable one (+inf at one)."""
+    """A particle exactly at a data point or exactly at the bed reads the
+    stored value bit for bit, with NaN stored at every point below the last
+    usable one (+inf at one)."""
     vu = _vu()
     for placement, depths in (("level", (30.0, 20.0, 10.0, 0.0)),
                               ("layer_linear", (25.0, 20.0, 30.0, 5.0))):
@@ -454,7 +454,7 @@ def test_cache_survives_id_reuse():
 
 
 # ---------------------------------------------------------------------------
-# Lazy fields (ruling R2): parents checked, no blend
+# Lazy fields: parents checked, no blend
 # ---------------------------------------------------------------------------
 
 def test_check_record_lazy_field_checks_parents_without_blend(monkeypatch):

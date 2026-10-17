@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,7 +33,7 @@ import numpy as np
 import pytest
 
 from kelp.core.io import LazyLerpField, VelocityField
-from kelp.core.mesh import find_nearest_nodes
+from kelp.core.mesh import find_nearest_nodes, set_exact_nearest
 from kelp.core.particles import make_state
 from kelp.numerics import integrators as I
 from kelp.numerics.temporal_reconstruct import _pchip_value_scalar
@@ -472,6 +473,27 @@ def test_fused_heal_keeps_placement(monkeypatch, placement, mode):
 
 @pytest.mark.parametrize("mode", ["tinterp", "pchip"])
 @pytest.mark.parametrize("placement", PLACEMENTS)
+def test_exact_nearest_parity(monkeypatch, placement, mode):
+    """With the exact nearest-node guard on (``exact_nearest``), the twins
+    resolve the empty-window stage anchors with their in-kernel exact
+    search: one launch (no flag, no heal round, no splice — the same seeds
+    flag without the guard, see the heal test) and the unfused step bit
+    for bit."""
+    m = _hole_mesh()
+    set_exact_nearest(m, True)
+    st = _hole_seeds(m)
+    calls = _spy(monkeypatch, _DL_KERNELS + _LAYER_KERNELS
+                 + ("_splice_exact_rerun",))
+    got, ref, kern, _ = _hole_run(m, placement, mode, st)
+    assert calls[kern] == 1
+    assert calls["_splice_exact_rerun"] == 0
+    assert all(calls[k] == 0 for k in _LAYER_KERNELS)
+    _assert_same(got, ref)
+    assert int((got.status == 1).sum()) >= 90
+
+
+@pytest.mark.parametrize("mode", ["tinterp", "pchip"])
+@pytest.mark.parametrize("placement", PLACEMENTS)
 def test_terminal_splice_keeps_placement(monkeypatch, placement, mode):
     """With the heal rounds off, the flagged particles are spliced from the
     unfused re-run, which reads the field with its own placement: they
@@ -530,12 +552,22 @@ def test_pchip_snapshot_placement_mixed_raises(mesh, monkeypatch, j):
     assert all(c == 0 for c in calls.values())
 
 
-@pytest.mark.parametrize("case", ["vel_next", "vel", "lazy_parent",
-                                  "steady_lazy_parent"])
+_TINTERP_MIX = {
+    "vel_next": "vel='layer_linear', vel_next='layer'",
+    "vel": "vel='layer', vel_next='layer_linear'",
+    "lazy_parent": ("vel.vel_a='layer_linear', vel.vel_b='layer', "
+                    "vel='layer_linear', vel_next='layer_linear'"),
+    "steady_lazy_parent": ("vel.vel_a='layer_linear', vel.vel_b='layer', "
+                           "vel='layer_linear'"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_TINTERP_MIX))
 def test_tinterp_placement_mixed_raises(mesh, monkeypatch, case):
     """The tinterp runner refuses a ``"layer"`` field among the depth-linear
     ones it reads: ``vel``, the target ``vel_next`` or a lazy ``vel``'s raw
-    parent (a parent swapped after construction, direct callers only)."""
+    parent (a parent swapped after construction, direct callers only); the
+    message is the runner's and names every field with its placement."""
     dl = _dl_field(mesh, "layer_linear", 1)
     lay = _as_layer(_dl_field(mesh, "layer_linear", 2))
     kw = dict(vel_next=_dl_field(mesh, "layer_linear", 3),
@@ -550,7 +582,9 @@ def test_tinterp_placement_mixed_raises(mesh, monkeypatch, case):
         if case == "steady_lazy_parent":
             kw = dict(vel_next=None, dt_to_next=None)
     calls = _spy(monkeypatch, _LAYER_KERNELS + _DL_KERNELS)
-    with pytest.raises(ValueError, match=r"uv_vertical mismatch"):
+    msg = ("_run_fused_rk2_3d_bary_tinterp: uv_vertical mismatch between "
+           "the fields the fused kernel reads: " + _TINTERP_MIX[case])
+    with pytest.raises(ValueError, match="^" + re.escape(msg) + "$"):
         I._run_fused_rk2_3d_bary_tinterp(_seeds(mesh, n=50), vel,
                                          kw["vel_next"], kw["dt_to_next"],
                                          mesh, DT, 1.0, I.W_BARYCENTRIC)
@@ -651,6 +685,53 @@ def test_field_checks_by_placement():
 # NUMBA_DISABLE_JIT: the pure-Python twins equal the pure-Python unfused path
 # ---------------------------------------------------------------------------
 
+def _to_float32(vel, kw):
+    """The same payload with float32 u/v everywhere (lazy fields rebuilt
+    over float32 parents; one object stays one object)."""
+    conv = {}
+
+    def f32(x):
+        if id(x) not in conv:
+            if isinstance(x, LazyLerpField):
+                conv[id(x)] = LazyLerpField(f32(x.vel_a), f32(x.vel_b),
+                                            x.alpha)
+            else:
+                conv[id(x)] = _as_float32(x)
+        return conv[id(x)]
+    out = dict(kw)
+    if kw.get("vel_next") is not None:
+        out["vel_next"] = f32(kw["vel_next"])
+    if "recon" in kw:
+        out["recon"] = ([f32(s_) for s_ in kw["recon"][0]],) \
+            + tuple(kw["recon"][1:])
+    return f32(vel), out
+
+
+#: no-JIT parity cases: (placement, payload, dtype); the PCHIP one backward
+NOJIT_CASES = [(pl, mode, dt) for pl in PLACEMENTS
+               for mode in ("lerp", "lazy", "pchip")
+               for dt in ("float64", "float32")]
+
+
+def _nojit_case(mesh, placement, mode, dtype):
+    """(vel, kwargs, time_dir) of one no-JIT parity case."""
+    if mode == "pchip":
+        vel, kw = _pchip_payload(mesh, placement, -1.0)
+        tdir = -1.0
+    else:
+        vel, kw = _tinterp_payload(mesh, placement, mode)
+        tdir = 1.0
+    if dtype == "float32":
+        vel, kw = _to_float32(vel, kw)
+    return vel, kw, tdir
+
+
+def _same_bits(a, b):
+    a, b = np.asarray(a), np.asarray(b)
+    return (a.dtype == b.dtype and a.shape == b.shape
+            and a.tobytes() == b.tobytes())
+
+
 _SUBPROCESS_SCRIPT = r"""
 import json, sys
 from pathlib import Path
@@ -672,58 +753,48 @@ for nm in t._DL_KERNELS:
 mesh = t._healpix_mesh()
 st = t._seeds(mesh, n=40)
 rows = {}
-for placement in t.PLACEMENTS:
-    for mode in ("lazy", "pchip"):
-        launches.clear()
-        if mode == "pchip":
-            vel, kw = t._pchip_payload(mesh, placement, -1.0)
-            tdir = -1.0
-        else:
-            vel, kw = t._tinterp_payload(mesh, placement, mode)
-            tdir = 1.0
-        got = I.rk2_step(st, vel, mesh, t.DT, tdir, uv_interp="barycentric",
-                         w_interp="barycentric", **kw)
-        if mode == "pchip":
-            kw = dict(recon=kw["recon"])
-        ref = I._rk2_step_unfused(st, vel, mesh, t.DT, tdir, 0, True,
-                                  w_interp="barycentric",
-                                  uv_interp="barycentric", **kw)
-        same = all(getattr(got, f).tobytes() == getattr(ref, f).tobytes()
-                   for f in t._FIELDS)
-        rows[f"{placement}-{mode}"] = [bool(same), len(launches),
-                                       got.lon.tolist(), got.u.tolist()]
+for placement, mode, dtype in t.NOJIT_CASES:
+    launches.clear()
+    vel, kw, tdir = t._nojit_case(mesh, placement, mode, dtype)
+    got = I.rk2_step(st, vel, mesh, t.DT, tdir, uv_interp="barycentric",
+                     w_interp="barycentric", **kw)
+    if mode == "pchip":
+        kw = dict(recon=kw["recon"])
+    ref = I._rk2_step_unfused(st, vel, mesh, t.DT, tdir, 0, True,
+                              w_interp="barycentric",
+                              uv_interp="barycentric", **kw)
+    differ = [f for f in t._FIELDS
+              if not t._same_bits(getattr(got, f), getattr(ref, f))]
+    rows["-".join((placement, mode, dtype))] = [
+        differ, len(launches), got.lon.tolist(), got.u.tolist()]
 print(json.dumps(rows))
 """
 
 
 def test_numba_disabled_subprocess_matches(mesh, tmp_path):
-    """With ``NUMBA_DISABLE_JIT=1`` the twins run as Python, equal the
-    unfused step bit for bit there, and agree with the compiled twins."""
+    """With ``NUMBA_DISABLE_JIT=1`` the twins run as Python and equal the
+    unfused step bit for bit there (dtype, shape and bytes) — float64 and
+    float32 fields, plain and lazy lerp payloads and PCHIP, both
+    placements — and agree with the compiled twins."""
     script = tmp_path / "fused_dl_nojit.py"
     script.write_text(_SUBPROCESS_SCRIPT)
     src = str(Path(__file__).resolve().parents[1] / "src")
     env = dict(os.environ, NUMBA_DISABLE_JIT="1")
     out = subprocess.run([sys.executable, str(script), src],
-                         capture_output=True, text=True, timeout=600,
+                         capture_output=True, text=True, timeout=900,
                          env=env)
     assert out.returncode == 0, out.stderr
     rows = json.loads(out.stdout)
+    assert len(rows) == len(NOJIT_CASES) == 12
     st = _seeds(mesh, n=40)
-    for placement in PLACEMENTS:
-        for mode in ("lazy", "pchip"):
-            same, n_launch, lon, u = rows[f"{placement}-{mode}"]
-            assert n_launch == 1, f"{placement}-{mode}: twin not launched"
-            assert same, f"{placement}-{mode}: fused != unfused without JIT"
-            if mode == "pchip":
-                vel, kw = _pchip_payload(mesh, placement, -1.0)
-                tdir = -1.0
-            else:
-                vel, kw = _tinterp_payload(mesh, placement, mode)
-                tdir = 1.0
-            got = I.rk2_step(st, vel, mesh, DT, tdir,
-                             uv_interp="barycentric",
-                             w_interp="barycentric", **kw)
-            np.testing.assert_allclose(np.array(lon, dtype=float), got.lon,
-                                       rtol=0.0, atol=1e-11)
-            np.testing.assert_allclose(np.array(u, dtype=float), got.u,
-                                       rtol=1e-12, atol=1e-15)
+    bad = {k: r[0] for k, r in rows.items() if r[0] or r[1] != 1}
+    assert not bad, f"no-JIT fused != unfused (fields) or no twin: {bad}"
+    for placement, mode, dtype in NOJIT_CASES:
+        _, _, lon, u = rows["-".join((placement, mode, dtype))]
+        vel, kw, tdir = _nojit_case(mesh, placement, mode, dtype)
+        got = I.rk2_step(st, vel, mesh, DT, tdir, uv_interp="barycentric",
+                         w_interp="barycentric", **kw)
+        np.testing.assert_allclose(np.array(lon, dtype=float), got.lon,
+                                   rtol=0.0, atol=1e-11)
+        np.testing.assert_allclose(np.array(u, dtype=float), got.u,
+                                   rtol=1e-12, atol=1e-15)

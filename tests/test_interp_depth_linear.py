@@ -1,4 +1,4 @@
-"""Depth-linear barycentric u/v (depth-linear engine, Task 4).
+"""Depth-linear barycentric u/v.
 
 ``interp_barycentric`` dispatches a ``"level"`` / ``"layer_linear"`` field to
 the depth-linear twins (``_interp_barycentric_dl`` ->
