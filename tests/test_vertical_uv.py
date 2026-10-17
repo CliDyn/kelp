@@ -191,8 +191,8 @@ def test_refuses_layer_and_sigma_mesh():
         vu.depth_points(_mesh(levels=[]), "level")
     with pytest.raises(ValueError, match="levels"):
         vu.depth_points(_mesh(levels=[0.0]), "layer_linear")
-    # a level table that is not increasing
-    with pytest.raises(ValueError, match="increasing"):
+    # a level table that decreases somewhere
+    with pytest.raises(ValueError, match="non-decreasing"):
         vu.depth_points(_mesh(levels=[0.0, 20.0, 10.0, 30.0]), "level")
     # the record check refuses a layer field (it is not depth-linear)
     with pytest.raises(ValueError, match="layer"):
@@ -302,6 +302,67 @@ def test_uv_at_never_touches_next_point_on_direct_read():
     assert vu.uv_at(f, 1, 0, -1.0) == -1.0
     f2 = np.array([[2.0], [4.0]])
     assert vu.uv_at(f2, 0, 0, 0.5) == 3.0
+
+
+def test_bracket_coincident_points_reads_the_deeper():
+    """A depth exactly at two coincident points reads the deeper one (the
+    larger index), as the docstring says; just above them the bracket
+    ends at the shallower one."""
+    vu = _vu()
+    p = np.array([0.0, 10.0, 10.0, 20.0])
+    assert vu.uv_bracket(p, 3, 10.0) == (2, -1.0)
+    k, a = vu.uv_bracket(p, 3, 9.0)
+    assert k == 0 and a == 0.9
+    k, a = vu.uv_bracket(p, 3, 15.0)
+    assert k == 2 and a == 0.5
+    # the last usable point is the shallower of the pair: read it directly
+    assert vu.uv_bracket(p, 1, 10.0) == (1, -1.0)
+
+
+def test_bracket_nan_depth():
+    """A NaN depth (pinned as the docstring states): ``k = last_i - 1``
+    with a NaN alpha when ``last_i > 0`` (a NaN value, never a point past
+    ``last_i``), point 0 directly when ``last_i == 0``, point ``last_i - 1``
+    directly on a degenerate last spacing.  The kernels map a NaN depth to
+    ``+inf`` before the bracket: that reads ``last_i`` directly."""
+    vu = _vu()
+    p = np.array(LEVELS)
+    for last_i in (1, 2, 3):
+        k, a = vu.uv_bracket(p, last_i, np.nan)
+        assert k == last_i - 1 and np.isnan(a), (last_i, k, a)
+        f = np.arange(4.0)[:, None]
+        assert np.isnan(vu.uv_at(f, 0, k, a))
+        assert vu.uv_bracket(p, last_i, np.inf) == (last_i, -1.0)
+    assert vu.uv_bracket(p, 0, np.nan) == (0, -1.0)
+    assert vu.uv_bracket(p, 0, np.inf) == (0, -1.0)
+    pd = np.array([0.0, 10.0, 10.0 + 1e-13])
+    assert vu.uv_bracket(pd, 2, np.nan) == (1, -1.0)
+    if hasattr(vu.uv_bracket, "py_func"):
+        for last_i in (0, 1, 3):
+            kj, aj = vu.uv_bracket(p, last_i, np.nan)
+            kp, ap = vu.uv_bracket.py_func(p, last_i, np.nan)
+            assert int(kj) == int(kp)
+            assert float(aj).hex() == float(ap).hex()
+
+
+def test_table_error_names_first_bad_level_only():
+    """A non-finite or decreasing level table is refused naming its size
+    and the first offending level, never printing the whole table."""
+    vu = _vu()
+    levels = list(np.arange(80) * 10.0)
+    levels[41] = 395.0                         # shallower than level 40
+    with pytest.raises(ValueError) as exc:
+        vu.depth_points(_mesh(levels=levels, depths=(30.0,) * 4), "level")
+    msg = str(exc.value)
+    assert "80 levels, level 41 (395 m) is shallower than level 40 (400 m)" \
+        in msg, msg
+    assert "790" not in msg and len(msg) < 300
+    levels = list(np.arange(80) * 10.0)
+    levels[7] = np.nan
+    with pytest.raises(ValueError, match=r"finite .*80 levels, level 7 is "
+                                         r"nan"):
+        vu.depth_points(_mesh(levels=levels, depths=(30.0,) * 4),
+                        "layer_linear")
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +613,8 @@ _P_CASES = [
     [2.5],
 ]
 _Z_CASES = [-7.0, 0.0, 2.5, 5.0, 9.999, 10.0, 10.0 + 0.5e-13, 12.5, 15.0,
-            19.0, 20.0, 24.0, 25.0, 30.0, 31.0, 1e9]
+            19.0, 20.0, 24.0, 25.0, 30.0, 31.0, 1e9, float("inf"),
+            float("nan")]
 
 
 def _bracket_cases():
@@ -568,6 +630,28 @@ def _f_for(p):
     m = len(p)
     rng = np.random.default_rng(m)
     return rng.normal(size=(m, 3))
+
+
+def _scan_case():
+    """A record-scan input over three column blocks (``_SCAN_BLOCK`` = 64):
+    non-finite values inside some prefixes, at their last point, and below
+    others' last points (ignored), every last from 0 to 3."""
+    f = np.ones((4, 150))
+    f[2, 65] = np.nan               # inside the prefix (last 3)
+    f[1, 3] = np.inf                # below last[3] = 0: ignored
+    f[3, 70] = -np.inf              # at the last point
+    f[0, 140] = np.nan              # the surface point
+    f[3, 141] = np.nan              # below last[141] = 2: ignored
+    f[1, 149] = np.nan              # inside, last block
+    last = np.full(150, 3, dtype=np.int32)
+    last[3] = 0
+    last[141] = 2
+    last[100:110] = np.arange(10) % 4
+    return f, last
+
+
+#: the scan's answer for ``_scan_case``, by hand
+_SCAN_WANT = {65: 2, 70: 3, 140: 0, 149: 1}
 
 
 def test_py_func_matches():
@@ -586,23 +670,22 @@ def test_py_func_matches():
                 vp = vu.uv_at.py_func(f, node, kp, ap)
                 assert float(vj).hex() == float(vp).hex(), (p, last_i, z)
     # the record scan
-    f = np.ones((4, 70))
-    f[2, 65] = np.nan
-    f[1, 3] = np.inf
-    last = np.full(70, 3, dtype=np.int32)
-    last[3] = 0
-    out_j = np.empty(70, dtype=np.int64)
-    out_p = np.empty(70, dtype=np.int64)
+    f, last = _scan_case()
+    out_j = np.empty(f.shape[1], dtype=np.int64)
+    out_p = np.empty(f.shape[1], dtype=np.int64)
     vu._first_nonfinite_per_node(f, last, out_j)
     vu._first_nonfinite_per_node.py_func(f, last, out_p)
     assert_bitwise(out_j, out_p, "scan")
-    assert out_j[65] == 2 and out_j[3] == -1
-    assert int((out_j >= 0).sum()) == 1
+    want = np.full(f.shape[1], -1, dtype=np.int64)
+    for i, k in _SCAN_WANT.items():
+        want[i] = k
+    assert_bitwise(out_j, want, "scan by hand")
 
 
 _SUBPROCESS_SCRIPT = r"""
 import json, sys
 from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).resolve().parents[0]))
 sys.path.insert(0, sys.argv[1])
 import numpy as np
 from numba.core import config
@@ -610,20 +693,24 @@ assert config.DISABLE_JIT, "NUMBA_DISABLE_JIT not honoured"
 import kelp.numerics.vertical_uv as vu
 assert str(Path(vu.__file__).resolve()).startswith(
     str(Path(sys.argv[1]).resolve())), vu.__file__
-cases = json.loads(sys.argv[2])
+import tests.test_vertical_uv as t
 rows = []
-for p, last_i, z in cases:
+for p, last_i, z in t._bracket_cases():
     pa = np.asarray(p, dtype=np.float64)
     k, a = vu.uv_bracket(pa, last_i, z)
-    m = len(p)
-    f = np.random.default_rng(m).normal(size=(m, 3))
+    f = t._f_for(p)
     vals = [float(vu.uv_at(f, n, k, a)).hex() for n in range(3)]
     rows.append([int(k), float(a).hex(), vals])
-print(json.dumps(rows))
+f, last = t._scan_case()
+out = np.empty(f.shape[1], dtype=np.int64)
+vu._first_nonfinite_per_node(f, last, out)
+print(json.dumps({"bracket": rows, "scan": out.tolist()}))
 """
 
 
 def test_numba_disabled_subprocess_matches(tmp_path):
+    """Under ``NUMBA_DISABLE_JIT=1`` the bracket, the read and the record
+    scan (``_first_nonfinite_per_node``) give the compiled answers."""
     vu = _vu()
     cases = _bracket_cases()
     script = tmp_path / "vertical_uv_nojit.py"
@@ -631,10 +718,11 @@ def test_numba_disabled_subprocess_matches(tmp_path):
     src = str(Path(__file__).resolve().parents[1] / "src")
     env = dict(os.environ, NUMBA_DISABLE_JIT="1")
     out = subprocess.run(
-        [sys.executable, str(script), src, json.dumps(cases)],
+        [sys.executable, str(script), src],
         capture_output=True, text=True, timeout=300, env=env)
     assert out.returncode == 0, out.stderr
-    rows = json.loads(out.stdout)
+    res = json.loads(out.stdout)
+    rows = res["bracket"]
     assert len(rows) == len(cases)
     for (p, last_i, z), (k, a_hex, vals) in zip(cases, rows):
         pa = np.asarray(p, dtype=np.float64)
@@ -643,3 +731,7 @@ def test_numba_disabled_subprocess_matches(tmp_path):
         f = _f_for(p)
         assert [float(vu.uv_at(f, n, kj, aj)).hex() for n in range(3)] \
             == vals, (p, last_i, z)
+    f, last = _scan_case()
+    out_j = np.empty(f.shape[1], dtype=np.int64)
+    vu._first_nonfinite_per_node(f, last, out_j)
+    assert_bitwise(np.array(res["scan"], dtype=np.int64), out_j, "scan")

@@ -172,7 +172,10 @@ mode (see `io_and_time.md` for the two modes):
 
 In both modes the eta used for sigma column geometry comes from the *same*
 field snapshot the scalars themselves came from, never from the mesh, keeping
-the column geometry self-consistent with the sampled values.
+the column geometry self-consistent with the sampled values. The sampler reads
+only the scalars and `eta` of that field — never `u`/`v` — so the vertical rule
+of the horizontal velocity (`mode.uv_vertical`, `vertical.md` §2.1) does not
+change a sample (pinned in `tests/test_uv_vertical_matrix.py`).
 
 ## §5 Reading the fields
 

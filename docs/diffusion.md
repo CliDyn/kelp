@@ -286,6 +286,11 @@ each matched to a scheme/integrator pairing:
 resolved value (not the raw config value) is what gets recorded in the output
 metadata. The configuration keys are documented in `configuration.md` §3.1.
 
+The kicks never read `u`/`v`, so a horizontal velocity linear in depth
+(`mode.uv_vertical: linear`, `vertical.md` §2.1) composes with the `split`
+uniform kick and the Az kick unchanged: the deterministic part of the step is
+the depth-linear step, the kicks follow as above; `em`/`m1` stay 2-D only.
+
 
 ## 6. What is called when
 

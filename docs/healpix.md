@@ -176,6 +176,33 @@ one-time warning, up to 5 % of the wet nodes (above that the read fails,
 see the fail-fasts). Eta land masks differ from the u/v family on ~2% of
 coastal cells (ng5) — eta NaNs at wet nodes are zeroed silently.
 
+**Depth-linear u/v** (`mode.uv_vertical: linear`, 2026-10; the rule in
+`vertical.md` §2.1). The zeroing above is the layer path's no-flow-at-ground
+treatment; a depth-linear read instead clips every vertex to its own last
+usable point, so it must know where each column's data end and must never
+blend a zero the reader wrote into a profile. Two mechanisms see to that:
+
+- *The declaration.* A 3-D load on the dual geometry (`load_mesh` with a
+  `mode_cfg` that has `Fdrift3D`) reads the leading finite count of `u` down
+  every store column at t=0 and declares it per node:
+  `mesh.metadata["uv_data_last"]` (int32, mesh-node order through the store
+  index the data compaction uses, `_healpix_data_idx`; the count minus one,
+  so `-1` = no u in the column — never a mesh node, the wet mask drops it).
+  It caps each node's last usable point, so a bathymetry (`deptho`) deeper
+  than the u data never points the table at a zeroed slot (u- and w-family
+  bottoms disagree per cell on ng5). A 2-D load, or one without `mode_cfg`,
+  skips this extra pass over the first record; a layer run on a 3-D mesh
+  carries the declaration unused.
+- *The raw-record check.* With the option on, `read_velocities` checks each
+  RAW record against the table (`check_depth_linear_record`) before the u/v
+  rotation mix (§3: after the mix a NaN in one component would be NaN in
+  both, and the refusal would name the wrong one) and before the zeroing: a
+  non-finite u or v inside a column's usable prefix refuses the run, naming
+  component, node, point and the record (index in the dataset read — a
+  prefetch window counts from its own start — and time stamp). Surface-mask
+  drift is therefore refused, not zeroed (the CORE2 twin has none). With the
+  option off nothing changes.
+
 ## 3. Polar tracking — the rotated frame (shipped 2026-08-16) and residual limits
 
 > **Measured cost of skipping rotation (2026-08-22, E2 diagnostics):** on

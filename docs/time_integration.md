@@ -347,7 +347,12 @@ stage). So a 3-D RK2/RK4 step is parallel across particles and scales with
 `NUMBA_NUM_THREADS` — it just runs as separate interpolation/displacement/W/
 clamp passes rather than one fused kernel. (Earlier this stage interpolation
 was a serial per-particle Python loop, which capped 3-D RK throughput on
-million-particle runs; the result is bit-identical, only parallel.)
+million-particle runs; the result is bit-identical, only parallel.) The stage
+state also carries the stage DEPTH (`_interp_uv_at(..., zs=)`): a depth-linear
+`u`/`v` (`mode.uv_vertical: linear`, `vertical.md` §2.1) is read at each
+stage's own depth — Euler at the entry depth, RK2 at `z` and `z_mid`, RK4 at
+`z`, `z_2`, `z_3`, `z_4` — and such a stage looks no layer up; layer
+interpolators never read the depth, so layer runs are unchanged.
 
 **The lazy two-snapshot blend.** In temporal-interpolation mode strictly between
 snapshots, `_build_vel_payload` returns a `LazyLerpField`
@@ -416,11 +421,21 @@ the integrator, whether the run is 3-D, the vertical coordinate, and
 - **RK2 in 3-D** uses the fused barycentric kernel on a z-level mesh with
   node-layout velocity, `uv_interp == "barycentric"`, `w_interp` nearest or
   barycentric and no walk-carried elements — the PCHIP variant when a `recon=`
-  bundle is supplied, else the linear/steady variant. Everything else — the
+  bundle is supplied, else the linear/steady variant; a depth-linear field
+  runs their `_dl` twins (`_fused_rk2_step_3d_bary_{tinterp,pchip}_dl`: per
+  vertex the time blend first, then the vertical rule, then the vertex sum;
+  the anchor heal and the terminal splice keep the placement). Everything else — the
   other 3-D runs (RK4 3-D, leastsq or idw `W`, sigma coordinates),
   element-layout barycentric, steady 2-D barycentric, edge_leastsq,
   certificate-denied meshes with the guard off — takes the unfused multi-stage path through `_make_stage_vels` /
   `make_stage_vels_recon` and the interpolator registry.
+
+Before any of this, every step function runs `_check_depth_linear_entry`: a
+depth-linear field is refused for `rk45`, a sigma mesh, a field without `w`, a
+non-node layout and a `uv_interp` other than `barycentric`; the fields of one
+step (`vel`, `vel_next`, each PCHIP snapshot) must share one placement, and each
+passes the record check once. For a layer field it reads only the placement
+attributes, so layer runs keep their cost and their bits.
 
 After the deterministic step returns, the stochastic diffusion kick (if enabled)
 is applied as a separate stage; the schemes, composition modes, and the

@@ -114,10 +114,22 @@ def _build_depth_points(sigma, depth, decl, placement: str,
         raise ValueError(
             f"depth-linear u/v ({placement!r}) needs a 3-D z-level mesh with "
             f">= {need} levels in mesh.sigma, got shape {z.shape}")
-    if not np.all(np.isfinite(z)) or np.any(np.diff(z) < 0.0):
+    # the messages name the first offending level, never the whole table
+    # (a global mesh has ~50-100 levels)
+    nonfin = np.flatnonzero(~np.isfinite(z))
+    if nonfin.size:
+        i = int(nonfin[0])
         raise ValueError(
-            f"depth-linear u/v ({placement!r}) needs finite, increasing "
-            f"level depths |mesh.sigma|, got {z.tolist()}")
+            f"depth-linear u/v ({placement!r}) needs finite level depths "
+            f"|mesh.sigma|: {z.size} levels, level {i} is {float(z[i])!r}")
+    down = np.flatnonzero(np.diff(z) < 0.0)
+    if down.size:
+        i = int(down[0])
+        raise ValueError(
+            f"depth-linear u/v ({placement!r}) needs non-decreasing level "
+            f"depths |mesh.sigma|: {z.size} levels, level {i + 1} "
+            f"({float(z[i + 1]):g} m) is shallower than level {i} "
+            f"({float(z[i]):g} m)")
     if placement == "level":
         p = z.copy()
         lower = p
@@ -220,9 +232,22 @@ def uv_bracket(p: np.ndarray, last_i: int, z: float):
     ``alpha < 0`` (``-1.0``) means "read point ``k`` directly": at or above
     ``p[0]``, at or below ``p[last_i]``, exactly at a point, or a degenerate
     spacing (< 1e-12 m).  Otherwise ``0 < alpha < 1`` blends points ``k``
-    and ``k + 1`` with ``k + 1 <= last_i``.  A NaN ``z`` gives
-    ``(last_i - 1, NaN)`` (a NaN value, still never past ``last_i``), as
-    :func:`kelp.numerics.vertical._w_bracket` does.
+    and ``k + 1`` with ``k + 1 <= last_i``.
+
+    Two coincident points (a repeated level): a depth exactly at them reads
+    the DEEPER one (the larger index), e.g. ``p = [0, 10, 10, 20]``,
+    ``z = 10`` gives ``(2, -1.0)``; the shallower one is the end of the
+    bracket above, reached only as a limit.
+
+    A NaN ``z`` gives ``k = last_i - 1`` with a NaN ``alpha`` when
+    ``last_i > 0`` (a NaN value through :func:`uv_at`, still never past
+    ``last_i``; a degenerate last spacing reads point ``last_i - 1``
+    directly instead), as :func:`kelp.numerics.vertical._w_bracket` does,
+    and ``(0, -1.0)`` (the surface point, read directly) when
+    ``last_i == 0``.  The interpolation kernels never pass a NaN: they map
+    a NaN particle depth to ``+inf`` first, which reads each vertex's last
+    point directly (``(last_i, -1.0)``, "below the bed"), the layer path's
+    outcome for a NaN depth.
 
     Parameters
     ----------

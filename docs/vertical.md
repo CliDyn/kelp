@@ -1,8 +1,8 @@
 # KELP vertical motion (3-D tracking)
 
-> **Covers:** how a particle moves up and down in three-dimensional tracking — the two vertical coordinate systems (fixed z-levels and terrain-following sigma), finding which vertical layer a particle sits in, interpolating the vertical velocity `W`, and clamping the depth to the water column.
-> **Does not cover:** the horizontal `u`/`v` velocity (see `velocity_interpolation.md`); how the vertical displacement `z += W·dt` is applied within a step (see `time_integration.md`); the algebraic formulas for the vertical profile and the four horizontal-combine methods (see `interpolation.md` §2–§3).
-> **Code:** `src/kelp/numerics/vertical.py:interp_w_spatial`, `src/kelp/numerics/vertical_sigma.py:interp_w_sigma_spatial`, `src/kelp/numerics/vertical.py:clamp_depth`.
+> **Covers:** how a particle moves up and down in three-dimensional tracking — the two vertical coordinate systems (fixed z-levels and terrain-following sigma), finding which vertical layer a particle sits in, how the horizontal velocity is read in depth (per layer, or linearly in depth with `mode.uv_vertical: linear`), interpolating the vertical velocity `W`, and clamping the depth to the water column.
+> **Does not cover:** the horizontal combination of the `u`/`v` vertex values (see `velocity_interpolation.md`); how the vertical displacement `z += W·dt` is applied within a step (see `time_integration.md`); the algebraic formulas for the vertical profile and the four horizontal-combine methods (see `interpolation.md` §2–§3).
+> **Code:** `src/kelp/numerics/vertical.py:interp_w_spatial`, `src/kelp/numerics/vertical_sigma.py:interp_w_sigma_spatial`, `src/kelp/numerics/vertical.py:clamp_depth`, `src/kelp/numerics/vertical_uv.py:depth_points`, `src/kelp/numerics/vertical_uv.py:uv_bracket`.
 > **Verified at:** see `docs/doc_map.yaml` (stamped via check_doc_sync --bless).
 
 In two-dimensional tracking a particle only ever has a longitude and a latitude;
@@ -98,6 +98,80 @@ Dmin)` depends on the free surface, it is given the per-node bottom depth and th
 current `\eta` field as well. The integrators pass the particle's own column
 `H_p` (`H_particle=`, interpolated at the particle like W, §3) instead of the
 nearest node's; direct callers without it get the nearest node's column.
+
+### 2.1 The horizontal velocity in depth: per layer, or linear
+
+The horizontal velocity of a 3-D z-level run sits at the **layer centres**
+(FESOM2 `unod`/`vnod` and `u`/`v`, the HEALPix `uo`/`vo`: `K-1` rows). By
+default it is **piecewise constant in depth**: every vertex of the
+interpolation stencil reads the row of the particle's layer (the layer of §2,
+found in the nearest node's column), so a particle crossing a level sees the
+velocity jump. With `mode.uv_vertical: linear` the same data are read
+**linearly in depth** between the layer centres instead. Inside the engine the
+choice is a property of the field, `VelocityField.uv_vertical`:
+
+| `uv_vertical` | rows of `u`/`v` | data points `p` (positive down) | how it gets there |
+|---|---|---|---|
+| `"layer"` (default) | `K-1` | — (one value per layer) | every reader; the option off |
+| `"layer_linear"` | `K-1` | the layer centres `(z_k + z_{k+1}) / 2` | `mode.uv_vertical: linear`: the tracking layer marks the fields it reads |
+| `"level"` | `K` | the levels `\|mesh.sigma\|` | a reader whose u/v sit on the levels (`native_uv_vertical = "level"`); always linear in depth, the option is refused there |
+
+`depth_points(mesh, placement)` (`src/kelp/numerics/vertical_uv.py`) builds
+the table once per mesh and placement: the points `p[0..M-1]` and, per node,
+the **last usable point**
+
+`last_i = max(0, min(M-1, max({k : lower_k <= depth_i} ∪ {0}), D_i))`
+
+with `lower_k = p_k` for level data and `lower_k = z_{k+1}` — the layer's
+LOWER level — for layer data. That is `find_layer`'s rule (§2): a partial
+bottom layer, whose lower level lies below the bed, is never read. `D_i` is a
+reader's declaration of the last finite point of its own data column
+(`mesh.metadata["uv_data_last"]`, the HEALPix reader, `healpix.md`); `-1`
+there means "the surface only", and the surface value must then be finite. A
+node without a finite bed depth gets `last_i = 0`. The table is cached on the
+mesh and rebuilt whenever `mesh.sigma`, `mesh.depth` or the declaration is
+replaced (a `max_levels` cut included; an in-place write is not seen).
+
+The rule at one vertex `i` and particle depth `z`:
+
+- the depth is clipped to the vertex's own column, `z_i = max(p[0],
+  min(z, p[last_i]))`: **above the first point and below the last usable point
+  the value of that point is used** — constant ends, no extrapolation;
+- between two points it is the linear blend `(1 − α) f_k + α f_{k+1}`; exactly
+  on a point the point is read directly (of two coincident points, the deeper
+  one);
+- points below `last_i` are **never read**, not even multiplied by zero, so
+  dry or fill values there are harmless. Points `<= last_i` must be finite: the
+  record check (`check_depth_linear_record`) refuses a record with a
+  non-finite `u` or `v` there, naming the component, node, point and record,
+  once per field and mesh table.
+
+Each vertex clips to **its own** bottom — the depth-linear counterpart of the
+bottom-aware neighbour clamp of W (§3) — so a shallow vertex contributes its
+deepest usable value while its deep neighbours are read at the particle's
+depth. A NaN particle depth reads like a depth below the bed (each vertex its
+last point), the layer path's outcome (`find_layer` puts a NaN depth in the
+deepest valid layer). In time-interpolated runs each stored value is blended
+in time FIRST, then read in depth, then combined horizontally
+(`velocity_interpolation.md` §7); for the 4-snapshot PCHIP the order matters.
+Every Runge–Kutta stage reads the horizontal velocity at its own stage depth
+(Euler: the step-entry depth; RK2: `z` and `z_mid`; RK4: `z`, `z_2`, `z_3`,
+`z_4`), unclamped (the per-vertex clip above handles a stage that overshoots
+the column).
+
+The rule reproduces the layer answer where it should: data uniform in depth
+give the layer result bit for bit wherever every vertex reads a data point
+directly (on a point, or clipped at either end), and between points each
+vertex value `(1 − α) c + α c` is within 1 ulp of `c`
+(`tests/test_interp_depth_linear.py`).
+
+Scope: 3-D tracking on z-level meshes, node-layout u/v (FESOM2
+`unod`/`vnod`, the HEALPix dual geometry) and `numerics.uv_interp:
+barycentric` — the only interpolator that evaluates depth-linear fields — with
+`euler`, `rk2` or `rk4`; the configuration keys and refusals are in
+`configuration.md` §2. A FESOM2 mesh read from ASCII files without
+`depth.out` has depth 0 everywhere: depth-linear data then collapse to the
+surface point, as `find_layer` puts layer data in layer 0.
 
 
 ## 3. Vertical velocity `W` interpolation
@@ -295,6 +369,10 @@ vertical pipeline around the horizontal update. Every stage dispatches on
    `time_integration.md`).
 4. **Clamp the depth** — `clamp_depth` (z-level) or `clamp_depth_sigma` (sigma).
 
+A depth-linear horizontal velocity (§2.1) skips step 1 for `u`/`v`: each
+stage hands its depth to the interpolator instead, and no stage looks a layer
+up (W brackets the depth itself either way).
+
 There is one performance fork worth knowing. For z-level meshes, two
 combinations run **fused** 3-D kernels that do the whole horizontal-plus-
 vertical update in one compiled pass: the Euler integrator with
@@ -304,7 +382,8 @@ and `w_interp` `nearest`/`barycentric`, in steady, linear
 temporal-interpolation and 4-snapshot PCHIP modes alike (the vertical
 module provides time-blended scalar twins of the W singles for it:
 `_interp_w_{linear,bary}_single_{tinterp,pchip4}`, bit-for-bit the
-arithmetic of interpolating the materialized stage field).  Everything
+arithmetic of interpolating the materialized stage field; a depth-linear
+field runs the `_dl` twins of the RK2 kernels, `time_integration.md`).  Everything
 else takes the **unfused** path: sigma meshes always (their column
 geometry is rebuilt per column from `\eta`), `idw` (and `leastsq` for
 the RK2-barycentric kernel) horizontal-`W`, and RK4 in 3-D.  The fork is

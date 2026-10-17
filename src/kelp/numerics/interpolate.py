@@ -1614,19 +1614,21 @@ def _interp_barycentric_dl(
         Not node layout, u/v not 2-D, a non-z-level mesh, or a record that
         fails the check (shape, non-finite value at a usable point).
     """
-    placement = vel.uv_vertical
+    placement = getattr(vel, "uv_vertical", "layer")
     if vel.uv_layout != "node":
         raise ValueError(
             f"interp_barycentric: depth-linear u/v (uv_vertical="
             f"{placement!r}) needs uv_layout='node', got {vel.uv_layout!r}")
+    # the record check first: a LazyLerpField is checked through its
+    # parents (shape and finite prefix) before anything below blends it
+    if not is_checked(vel, mesh):
+        check_depth_linear_record(vel, mesh)
     if getattr(vel.u, "ndim", None) != 2 or getattr(vel.v, "ndim", None) != 2:
         raise ValueError(
             f"interp_barycentric: depth-linear u/v (uv_vertical="
             f"{placement!r}) must be 2-D (points, nodes), got u "
             f"{getattr(vel.u, 'shape', None)}, v "
             f"{getattr(vel.v, 'shape', None)}")
-    if not is_checked(vel, mesh):
-        check_depth_linear_record(vel, mesh)
     dp = depth_points(mesh, placement)
 
     P = state.n_particles

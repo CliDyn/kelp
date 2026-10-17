@@ -384,6 +384,30 @@ def test_direct_call_refuses_nan_in_prefix(placement):
         ip.interp_barycentric(st, mesh, vel, nn, 1.0)
 
 
+@pytest.mark.parametrize("placement", ["level", "layer_linear"])
+def test_lazy_field_checked_through_parents_before_any_blend(placement):
+    """A lazy blend with a NaN in one parent's prefix is refused through
+    that parent before the wrapper reads ``u`` (no blend is cached); a good
+    pair passes and is then blended once for the kernel."""
+    from kelp.core.io import LazyLerpField
+    from kelp.numerics import vertical_uv as vu
+    mesh = _mesh()
+    st = _state(DEEP_PTS, 12.5)
+    nn = find_nearest_nodes(mesh, st.lon, st.lat)
+    bad = _field(placement)
+    bad.v[1, 4] = np.nan                # node 4 is 200 m deep: point 1 wet
+    lazy = LazyLerpField(_field(placement), bad, 0.25)
+    with pytest.raises(ValueError, match=r"v = nan is non-finite at node 4, "
+                                         r"point 1"):
+        ip.interp_barycentric(st, mesh, lazy, nn, 1.0)
+    assert "u" not in lazy.__dict__ and "v" not in lazy.__dict__
+    good = LazyLerpField(_field(placement), _field(placement), 0.25)
+    U, V, ok = ip.interp_barycentric(st, mesh, good, nn, 1.0)
+    assert ok.all() and vu.is_checked(good, mesh)
+    assert vu.is_checked(good.vel_a, mesh) and vu.is_checked(good.vel_b, mesh)
+    np.testing.assert_allclose(U, A_U + B_U * 12.5, rtol=1e-14)
+
+
 def test_direct_call_checks_once_and_rechecks_on_new_mesh():
     """A checked field is not scanned again; a new table (another mesh)
     re-runs the check."""
@@ -546,6 +570,63 @@ def test_layer_fields_unchanged():
     ip.interp_nearest_element(np.zeros(P, dtype=np.int32), vel_e, 1)
     ip.interp_edge_leastsq(st, mesh, vel_e, nn, 1.0, layers)
     ip.interp_edge_leastsq_single(4.3, 4.2, 1, mesh, vel_e, 0)
+
+
+@pytest.mark.parametrize("placement", ["level", "layer_linear"])
+def test_depth_uniform_field_reproduces_layer_answer(placement):
+    """u/v uniform in depth (a value per node, NaN below each node's last
+    point): the depth-linear answer is the layer kernel's answer BIT FOR
+    BIT wherever every vertex reads a data point directly (the depth on a
+    point, or clipped at either end, incl. a NaN depth); between points
+    each vertex value ``(1 - a) c + a c`` is within 1 ulp of ``c``, so the
+    sum stays within 2 ulp of the largest vertex value (cancellation
+    between vertices of opposite sign can make that many ulp of the sum
+    itself)."""
+    from kelp.numerics import vertical_uv as vu
+    mesh = _mesh()
+    dp = vu.depth_points(mesh, placement)
+    m, n = dp.p.size, mesh.n_nodes
+    rng = np.random.default_rng(23)
+    c_u = rng.normal(size=n) * 10.0 ** rng.uniform(-2, 2, n)
+    c_v = rng.normal(size=n)
+    below = np.arange(m)[:, None] > dp.last[None, :]
+    dl = VelocityField(
+        u=np.where(below, np.nan, np.repeat(c_u[None, :], m, axis=0)),
+        v=np.where(below, np.nan, np.repeat(c_v[None, :], m, axis=0)),
+        eta=np.zeros(n), w=np.zeros((len(LEVELS), n)), uv_layout="node",
+        uv_vertical=placement)
+    lay = VelocityField(u=np.repeat(c_u[None, :], len(LEVELS) - 1, axis=0),
+                        v=np.repeat(c_v[None, :], len(LEVELS) - 1, axis=0),
+                        eta=np.zeros(n), w=np.zeros((len(LEVELS), n)),
+                        uv_layout="node")
+    pts = rng.uniform(4.02, 5.98, (60, 2))
+
+    def both(z):
+        st = _state(pts, z)
+        nn = find_nearest_nodes(mesh, st.lon, st.lat)
+        layers = find_layers(mesh.z_levels, st.z, nn, mesh.depth,
+                             st.alive_mask)
+        return (ip.interp_barycentric(st, mesh, dl, nn, 1.0),
+                ip.interp_barycentric(st, mesh, lay, nn, 1.0, layers))
+    direct = list(dp.p) + [-3.0, 0.0, 41.0, 1e4, np.nan]
+    for z in direct:
+        (Ud, Vd, okd), (Ul, Vl, okl) = both(z)
+        assert okd.all() and okl.all()
+        assert_bitwise(Ud, Ul, f"U at {z} m")
+        assert_bitwise(Vd, Vl, f"V at {z} m")
+    worst = 0.0
+    for z in rng.uniform(dp.p[0], dp.p[-1], 40):
+        # per vertex: within 1 ulp of the stored value
+        for nd in range(n):
+            k, a = vu.uv_bracket(dp.p, dp.last[nd], z)
+            for f, c in ((dl.u, c_u[nd]), (dl.v, c_v[nd])):
+                got = vu.uv_at(f, nd, k, a)
+                assert abs(got - c) <= np.spacing(abs(c)), (z, nd, got, c)
+        (Ud, Vd, _), (Ul, Vl, _) = both(z)
+        for a_, b_, c in ((Ud, Ul, c_u), (Vd, Vl, c_v)):
+            ulp = np.abs(a_ - b_) / np.spacing(np.abs(c).max())
+            worst = max(worst, float(ulp.max()))
+    assert worst <= 2.0, worst
 
 
 # ---------------------------------------------------------------------------

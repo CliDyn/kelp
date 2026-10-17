@@ -25,7 +25,7 @@ The topic documentation for users is one level up, in `docs/` (entry point
 | [mesh.md](mesh.md) | `core/geometry.py`, `core/mesh.py` |
 | [core.md](core.md) | `core/particles.py`, `core/release.py`, `core/particles_gen.py`, `core/io.py`, `core/rotation.py` |
 | [writers.md](writers.md) | `writers.py` |
-| [numerics.md](numerics.md) | `numerics/interpolate.py`, `numerics/vertical.py`, `numerics/vertical_sigma.py`, `numerics/diffusion.py`, `numerics/beaching.py`, `numerics/sampling.py`, `w_reconstruct.py` |
+| [numerics.md](numerics.md) | `numerics/interpolate.py`, `numerics/vertical_uv.py`, `numerics/vertical.py`, `numerics/vertical_sigma.py`, `numerics/diffusion.py`, `numerics/beaching.py`, `numerics/sampling.py`, `w_reconstruct.py` |
 | [integrators.md](integrators.md) | `numerics/integrators.py`, `numerics/temporal_reconstruct.py` |
 | [tracking.md](tracking.md) | `tracking.py`, `cli/main.py` |
 | [readers.md](readers.md) | `readers/` |
@@ -74,7 +74,8 @@ Paths are below `src/kelp/`.
   [config.md](config.md) (`TimeConfig`); the seed-file header `# kelp particle_offset N`
   and its checks in [numerics.md](numerics.md) (diffusion, "Shards").
 - **`core/io.py`** — `VelocityField` (u/v on elements or nodes, `w` positive down
-  at interfaces, optional Kh, Az and sampled scalars) and `LazyLerpField`, which
+  at interfaces, optional Kh, Az and sampled scalars; `uv_vertical`, the vertical
+  placement of u/v, checked against the shapes) and `LazyLerpField`, which
   blends a field between two snapshots only when it is first read. Notes:
   [core.md](core.md); the cost of the eager blend it replaced: [tracking.md](tracking.md)
   (temporal-interp mode).
@@ -92,8 +93,22 @@ Paths are below `src/kelp/`.
 - **`numerics/interpolate.py`** — u/v interpolation registry: `leastsq` (default;
   least-squares fit centred on the particle), `barycentric`, `edge_leastsq`; Numba
   kernels with a Python fallback. Node-layout u/v need `barycentric` (the fail-fast
-  is in [tracking.md](tracking.md)). Notes: [numerics.md](numerics.md); the
-  time-blending kernel twins the fused integrators call: [integrators.md](integrators.md).
+  is in [tracking.md](tracking.md)); so does a depth-linear field (`uv_vertical`
+  `"level"`/`"layer_linear"`), which every other entry refuses. Notes:
+  [numerics.md](numerics.md); the time-blending kernel twins the fused integrators
+  call: [integrators.md](integrators.md).
+- **`numerics/vertical_uv.py`** — depth-linear u/v (2026-10): the data-point table
+  per mesh and placement (`depth_points`: the points and each node's last usable
+  point, cached on the mesh by object identity), the bracket and read (`uv_bracket`,
+  `uv_at`, njit) and the record check (`check_depth_linear_record`, `is_checked`:
+  u/v finite down to each node's last usable point; the field is stamped with the
+  table object). Trap: the cache and the stamp compare by IDENTITY — replace
+  `mesh.sigma`/`mesh.depth`/`mesh.metadata["uv_data_last"]`, never write them in
+  place. Notes: [numerics.md](numerics.md) (its own section and the interpolate.py
+  bullet); the entry gate and the fused twins in [integrators.md](integrators.md);
+  the option and the cache marking in [tracking.md](tracking.md); the HEALPix
+  declaration in [readers.md](readers.md); `VelocityField.uv_vertical` and
+  `_dl_token` in [core.md](core.md); topic doc [../vertical.md](../vertical.md) §2.1.
 - **`numerics/vertical.py`** — z-level layers, depth clamping and W interpolation
   (vertical first, then `nearest`, `leastsq`, `barycentric` or `idw` across the
   neighbours, bottom-aware). Notes: [numerics.md](numerics.md); the `w_interp`
@@ -171,7 +186,10 @@ Paths are below `src/kelp/`.
 - **`tracking.py`** — orchestration: `run_tracking` (config → mesh → reader →
   realizations → writer), `run_single_realization`, `track_particles`; the record
   clock, the lazy temporal-interp payload, the beaching, sampling, rotation and
-  edge-walk hooks, fail-fast checks before the writer exists. Notes:
+  edge-walk hooks, fail-fast checks before the writer exists, `mode.uv_vertical`
+  (every field the velocity cache stores is marked and checked,
+  `_mark_depth_linear`), the `max_levels` cut (`_apply_max_levels`) and the
+  reader hook `prepare(mesh, ds)`. Notes:
   [tracking.md](tracking.md); also: periodic windows (`NumericsConfig.periodic_lon`),
   the `start_date` resolution (`TimeConfig`), the shared-fields tag
   (`NumericsConfig.shared_fields_dir`) and the grid-hash / exact-guard calls of
@@ -209,7 +227,7 @@ of them exported):
 
 ## Dependency graph (imports)
 
-Generated from the import statements (2026-10-04); "lazy" = imported inside a
+Generated from the import statements (2026-10-04; `vertical_uv` added 2026-10-17); "lazy" = imported inside a
 function. Third-party: numpy everywhere, numba optional in the kernels, xarray
 in the readers, netCDF4/zarr in the writer.
 
@@ -226,21 +244,23 @@ core/release.py           ← particles
 writers.py                ← particles (netCDF4 / zarr)
 w_reconstruct.py          ← geometry
 numerics/temporal_reconstruct.py ← io
-numerics/interpolate.py   ← geometry, io, mesh, particles, temporal_reconstruct
+numerics/vertical_uv.py   ← io, mesh
+numerics/interpolate.py   ← geometry, io, mesh, particles, temporal_reconstruct, vertical_uv
 numerics/vertical.py      ← mesh, temporal_reconstruct
 numerics/vertical_sigma.py ← mesh
 numerics/diffusion.py     ← geometry, mesh, interpolate
 numerics/beaching.py      ← particles, diffusion
 numerics/sampling.py      ← mesh, vertical, vertical_sigma
-numerics/integrators.py   ← geometry, mesh, particles, diffusion, interpolate, vertical
-                            (lazy: io, temporal_reconstruct, vertical_sigma)
+numerics/integrators.py   ← geometry, io, mesh, particles, diffusion, interpolate, vertical,
+                            vertical_uv (lazy: temporal_reconstruct, vertical_sigma)
 readers/__init__.py       ← standalone (registry + shared helpers)
 readers/fesom2.py, fesomc.py ← config, io, mesh, readers helpers (fesom2 lazy: rotation)
-readers/healpix.py        ← geometry, mesh, readers helpers (lazy: io, rotation, Kh name helpers)
+readers/healpix.py        ← geometry, mesh, readers helpers (lazy: io, rotation, Kh name helpers,
+                            vertical_uv)
 readers/structured.py     ← mesh
 readers/nemo.py           ← io, mesh, readers helpers, structured
 tracking.py               ← config, geometry, io, mesh, particles, release, diffusion,
-                            integrators, readers (lazy: writers, shared_fields, beaching,
+                            integrators, vertical_uv, readers (lazy: writers, shared_fields, beaching,
                             sampling, temporal_reconstruct, rotation, readers.fesom2, __version__)
 visualization/*           ← core.geometry, core.mesh, core.particles (lazy: rotation)
 cli/main.py               ← __version__ (lazy per subcommand: config, mesh, readers, tracking)

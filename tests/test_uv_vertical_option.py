@@ -697,9 +697,10 @@ class TestRefusalsAtEachSite:
 
 def test_mark_depth_linear_semantics():
     """layer → a shallow copy marked "layer_linear" (same arrays) and
-    checked; a marked field comes back as itself; a level field is checked
-    under either option; NaN in a usable point is refused with the record
-    named."""
+    checked; a marked field comes back as itself; a level field comes back
+    as itself, checked, with the option off (the option on refuses it:
+    ``TestRefusalsAtEachSite``); NaN in a usable point is refused with the
+    record named."""
     mesh = _zmesh()
     n = mesh.n_nodes
     u = np.tile(np.array([[1.0], [2.0], [3.0]]), (1, n))
@@ -715,9 +716,8 @@ def test_mark_depth_linear_semantics():
     level = VelocityField(u=np.zeros((4, n)), v=np.zeros((4, n)),
                           eta=np.zeros(n), w=np.zeros((4, n)),
                           uv_layout="node", uv_vertical="level")
-    for opt in ("layer",):
-        got = mark(level, opt, mesh, record="r")
-        assert got is level and is_checked(level, mesh)
+    got = mark(level, "layer", mesh, record="r")
+    assert got is level and is_checked(level, mesh)
     bad_u = u.copy()
     bad_u[0, 2] = np.nan
     bad = VelocityField(u=bad_u, v=u, eta=np.zeros(n), w=np.zeros((4, n)),
@@ -818,7 +818,15 @@ def test_healpix_u_w_prefix_mismatch_option_on(tmp_path):
     ds.close()
 
 
-@pytest.mark.parametrize("kind", ["nest", "ring", "extract"])
+#: zarr 3 warns that consolidated metadata is outside its specification
+#: when the extract tool writes the sector store; only that case writes one
+_ZARR_CONSOLIDATED = pytest.mark.filterwarnings(
+    "ignore:Consolidated metadata is currently not part in the Zarr format 3"
+    ":UserWarning")
+
+
+@pytest.mark.parametrize("kind", ["nest", "ring", pytest.param(
+    "extract", marks=_ZARR_CONSOLIDATED)])
 def test_healpix_prefix_in_mesh_order(tmp_path, kind):
     """Prefixes of 1, 2 or 3 layers that vary from cell to cell: the
     declaration of every mesh node is the prefix of its OWN column (the
@@ -895,6 +903,90 @@ def test_healpix_later_record_nan_option_on_and_off(tmp_path):
     for k in ("lon", "lat", "z", "vel_u", "vel_v", "vel_w"):
         assert_bitwise(outs["nan"][k], outs["zero"][k], k)
     assert not np.array_equal(outs["orig"]["lon"][0], outs["zero"]["lon"][0])
+
+
+def test_healpix_prefix_read_only_for_3d_loads(tmp_path, monkeypatch):
+    """The u prefix (one extra pass over the first record) is read and
+    declared only for a 3-D load (a mode_cfg with Fdrift3D); a 2-D load
+    and a load without mode_cfg neither read it nor declare it."""
+    from kelp.readers import healpix as hp_mod
+    from kelp.readers.healpix import HealpixReader
+    store = _hp_store(tmp_path / "3D_load_ocean.nc")
+    calls = []
+    real = hp_mod._finite_prefix_per_cell
+
+    def spy(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+    monkeypatch.setattr(hp_mod, "_finite_prefix_per_cell", spy)
+    two_d = ModeConfig(Fdrift2D=True, Fdrift3D=False)
+    for mode in (two_d, None):
+        mesh = HealpixReader.load_mesh(_hp_mesh_cfg(store), mode_cfg=mode)
+        assert "uv_data_last" not in mesh.metadata
+    assert calls == []
+    mesh = HealpixReader.load_mesh(_hp_mesh_cfg(store), mode_cfg=_hp_mode())
+    assert calls == [1] and "uv_data_last" in mesh.metadata
+
+
+def test_healpix_rotated_nan_in_v_alone_named_v(tmp_path):
+    """Under ``mesh.rotation`` the raw record is checked BEFORE the u/v
+    rotation mix: a NaN in v alone, inside a column's prefix, is refused
+    as ``v`` (after the mix both components would be NaN and the refusal
+    would name u)."""
+    from kelp.core.rotation import FESOM2_ANGLES, euler_matrix, rotate_lonlat
+    from kelp.readers.healpix import HealpixReader
+    from tests.test_healpix_reader import _pix_lonlat
+    nside = 8
+    raw = _hp_store(tmp_path / "3D_rot_raw.nc", nside=nside)
+    lon, lat = _pix_lonlat(nside, "nest")
+    _, rlat = rotate_lonlat(lon, lat, euler_matrix(*FESOM2_ANGLES))
+    ds = xr.open_dataset(raw).load()
+    ds.close()
+    # both rotated caps dry (as a real ocean mask keeps them)
+    dry = np.abs(rlat) >= 75.0
+    for name in ("avg_uoe", "avg_von", "avg_wo"):
+        a = ds[name].values.copy()
+        a[..., dry] = np.nan
+        ds[name] = (ds[name].dims, a)
+    a = ds["avg_ssh"].values.copy() if "avg_ssh" in ds else None
+    if a is not None:
+        a[..., dry] = np.nan
+        ds["avg_ssh"] = (ds["avg_ssh"].dims, a)
+    cell = int(np.flatnonzero(np.isfinite(ds["avg_von"].values[0, 2])
+                              & (lat < -10.0) & (lat > -40.0))[0])
+    v = ds["avg_von"].values.copy()
+    # v alone, its deepest wet layer (a hole above finite data would be
+    # refused earlier as a corrupt column); u keeps the layer
+    v[0, 2, cell] = np.nan
+    ds["avg_von"] = (ds["avg_von"].dims, v)
+    store = tmp_path / "3D_rot_ocean.nc"
+    ds.to_netcdf(store)
+    mesh_cfg = dataclasses.replace(_hp_mesh_cfg(store), rotation="fesom2")
+    mode = _hp_mode()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")        # near-pole notes, if any
+        mesh = HealpixReader.load_mesh(mesh_cfg, mode_cfg=mode)
+    assert mesh.rotation_angles is not None
+    node = int(np.flatnonzero(_store_cell_of_nodes_geo(mesh, nside)
+                              == cell)[0])
+    ds2 = HealpixReader.open_dataset(str(store), mode_cfg=mode)
+    with pytest.raises(ValueError,
+                       match=rf"v = nan is non-finite at node {node}, "
+                             r"point 2"):
+        HealpixReader.read_velocities(ds2, 0, mesh, mode_cfg=mode)
+    # the same record without the planted NaN reads (the mask is fine)
+    HealpixReader.read_velocities(ds2, 1, mesh, mode_cfg=mode)
+    ds2.close()
+
+
+def _store_cell_of_nodes_geo(mesh, nside):
+    """The NEST store cell of every node of a ROTATED mesh (its stored
+    coordinates are rotated: map them back to geographic first)."""
+    import healpy
+    from kelp.core.rotation import euler_matrix, unrotate_lonlat
+    glon, glat = unrotate_lonlat(mesh.nodes_lon, mesh.nodes_lat,
+                                 euler_matrix(*mesh.rotation_angles))
+    return healpy.ang2pix(nside, glon, glat, nest=True, lonlat=True)
 
 
 def test_healpix_reused_mesh_off_on_off(tmp_path):

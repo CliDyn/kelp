@@ -250,6 +250,13 @@ can touch, the four of a PCHIP stencil, and — with `prefetch_size > 1` — the
 read-ahead window not yet consumed. This is purely a performance shortcut —
 it changes nothing about the result, only how many times the disk is read.
 
+Every field the cache stores — a single read, each record of a prefetch window,
+a snapshot of the shared cache — first passes `mode.uv_vertical`
+(`tracking._mark_depth_linear`): with the default `layer` it is stored as read;
+with `linear` it is stored as a shallow copy marked depth-linear and checked
+(u/v finite down to each column's last usable point, `vertical.md` §2.1), so a
+bad record is refused when it is first read, named by its global time index.
+
 ## §5 Writing trajectories (output format 2)
 
 `TrajectoryWriter` is a **streaming** writer: it writes the output as the run
@@ -590,7 +597,8 @@ resolved value), `exact_nearest`, `grid_hash_cell`, `grid_hash_cell_rule`,
 `git` binary); in 3-D also `w_interp`, `w_positive` and `w_contract`
 (`reader-converted-2026-09-23` — an output without it was written by an engine
 that used FESOM2/HEALPix W unconverted); option-dependent attributes (diffusion,
-beaching, rotation, …) only when the option is on. The sharding concatenator
+beaching, rotation, `uv_vertical = "linear"` for `mode.uv_vertical: linear`, …)
+only when the option is on. The sharding concatenator
 (`utils/concat_trajectories.py`) compares every attribute and refuses shards
 that differ (until 2026-09-23 two shards run with linear and PCHIP temporal
 reconstruction merged without complaint). It also refuses shards that differ in

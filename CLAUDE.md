@@ -119,6 +119,7 @@ kelp/                     ← repo root
 │   │   ├── beaching.py       ← beaching criteria + resuspension (TODO 2.2)
 │   │   ├── sampling.py       ← scalar field sampling at particle positions (TODO 2.4)
 │   │   ├── vertical.py       ← z-level layer/W helpers
+│   │   ├── vertical_uv.py    ← depth-linear u/v (mode.uv_vertical): data points, bracket, record check
 │   │   └── vertical_sigma.py ← sigma layer/W helpers (FESOM-C)
 │   ├── readers/              ← registry: get_reader("fesomc" | "fesom2" | "nemo" | "healpix"); NetCDF + Zarr + kerchunk
 │   │                            (structured.py = curvilinear→quad-Mesh foundation; nemo.py = NEMO adapter, 2-D;
@@ -176,7 +177,7 @@ this file:
 | [`docs/dev/mesh.md`](docs/dev/mesh.md) | `core/geometry.py`, `core/mesh.py` |
 | [`docs/dev/core.md`](docs/dev/core.md) | `core/particles.py`, `core/release.py`, `core/particles_gen.py`, `core/io.py`, `core/rotation.py` |
 | [`docs/dev/writers.md`](docs/dev/writers.md) | `writers.py` |
-| [`docs/dev/numerics.md`](docs/dev/numerics.md) | `numerics/interpolate.py`, `numerics/vertical.py`, `numerics/vertical_sigma.py`, `numerics/diffusion.py`, `numerics/beaching.py`, `numerics/sampling.py`, `w_reconstruct.py` |
+| [`docs/dev/numerics.md`](docs/dev/numerics.md) | `numerics/interpolate.py`, `numerics/vertical_uv.py`, `numerics/vertical.py`, `numerics/vertical_sigma.py`, `numerics/diffusion.py`, `numerics/beaching.py`, `numerics/sampling.py`, `w_reconstruct.py` |
 | [`docs/dev/integrators.md`](docs/dev/integrators.md) | `numerics/integrators.py`, `numerics/temporal_reconstruct.py` |
 | [`docs/dev/tracking.md`](docs/dev/tracking.md) | `tracking.py`, `cli/main.py` |
 | [`docs/dev/readers.md`](docs/dev/readers.md) | `readers/` |

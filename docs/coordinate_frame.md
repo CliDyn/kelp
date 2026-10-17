@@ -160,7 +160,11 @@ u, v = c * u - s * v,  s * u + c * v
 ```
 
 For a 3-D field shaped `(K−1, X)` the carrier factors `(c, s)` of shape `(X,)`
-broadcast across the vertical-layer axis, since the spatial axis is last.
+broadcast across the vertical-layer axis, since the spatial axis is last. A NaN
+in either component makes both NaN after the mix; so the HEALPix reader's
+depth-linear record check (`mode.uv_vertical: linear`, `healpix.md` §2) runs on
+the geographic record BEFORE the mix and names the component that carries the
+NaN.
 
 **Scalar fields pass through untouched.** The vertical velocity `W` and the
 sea-surface height `eta` are **frame-invariant**: they are *not* tangent

@@ -8,7 +8,8 @@
 > docs `velocity_interpolation.md`, `vertical.md`, `field_sampling.md`,
 > `diffusion.md`); config keys (see `configuration.md`).
 > **Code:** `src/kelp/numerics/interpolate.py`,
-> `src/kelp/numerics/vertical.py`, `src/kelp/core/mesh.py`.
+> `src/kelp/numerics/vertical.py`, `src/kelp/numerics/vertical_uv.py`,
+> `src/kelp/core/mesh.py`.
 > **Verified at:** see `docs/doc_map.yaml` (stamped via check_doc_sync --bless).
 
 This document is the formula-level reference for every interpolation the tracker
@@ -448,6 +449,37 @@ cheap path. Combined em/m1 diffusion fails fast when
 vectorised wrapper `interp_edge_leastsq` (+ `_loop_interp_edge_lsq` /
 `_loop_interp_edge_lsq_3d`), single-particle entry
 `interp_edge_leastsq_single`; adjacency `core.mesh.build_elem_neighbors`.
+
+### 1.3 Depth-linear `u`/`v` in the vertical (`mode.uv_vertical: linear`)
+
+By default a 3-D layer-centred `u`/`v` is piecewise constant in depth: every
+vertex reads the row of the particle's layer. A depth-linear field
+(`VelocityField.uv_vertical` `"layer_linear"` — what `mode.uv_vertical: linear`
+makes of layer data — or `"level"`) is evaluated by `barycentric` only (§1.1),
+each vertex `i` at the particle depth `z` (positive-down metres):
+
+$$ z_i = \max\big(p_0,\ \min(z,\ p_{\ell_i})\big), \qquad
+f_i(z) = (1-\alpha)\,f_{k,i} + \alpha\,f_{k+1,i}, \qquad
+\alpha = \frac{z_i - p_k}{p_{k+1} - p_k}, $$
+
+with `p_k <= z_i < p_{k+1}`, and `f_i = f_{k,i}` read directly when `z_i` is on
+a point or at an end (of two coincident points the deeper; a spacing
+`< 1e-12 m` reads `p_k`, the shallower). The data points `p` are the layer
+centres `(z_k + z_{k+1})/2` (`"layer_linear"`, `K-1` points) or the levels
+(`"level"`, `K` points), and `ℓ_i` is the node's last usable point,
+
+$$ \ell_i = \max\Big(0,\ \min\big(M-1,\ \max(\{k : \mathrm{lower}_k \le d_i\} \cup \{0\}),\ D_i\big)\Big), $$
+
+`lower_k = p_k` for levels, `z_{k+1}` (the layer's lower level) for layers, `d_i`
+the node's bed depth and `D_i` an optional reader declaration (`vertical.md`
+§2.1). The velocity is then the barycentric blend of the vertex values with the
+weights of §1.1, `U = time_dir · Σ_i λ_i f_i(z)`. Points below `ℓ_i` are never
+read. In time-interpolated runs each stored value `f_{k,i}` is first blended in
+time (linear or PCHIP, §6), then this rule applies.
+
+**Code:** `numerics.vertical_uv.depth_points` (`p`, `ℓ`), `uv_bracket`
+(`k`, `α`), `uv_at`; the vertex loop `numerics.interpolate._interp_barycentric_core_dl`
+and its fused time-blend twins `_interp_barycentric_core_{tinterp,pchip4}_dl`.
 
 ## 2. Vertical `W` profile — linear between interfaces
 

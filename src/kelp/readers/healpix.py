@@ -1152,15 +1152,17 @@ class HealpixReader:
             # BEFORE the bathymetry choice below — a deptho deeper than the
             # u prefix would otherwise point the depth-linear table at a
             # slot the reader zeroes.  Mapped to mesh-node order once the
-            # mesh exists; declared for 3-D dual-geometry meshes (layer runs
-            # never read it).
+            # mesh exists; declared for 3-D dual-geometry meshes only (a
+            # mode_cfg with Fdrift3D: a 2-D load, or one without mode_cfg,
+            # never pays this extra read of the first record; layer runs
+            # never read the declaration).
             nfin_u = None
             lev_dim_u = next((d for d in u0.dims
                               if str(d).lower() in _LEVEL_DIMS), None)
             if (lev_dim_u is not None
                     and (getattr(mesh_cfg, "healpix_geometry", "dual")
                          or "dual") == "dual"
-                    and (cfg is None or getattr(cfg, "Fdrift3D", False))):
+                    and cfg is not None and getattr(cfg, "Fdrift3D", False)):
                 nfin_u = _finite_prefix_per_cell(u0, lev_dim_u)
 
             # bathymetry: a depth variable if the product carries one, else
@@ -1653,6 +1655,20 @@ class HealpixReader:
             # below instead of returned as inf — safer, and impossible
             # for physical velocities)
             w = w.astype(vd, copy=False)
+        if is_3d and getattr(cfg, "uv_vertical", "layer") == "linear":
+            # depth-linear layer u/v: validate the RAW record against the
+            # depth-point table (bathymetry, kept levels, the declared u
+            # prefix) before the zeroing below turns a missing value into
+            # data — and before the rotation mix, which makes a NaN in one
+            # component NaN in both, so the refusal names the component
+            # that carries it; refused naming node, point and record
+            from types import SimpleNamespace
+            from ..numerics.vertical_uv import check_depth_linear_record
+            check_depth_linear_record(
+                SimpleNamespace(u=u, v=v, uv_vertical="layer_linear",
+                                _dl_token=None),
+                mesh, record=_record_label(ds, timestep))
+
         if getattr(mesh, "rotation_angles", None) is not None:
             carrier = "element" if geometry == "pixel" else "node"
             c_n, s_n = mesh._vec_rot_factors[carrier]
@@ -1661,18 +1677,6 @@ class HealpixReader:
         # right after it (bit-equal to the historical cast-at-return)
         u = u.astype(vd, copy=False)
         v = v.astype(vd, copy=False)
-
-        if is_3d and getattr(cfg, "uv_vertical", "layer") == "linear":
-            # depth-linear layer u/v: validate the RAW record against the
-            # depth-point table (bathymetry, kept levels, the declared u
-            # prefix) before the zeroing below turns a missing value into
-            # data; refused naming node, point and record
-            from types import SimpleNamespace
-            from ..numerics.vertical_uv import check_depth_linear_record
-            check_depth_linear_record(
-                SimpleNamespace(u=u, v=v, uv_vertical="layer_linear",
-                                _dl_token=None),
-                mesh, record=_record_label(ds, timestep))
 
         if surf_bad.any():
             # masks are static by convention; a few non-finite wet nodes

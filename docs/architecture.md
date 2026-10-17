@@ -51,12 +51,16 @@ into its own small dataclass. (Every key is documented in
    `localization.md` §3) — and stamps the resolved cell in the output
    metadata. Whenever `mode.max_levels` is set (2-D layered runs included),
    the vertical interfaces `mesh.sigma` are trimmed to that many levels from
-   the surface down.
+   the surface down (`tracking._apply_max_levels`: the uncut table is kept in
+   `mesh.metadata["sigma_full"]` and every cut is taken from it).
+   `mode.uv_vertical` is checked against the mesh and the reader here, before
+   the dataset is opened (`vertical.md` §2.1).
 
 3. **Open the dataset.** `reader.open_dataset(config.data.ncinput, ...)` opens
    the velocity file (or directory of files) as an xarray dataset, without yet
    reading any velocity data — individual time snapshots are read on demand
-   during the loop.
+   during the loop. A reader with the optional hook `prepare(mesh, ds)` gets it
+   called once per (mesh, dataset) pair right after (`tracking._prepare_dataset`).
 
 4. **Load the seed particles.** `read_seeds_with_release(config.data.inicloud)`
    reads the initial positions (`lon lat [depth] [release_sec]`); once `dt` is
@@ -238,11 +242,15 @@ particle is in.
 | `sigma` | `(K,)` | vertical interfaces — physical depths for z-level meshes, sigma values for sigma meshes; empty for 2D |
 | `vertical_coord` | `"zlevel"` / `"sigma"` | selects the vertical-geometry backend |
 | `rotation_angles` | `(α,β,γ)` or `None` | the Euler frame the coordinates live in; `None` = geographic |
+| `metadata` | `dict` | reader and run facts: e.g. the HEALPix u/v data prefix `uv_data_last` (int `(N,)`), the uncut level table `sigma_full`, the run token `kelp_mesh_token`; shared by shallow copies of the mesh |
 
 The spatial search index (grid hash with its `(N, 3)` node coordinate table
 `_node_xyz`, plus a lazily built KD-tree) is attached to the mesh by
 `build_search` during `load_mesh`. Several other quantities —
-element areas, coastal-element flags — are computed lazily and cached on the
+element areas, coastal-element flags, the depth-linear data-point tables
+(`_uv_depth_points`, valid while `sigma`, `depth` and `metadata["uv_data_last"]`
+are the objects they were built from; replaced, never mutated, so a shallow
+copy never sees another's rebuild) — are computed lazily and cached on the
 mesh the first time a subsystem needs them.
 
 ### `VelocityField` — one time snapshot of the flow
@@ -254,7 +262,8 @@ produced by `reader.read_velocities`.
 
 | field | shape | meaning |
 |---|---|---|
-| `u`, `v` | `(E,)` 2D / `(K-1, E)` 3D | horizontal velocity; mesh location given by `uv_layout` (`"element"` or `"node"`) |
+| `u`, `v` | `(E,)` 2D / `(K-1, E)` 3D | horizontal velocity; mesh location given by `uv_layout` (`"element"` or `"node"`); `(K, N)` for level data (below) |
+| `uv_vertical` | `"layer"` / `"layer_linear"` / `"level"` | vertical placement of `u`/`v`: layer centres read per layer (default), layer centres read linearly in depth, or levels read linearly in depth (`vertical.md` §2.1) |
 | `eta` | `(N,)` | sea-surface height at nodes |
 | `w` | `(K, N)` or `None` | vertical velocity at interfaces; `None` for 2D |
 | `t` | `float` or `None` | the snapshot's time, when the reader sets it |
@@ -262,6 +271,18 @@ produced by `reader.read_velocities`.
 | `kh_layout` | `"node"` / `"element"` or `None` | mesh location of the Kh fields |
 | `scalars` | `dict` or `None` | optional node-based scalar fields for trajectory sampling |
 | `az` | `(K, N)` or `None` | vertical diffusivity at interfaces (`diffusion.var_az`) |
+
+The constructor checks the placement against the shapes: a 2-D field (`u`
+1-D) is always `"layer"`; `"level"` and `"layer_linear"` need node layout,
+with or without `w`; with `w` present, `"layer"`/`"layer_linear"` need
+`K-1` rows of `u` and `"level"` needs `K` (so FESOM2 u/v delivered on the
+levels raise instead of running on their first `K-1` rows). The private
+`_dl_token` is the depth-linear record check's stamp (the mesh table the field
+passed); every rebuild through the constructor drops it, and a blend keeps it
+only when all its parents hold the SAME token (`_shared_token`). Every blend
+(`lerp`, `LazyLerpField`, the PCHIP reconstruction) carries `uv_vertical` and
+refuses parents of mixed placement (`_require_same_uv_vertical`); the shared
+snapshot cache carries it in its metadata (never the token).
 
 `VelocityField.lerp` produces the time-interpolated blend of two snapshots.
 `LazyLerpField` (`src/kelp/core/io.py:LazyLerpField`) is its lazy

@@ -2,7 +2,7 @@
 
 > **Covers:** how the horizontal `u`/`v` velocity at a particle is computed once its nearest node and containing element are known — the default least-squares plane fit (and why it is particle-centered), the barycentric/Wachspress vertex blend, and node- vs element-based velocity layouts.
 > **Does not cover:** finding the nearest node / containing element (see `localization.md`); the full weight formulas and normal-equation derivations (see `interpolation.md` §1, §1.1, §7); the vertical `W` velocity (see `vertical.md`); where the velocity layout is detected on input (see `io_and_time.md`, `configuration.md`).
-> **Code:** `src/kelp/numerics/interpolate.py:_interp_leastsq_core`, `src/kelp/numerics/interpolate.py:_interp_barycentric_core`, `src/kelp/numerics/interpolate.py:get_interpolator`.
+> **Code:** `src/kelp/numerics/interpolate.py:_interp_leastsq_core`, `src/kelp/numerics/interpolate.py:_interp_barycentric_core`, `src/kelp/numerics/interpolate.py:_interp_barycentric_core_dl`, `src/kelp/numerics/interpolate.py:get_interpolator`.
 > **Verified at:** see `docs/doc_map.yaml` (stamped via check_doc_sync --bless).
 
 This document explains how the tracker turns a particle's position into a
@@ -222,6 +222,11 @@ and once as a step-0 backstop inside the realization loop for callers that
 bypass the probe. Where and how the layout is detected from the input files is
 covered in `io_and_time.md` and `configuration.md`.
 
+A **depth-linear** field (`uv_vertical` `"level"` or `"layer_linear"`, §7) is
+node layout by contract and is evaluated by `barycentric` only: `leastsq`,
+`edge_leastsq`, the nearest-element read and every single-particle entry
+refuse it with a `ValueError` before reading any data.
+
 
 ## 5. What is called when
 
@@ -277,4 +282,42 @@ search, compacted vertex ring, centroid-anchored dateline-safe metric
 projection, `_polygon_weights` — is byte-for-byte the untouched 2-D
 core's; the only difference is that every vertex read happens at the
 particle's mid-layer (`u[layer, node]`), because u/v are layer-piecewise
-in the vertical.
+in the vertical. A depth-linear field (§7) is read linearly in depth instead,
+by the `_dl` twins of these cores.
+
+## 7. Depth-linear horizontal velocity (`uv_vertical`, 2026-10)
+
+With `mode.uv_vertical: linear` the layer-centred u/v are linear in depth
+between the layer centres (a reader with level data, `uv_vertical =
+"level"`, between the levels); the rule — the data points, each node's last
+usable point, constant ends, never a point below the bed — is in
+`vertical.md` §2.1. `interp_barycentric` hands such a field to
+`_interp_barycentric_dl` → `_loop_interp_bary_dl` →
+`_interp_barycentric_core_dl`, which reads each particle at its own depth
+`state.z` (the `layer` argument is ignored). The geometry — containment,
+the elements hint of the edge walk, the compacted vertex ring, the
+centroid-anchored projection, `_polygon_weights` — is the node-layout
+`_interp_barycentric_core`'s; only the vertex value differs: at vertex `nd`,
+`(k, α) = uv_bracket(p, last[nd], z)` and `u_nd = uv_at(u, nd, k, α)`
+(`src/kelp/numerics/vertical_uv.py`). The record check
+(`check_depth_linear_record`) runs once per field and mesh table before the
+first read — a lazy blend is checked through its two parents, before anything
+is blended.
+
+The fused 3-D RK2 kernels have depth-linear twins of their time-blend cores,
+`_interp_barycentric_core_tinterp_dl` and `_interp_barycentric_core_pchip4_dl`.
+Per vertex they blend every stored value they need in **time first** (the
+same expressions and endpoint shortcuts as the layer twins;
+`_tinterp_point_uv` widens each stored value to float64 before the blend),
+**then** apply the vertical rule to the blended values, **then** combine the
+vertices — bit for bit the unfused path, which materializes the time blend
+before `_interp_barycentric_core_dl`. PCHIP is not linear, so the order is
+part of the contract (the vertical-first result differs).
+
+Exactness: depth-uniform depth-linear data reproduce the layer answer bit for
+bit wherever every vertex reads a data point directly (the depth on a point,
+or clipped at either end, a NaN depth included); between points each vertex
+value `(1 − α)·c + α·c` is within 1 ulp of `c`, and the combined velocity
+within 2 ulp of the largest vertex value (a few more ulp of the result itself
+when vertex values of opposite sign cancel)
+(`tests/test_interp_depth_linear.py::test_depth_uniform_field_reproduces_layer_answer`).

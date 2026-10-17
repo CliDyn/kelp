@@ -7,6 +7,50 @@ the tracker was developed privately from 2026-06.
 
 ## [Unreleased]
 
+### Added — horizontal velocity linear in depth (`mode.uv_vertical`)
+
+- New option `mode.uv_vertical`: `layer` (default, unchanged — the horizontal
+  velocity is constant within each layer) or `linear` — linear in depth between
+  the layer centres, the value of the first centre above it and of each column's
+  last wet centre below it, never extrapolated; a partial bottom layer is never
+  read, and every vertex of the interpolation stencil follows its own bed
+  (`docs/vertical.md` §2.1). For 3-D z-level runs with node-layout u/v (FESOM2
+  `unod`/`vnod`, the HEALPix dual geometry), `numerics.uv_interp: barycentric`
+  and `euler`, `rk2` or `rk4`, steady, linearly interpolated or PCHIP in time
+  (each stored value is blended in time first, then read in depth). Every other
+  combination is refused before the output file is written: 2-D runs, sigma
+  meshes, element-layout u/v, other u/v interpolators, `rk45`.
+- Each record a run reads with the option is checked: a non-finite `u` or `v`
+  above a column's last usable layer centre stops the run with the node, the
+  layer and the record named. The HEALPix reader checks the raw record before it
+  zeroes missing values (so a drifting surface mask is refused, not zeroed) and
+  declares where each column's u data end (`mesh.metadata["uv_data_last"]`).
+- Output files of runs with the option carry the global attribute
+  `uv_vertical = "linear"` — the proof the option was on (a misspelled key is
+  ignored silently, like every unknown key). Runs without it are bit for bit
+  unchanged and carry no new attribute.
+- Engine: `VelocityField.uv_vertical` (`"layer"`, `"layer_linear"`, `"level"`)
+  records where u/v sit in the vertical and travels through every time blend and
+  the shared snapshot cache; the new module `numerics/vertical_uv.py` holds the
+  data-point table, the bracket and the record check. Readers may set
+  `native_uv_vertical = "level"` (u/v on the levels, always linear in depth) and
+  provide a hook `prepare(mesh, ds)`; no reader of this version uses either.
+- The cost of the option is measured by
+  `benchmarks/single_node/depth_linear_cost.py` (rows pending).
+
+### Changed
+
+- `VelocityField` checks the rows of a 3-D `u`/`v` against `w`: layer data must
+  carry `K-1` rows (one per layer). A FESOM2 dataset whose u/v carry `K` rows
+  (on the levels) now raises in the constructor instead of running on the first
+  `K-1` rows.
+- `mode.max_levels` keeps the uncut level table (`mesh.metadata["sigma_full"]`)
+  and cuts from it, so a mesh used again with another limit gets that limit;
+  `run_single_realization` re-applies the limit to a mesh cut this way before
+  (also for runs without the option).
+- A HEALPix 3-D mesh load (dual geometry) reads the first record of `u` once
+  more, down every column, to declare the u data prefix; 2-D loads do not.
+
 ### Documentation
 
 - The per-module notes of `CLAUDE.md` (the module details and the import graph)
