@@ -35,6 +35,13 @@ from ..core.mesh import (
 )
 from ..core.particles import ParticleState
 from .temporal_reconstruct import _pchip_value_scalar  # njit scalar PCHIP
+from .vertical_uv import (
+    check_depth_linear_record,
+    depth_points,
+    is_checked,
+    uv_at,
+    uv_bracket,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +566,44 @@ def _interp_leastsq_core_fortran(
 
     return UU, VV, True
 
+
+# ---------------------------------------------------------------------------
+# Depth-linear u/v (uv_vertical "level" / "layer_linear"): only the
+# vectorised barycentric interpolator evaluates it (interp_barycentric ->
+# _interp_barycentric_dl); every other entry refuses it before any slicing.
+# ---------------------------------------------------------------------------
+
+#: refusal reason of the leastsq / edge_leastsq / nearest-element entries
+_DL_NEEDS_BARYCENTRIC = "needs uv_interp='barycentric'"
+#: refusal reason of the single-point entries (they take a layer, no depth)
+_DL_NO_SINGLE_POINT = ("has no depth argument (no single-point depth-linear "
+                       "API in this version)")
+
+
+def _reject_depth_linear(vel, where: str, reason: str) -> None:
+    """Refuse a depth-linear u/v field at an entry that cannot evaluate it.
+
+    Parameters
+    ----------
+    vel : VelocityField or LazyLerpField
+        The field; one without ``uv_vertical`` counts as ``"layer"``.
+    where : str
+        The entry's name (message prefix).
+    reason : str
+        Why the entry cannot serve the field (message tail).
+
+    Raises
+    ------
+    ValueError
+        ``vel.uv_vertical`` is not ``"layer"``.
+    """
+    placement = getattr(vel, "uv_vertical", "layer")
+    if placement != "layer":
+        raise ValueError(
+            f"{where}: depth-linear horizontal velocity "
+            f"(uv_vertical={placement!r}) {reason}")
+
+
 def interp_leastsq_single(
     xp: float,
     yp: float,
@@ -569,6 +614,7 @@ def interp_leastsq_single(
     time_dir: float = 1.0,
 ) -> tuple[float, float, bool]:
     """Single-particle polynomial fit (Python wrapper over _interp_leastsq_core)."""
+    _reject_depth_linear(vel, "interp_leastsq_single", _DL_NO_SINGLE_POINT)
     if vel.u.ndim == 1:
         u_fi = vel.u
         v_fi = vel.v
@@ -619,6 +665,7 @@ def interp_leastsq(
     ok : np.ndarray of bool, shape ``(P,)``
         True where interpolation succeeded.
     """
+    _reject_depth_linear(vel, "interp_leastsq", _DL_NEEDS_BARYCENTRIC)
     P = state.n_particles
     U = np.zeros(P, dtype=np.float64)
     V = np.zeros(P, dtype=np.float64)
@@ -768,6 +815,7 @@ def interp_nearest_element(
     U, V : np.ndarray, shape ``(P,)``
     ok : np.ndarray of bool
     """
+    _reject_depth_linear(vel, "interp_nearest_element", _DL_NEEDS_BARYCENTRIC)
     valid = elem_ids >= 0
     safe_ids = np.where(valid, elem_ids, 0)
 
@@ -1203,6 +1251,220 @@ def _loop_interp_bary_3d(
         ok[i] = success
 
 
+# ---------------------------------------------------------------------------
+# Depth-linear twins (uv_vertical "level" / "layer_linear", node layout):
+# the geometry of _interp_barycentric_core, each vertex value read linearly
+# in depth between that vertex's bracketing data points
+# (numerics.vertical_uv.uv_bracket / uv_at).
+# ---------------------------------------------------------------------------
+
+@njit(cache=True)
+def _interp_barycentric_core_dl(xp, yp, z, nn_node, elem_hint, time_dir,
+                                node_to_elems, node_to_elems_count,
+                                elem_nodes, nodes_lon, nodes_lat,
+                                p, last, u_f, v_f, r_earth):
+    """Depth-linear vertex-barycentric u/v at one point (node layout).
+
+    Containment search (1-ring, then the 2-ring fallback of
+    ``_find_containing_element_local``), the ``elem_hint`` shortcut, the
+    compacted vertex ring, the centroid-anchored metric projection and
+    ``_polygon_weights`` are those of :func:`_interp_barycentric_core`
+    (node layout).  Only the per-vertex value differs: at vertex ``nd``,
+    ``(k, alpha) = uv_bracket(p, last[nd], z)`` and
+    ``u = uv_at(u_f, nd, k, alpha)`` — linear in depth between the data
+    points ``p[k]``, ``p[k + 1]``, clipped to ``p[0] .. p[last[nd]]``; a
+    point below ``last[nd]`` is never read.
+
+    ``z`` is the particle depth (m, positive down, as ``state.z``).  A NaN
+    ``z`` reads like a depth below the bed (each vertex at its last point,
+    ok=True), the layer path's outcome: ``find_layer`` puts a NaN depth in
+    the deepest valid layer.
+
+    ``p`` (``(M,)``) and ``last`` (``(N,)``) are the
+    :func:`kelp.numerics.vertical_uv.depth_points` table; ``u_f``/``v_f``
+    are ``(M, N)``.  Returns ``(U, V, ok)``.
+    """
+    if elem_hint >= 0:
+        elem_id = int(elem_hint)
+    else:
+        elem_id, in_dom = _find_containing_element_local(
+            xp, yp, nn_node, node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat)
+        if not in_dom:
+            return 0.0, 0.0, False
+    max_v = elem_nodes.shape[1]
+    verts = np.empty(max_v, dtype=np.int64)
+    nv = 0
+    for k in range(max_v):
+        nd = int(elem_nodes[elem_id, k])
+        if nd < 0:
+            continue
+        if nv > 0 and nd == verts[0]:
+            continue          # FESOM-C tri stored as quad repeats vertex 0
+        verts[nv] = nd
+        nv += 1
+    if nv < 3:
+        return 0.0, 0.0, False
+    DEG2R = 0.017453292519943295
+    R = r_earth
+    lon_ref = nodes_lon[verts[0]]
+    dsum = 0.0; lat0 = 0.0
+    for k in range(nv):
+        dsum += ((nodes_lon[verts[k]] - lon_ref + 180.0) % 360.0) - 180.0
+        lat0 += nodes_lat[verts[k]]
+    lon0 = lon_ref + dsum / nv
+    lat0 /= nv
+    cosl = np.cos(lat0 * DEG2R)
+    vx = np.empty(nv); vy = np.empty(nv)
+    for k in range(nv):
+        dlon = ((nodes_lon[verts[k]] - lon0 + 180.0) % 360.0) - 180.0
+        vx[k] = dlon * DEG2R * R * cosl
+        vy[k] = (nodes_lat[verts[k]] - lat0) * DEG2R * R
+    dlon_p = ((xp - lon0 + 180.0) % 360.0) - 180.0
+    px = dlon_p * DEG2R * R * cosl
+    py = (yp - lat0) * DEG2R * R
+    w = _polygon_weights(px, py, vx, vy, nv)
+    if w[0] == -1.0:
+        return 0.0, 0.0, False
+    zq = z
+    if np.isnan(zq):
+        zq = np.inf           # below the bed, as find_layer reads NaN
+    U = 0.0; V = 0.0
+    for k in range(nv):
+        nd = verts[k]
+        kb, ab = uv_bracket(p, last[nd], zq)
+        un = uv_at(u_f, nd, kb, ab)
+        vn = uv_at(v_f, nd, kb, ab)
+        U += w[k] * un; V += w[k] * vn
+    return time_dir * U, time_dir * V, True
+
+
+@njit(parallel=True, cache=True)
+def _loop_interp_bary_dl(
+    P: int, alive_mask: np.ndarray, lons: np.ndarray, lats: np.ndarray,
+    zs: np.ndarray, nn_nodes: np.ndarray, elems: np.ndarray,
+    time_dir: float,
+    node_to_elems: np.ndarray, node_to_elems_count: np.ndarray,
+    elem_nodes: np.ndarray, nodes_lon: np.ndarray, nodes_lat: np.ndarray,
+    p: np.ndarray, last: np.ndarray, u_f: np.ndarray, v_f: np.ndarray,
+    U: np.ndarray, V: np.ndarray, ok: np.ndarray, r_earth: float
+):
+    """Depth-linear vertex-barycentric u/v for every alive particle (each
+    at its own depth ``zs[i]``); see :func:`_interp_barycentric_core_dl`."""
+    for i in prange(P):
+        if not alive_mask[i]:
+            continue
+        u, v, success = _interp_barycentric_core_dl(
+            lons[i], lats[i], zs[i], int(nn_nodes[i]), int(elems[i]),
+            time_dir,
+            node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat,
+            p, last, u_f, v_f, r_earth
+        )
+        U[i] = u
+        V[i] = v
+        ok[i] = success
+
+
+def _interp_barycentric_dl(
+    state: ParticleState,
+    mesh: Mesh,
+    vel: VelocityField,
+    nn_nodes: np.ndarray,
+    time_dir: float,
+    *,
+    elems=None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Depth-linear vertex-barycentric u/v for all alive particles.
+
+    The ``interp_barycentric`` route for ``vel.uv_vertical`` ``"level"`` /
+    ``"layer_linear"``: each particle is read at its depth ``state.z`` (m,
+    positive down); there is no layer argument.
+
+    Parameters
+    ----------
+    state : ParticleState
+    mesh : Mesh
+        A z-level mesh (the depth-point table is
+        ``depth_points(mesh, vel.uv_vertical)``).
+    vel : VelocityField or LazyLerpField
+        Node-layout u/v of shape ``(M, N)``.  Checked once per mesh table
+        with :func:`kelp.numerics.vertical_uv.check_depth_linear_record`
+        (skipped when :func:`~kelp.numerics.vertical_uv.is_checked`).
+    nn_nodes : np.ndarray, shape ``(P,)``
+        Nearest-node index per particle.
+    time_dir : float
+        Forward (+1) or backward (-1).
+    elems : np.ndarray or None
+        Optional per-particle PRE-VALIDATED containing elements (edge-walk
+        tracker); ``-1`` entries fall back to the internal search.
+
+    Returns
+    -------
+    U, V : np.ndarray, shape ``(P,)``
+        Interpolated velocity (m/s).  Zero for inactive particles.
+    ok : np.ndarray of bool, shape ``(P,)``
+        True where interpolation succeeded.
+
+    Raises
+    ------
+    ValueError
+        Not node layout, u/v not 2-D, a non-z-level mesh, or a record that
+        fails the check (shape, non-finite value at a usable point).
+    """
+    placement = vel.uv_vertical
+    if vel.uv_layout != "node":
+        raise ValueError(
+            f"interp_barycentric: depth-linear u/v (uv_vertical="
+            f"{placement!r}) needs uv_layout='node', got {vel.uv_layout!r}")
+    if getattr(vel.u, "ndim", None) != 2 or getattr(vel.v, "ndim", None) != 2:
+        raise ValueError(
+            f"interp_barycentric: depth-linear u/v (uv_vertical="
+            f"{placement!r}) must be 2-D (points, nodes), got u "
+            f"{getattr(vel.u, 'shape', None)}, v "
+            f"{getattr(vel.v, 'shape', None)}")
+    if not is_checked(vel, mesh):
+        check_depth_linear_record(vel, mesh)
+    dp = depth_points(mesh, placement)
+
+    P = state.n_particles
+    U = np.zeros(P, dtype=np.float64)
+    V = np.zeros(P, dtype=np.float64)
+    ok = np.zeros(P, dtype=bool)
+
+    if elems is None:
+        elems_arr = np.full(P, -1, dtype=np.int32)
+    else:
+        elems_arr = np.asarray(elems, dtype=np.int32)
+
+    u_f = vel.u
+    v_f = vel.v
+    if HAS_NUMBA:
+        _loop_interp_bary_dl(
+            P, state.alive_mask, state.lon, state.lat, state.z, nn_nodes,
+            elems_arr, time_dir,
+            mesh.node_to_elems, mesh.node_to_elems_count,
+            mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat,
+            dp.p, dp.last, u_f, v_f, U, V, ok, mesh.r_earth
+        )
+    else:
+        for i in range(P):
+            if not state.alive_mask[i]:
+                continue
+            u, v, success = _interp_barycentric_core_dl(
+                state.lon[i], state.lat[i], state.z[i],
+                int(nn_nodes[i]), int(elems_arr[i]), time_dir,
+                mesh.node_to_elems, mesh.node_to_elems_count,
+                mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat,
+                dp.p, dp.last, u_f, v_f, mesh.r_earth
+            )
+            U[i] = u
+            V[i] = v
+            ok[i] = success
+
+    return U, V, ok
+
+
 def interp_barycentric_single(xp, yp, layer, mesh, vel, node_idx,
                               time_dir=1.0, *, elem=-1):
     """Single-point vertex-barycentric u/v (signature of
@@ -1214,6 +1476,7 @@ def interp_barycentric_single(xp, yp, layer, mesh, vel, node_idx,
     area-weighted average over the elements sharing each vertex) and blends
     them with ``_polygon_weights``.  Returns ``(U, V, ok)``.
     """
+    _reject_depth_linear(vel, "interp_barycentric_single", _DL_NO_SINGLE_POINT)
     if vel.uv_layout == "node":
         layout_code = UV_LAYOUT_NODE
         areas = np.empty(0, dtype=np.float64)
@@ -1266,7 +1529,10 @@ def interp_barycentric(
     layer : int or np.ndarray
         Vertical layer index.  Scalar ``int`` for 2-D (all particles use
         the same layer).  ``np.ndarray`` of shape ``(P,)`` for 3-D
-        (per-particle layer).
+        (per-particle layer).  Ignored for a depth-linear field
+        (``vel.uv_vertical`` ``"level"`` / ``"layer_linear"``): that field
+        is read at each particle's depth ``state.z``
+        (:func:`_interp_barycentric_dl`).
     elems : np.ndarray or None
         Optional per-particle PRE-VALIDATED containing elements (edge-walk
         tracker); ``-1`` entries fall back to the internal search.  None
@@ -1279,6 +1545,9 @@ def interp_barycentric(
     ok : np.ndarray of bool, shape ``(P,)``
         True where interpolation succeeded.
     """
+    if getattr(vel, "uv_vertical", "layer") != "layer":
+        return _interp_barycentric_dl(state, mesh, vel, nn_nodes, time_dir,
+                                      elems=elems)
     P = state.n_particles
     U = np.zeros(P, dtype=np.float64)
     V = np.zeros(P, dtype=np.float64)
@@ -1636,6 +1905,8 @@ def interp_edge_leastsq_single(
     """Single-point edge-neighbor LSQ u/v (signature of
     interp_leastsq_single, plus the boundary-condition keyword and the
     optional pre-validated ``elem`` hint)."""
+    _reject_depth_linear(vel, "interp_edge_leastsq_single",
+                         _DL_NO_SINGLE_POINT)
     _reject_node_layout_edge_lsq(vel)
     bc_code = _bc_to_int(bc)
     neighbors = build_elem_neighbors(mesh)
@@ -1705,6 +1976,7 @@ def interp_edge_leastsq(
     ok : np.ndarray of bool, shape ``(P,)``
         True where interpolation succeeded.
     """
+    _reject_depth_linear(vel, "interp_edge_leastsq", _DL_NEEDS_BARYCENTRIC)
     _reject_node_layout_edge_lsq(vel)
     bc_code = _bc_to_int(bc)
     neighbors = build_elem_neighbors(mesh)
