@@ -38,7 +38,7 @@ coordinate_frame:
   - src/kelp/tracking.py:_validate_restart_frame
   - src/kelp/readers/healpix.py:_apply_rotation
   doc: docs/coordinate_frame.md
-  verified_at: '5818684'
+  verified_at: 55a4238
 dev_config:
   code:
   - src/kelp/core/config.py:load_config
@@ -68,7 +68,7 @@ dev_integrators:
   - src/kelp/numerics/vertical_uv.py:check_depth_linear_record
   - src/kelp/numerics/integrators.py:_check_depth_linear_entry
   doc: docs/dev/integrators.md
-  verified_at: '5818684'
+  verified_at: 55a4238
 dev_mesh:
   code:
   - src/kelp/core/mesh.py:Mesh
@@ -93,7 +93,7 @@ dev_numerics:
   - src/kelp/numerics/vertical_uv.py:check_depth_linear_record
   - src/kelp/numerics/interpolate.py:_interp_barycentric_core_dl
   doc: docs/dev/numerics.md
-  verified_at: '5818684'
+  verified_at: 55a4238
 dev_readers:
   code:
   - src/kelp/readers/__init__.py:get_reader
@@ -105,7 +105,7 @@ dev_readers:
   - src/kelp/readers/structured.py:build_structured_mesh
   - src/kelp/readers/nemo.py:NemoReader
   doc: docs/dev/readers.md
-  verified_at: '5818684'
+  verified_at: 55a4238
 dev_tracking:
   code:
   - src/kelp/tracking.py:run_tracking
@@ -165,7 +165,7 @@ healpix:
   - src/kelp/numerics/integrators.py:_bary_fused_anchor_exact
   - src/kelp/core/mesh.py:grid_hash_dense_for_elements
   doc: docs/healpix.md
-  verified_at: '5818684'
+  verified_at: 55a4238
 interpolation:
   code:
   - src/kelp/numerics/interpolate.py:_interp_leastsq_core
@@ -174,7 +174,7 @@ interpolation:
   - src/kelp/core/mesh.py:_polygon_weights
   - src/kelp/numerics/vertical_uv.py:uv_bracket
   doc: docs/interpolation.md
-  verified_at: '5818684'
+  verified_at: 55a4238
 io_and_time:
   code:
   - src/kelp/readers/__init__.py:get_reader
@@ -256,7 +256,7 @@ velocity_interpolation:
   - src/kelp/core/mesh.py:_wachspress_weights_quad
   - src/kelp/numerics/interpolate.py:_interp_barycentric_core_dl
   doc: docs/velocity_interpolation.md
-  verified_at: '5818684'
+  verified_at: 55a4238
 vertical:
   code:
   - src/kelp/numerics/vertical.py:find_layer
@@ -269,7 +269,7 @@ vertical:
   - src/kelp/numerics/vertical_uv.py:depth_points
   - src/kelp/numerics/vertical_uv.py:uv_bracket
   doc: docs/vertical.md
-  verified_at: '5818684'
+  verified_at: 55a4238
 w_reconstruction:
   code:
   - src/kelp/w_reconstruct.py:reconstruct_w
