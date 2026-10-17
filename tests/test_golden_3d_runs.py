@@ -72,8 +72,9 @@ def _compare(got, golden, bitwise):
 
 
 @pytest.mark.parametrize("name", sorted(CASES))
-def test_golden_bitwise(name):
-    _compare(run_case(name), GOLDEN_DIR / f"{name}.npz", BITWISE)
+def test_golden_bitwise(name, tmp_path):
+    _compare(run_case(name, workdir=tmp_path), GOLDEN_DIR / f"{name}.npz",
+             BITWISE)
 
 
 @pytest.mark.slow
@@ -112,16 +113,17 @@ def test_compare_modes():
     change fails both."""
     golden = GOLDEN_DIR / "healpix_3d_rk2.npz"
     exp = _load(golden)
+    i = np.flatnonzero(np.isfinite(exp["lon"]))[0]   # a finite probe
     ulp = dict(exp, lon=exp["lon"].copy())
-    ulp["lon"][0, 0] = np.nextafter(ulp["lon"][0, 0], np.inf)
+    ulp["lon"].flat[i] = np.nextafter(ulp["lon"].flat[i], np.inf)
     with pytest.raises(AssertionError):
         _compare(ulp, golden, bitwise=True)
     _compare(ulp, golden, bitwise=False)
     far = dict(exp, lon=exp["lon"] * (1.0 + 1e-6))
+    st = dict(exp, status=exp["status"].copy())
+    st["status"].flat[0] += 1
     for bitwise in (True, False):
         with pytest.raises(AssertionError):
             _compare(far, golden, bitwise=bitwise)
-    st = dict(exp, status=exp["status"].copy())
-    st["status"][0, 0] += 1
-    with pytest.raises(AssertionError):
-        _compare(st, golden, bitwise=False)
+        with pytest.raises(AssertionError):
+            _compare(st, golden, bitwise=bitwise)

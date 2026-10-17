@@ -52,16 +52,18 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
-_ROOT = Path(__file__).resolve().parents[1]
-# A spawned interpreter must import THIS checkout's kelp (an installed kelp
-# may point at another checkout) and find the ``tests.*`` fixture helpers.
-sys.path.insert(0, str(_ROOT / "src"))
-if str(_ROOT) not in sys.path:
-    sys.path.insert(1, str(_ROOT))
-# the suite's numba thread cap (tests/conftest.py), set before numba loads
-os.environ.setdefault("NUMBA_NUM_THREADS", str(min(8, os.cpu_count() or 8)))
+if __name__ == "__main__":
+    # CLI only (a spawned interpreter): import THIS checkout's kelp (an
+    # installed kelp may point at another checkout), find the ``tests.*``
+    # fixture helpers, and cap numba's threads like tests/conftest.py, all
+    # before numba loads.  Imported by pytest, this module changes neither
+    # sys.path nor the environment.
+    _ROOT = Path(__file__).resolve().parents[1]
+    sys.path[:0] = [str(_ROOT / "src"), str(_ROOT)]
+    os.environ.setdefault("NUMBA_NUM_THREADS",
+                          str(min(8, os.cpu_count() or 8)))
 
 import numpy as np  # noqa: E402
 
@@ -76,6 +78,10 @@ from tests._bitwise import write_env_fingerprint  # noqa: E402
 STATE_KEYS = ("lon", "lat", "z", "status", "failure_reason", "u", "v", "w")
 
 CASES: Dict[str, Callable[[], Dict[str, np.ndarray]]] = {}
+
+# parent of the run-level cases' scratch directories (set by ``run_case``;
+# None = ``tempfile``'s default, i.e. ``$TMPDIR``)
+_WORKDIR: Optional[Path] = None
 
 
 def _case(name: str, *, backward: bool = False):
@@ -92,6 +98,11 @@ def _case(name: str, *, backward: bool = False):
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+def _scratch():
+    """A scratch directory for one run-level case, under ``_WORKDIR``."""
+    return tempfile.TemporaryDirectory(prefix="kelp_golden_", dir=_WORKDIR)
+
 
 def _c(a) -> np.ndarray:
     """A C-contiguous float64 copy (broadcast results included)."""
@@ -447,7 +458,7 @@ def _beaching_resuspension_rk2(direction):
                               uv_interp="barycentric",
                               w_interp="barycentric", temporal_interp=True,
                               beaching=beach)
-    with tempfile.TemporaryDirectory(prefix="kelp_golden_") as d:
+    with _scratch() as d:
         return _run_fesom2(mesh, ds, _init_state(mesh, lon, lat, z),
                            direction, numerics, 14, d)
 
@@ -468,10 +479,44 @@ def _scalar_sampling_rk2(direction):
     numerics = NumericsConfig(dt=RUN_DT, integrator="rk2",
                               uv_interp="barycentric",
                               w_interp="leastsq", temporal_interp=True)
-    with tempfile.TemporaryDirectory(prefix="kelp_golden_") as d:
+    with _scratch() as d:
         return _run_fesom2(mesh, ds, _init_state(mesh, lon, lat, z),
                            direction, numerics, 8, d,
                            sample_vars=("s_lev", "s_mid"))
+
+
+# ---------------------------------------------------------------------------
+# reader-path cases: the stored u/v must vary with depth
+# ---------------------------------------------------------------------------
+
+LAYER_CONTRAST = 1e-3          # m/s, minimum |u/v difference| between layers
+
+
+def _check_layer_contrast(case, u, v):
+    """Stored u and v (layer axis -2, NaN padding allowed) differ by more
+    than ``LAYER_CONTRAST`` between every two adjacent finite layers of every
+    column: a change of the vertical u/v interpolation moves the run."""
+    for comp, a in (("u", u), ("v", v)):
+        d = np.abs(np.diff(np.asarray(a, dtype=np.float64), axis=-2))
+        d = d[np.isfinite(d)]
+        if d.size == 0 or d.min() <= LAYER_CONTRAST:
+            raise RuntimeError(
+                f"{case}: stored {comp} does not vary between adjacent layers "
+                f"(min |difference| {d.min() if d.size else None})")
+
+
+def _check_two_layers_visited(case, z_start, z_rec, alive, levels):
+    """At least one particle visits two layers (its release depth and its
+    ALIVE records), so the layer contrast is actually sampled."""
+    levels = np.asarray(levels, dtype=np.float64)
+    n_layers = []
+    for p in range(len(z_start)):
+        zp = np.concatenate([[z_start[p]], z_rec[p][alive[p]]])
+        k = np.clip(np.searchsorted(levels, zp, side="right") - 1,
+                    0, levels.size - 2)
+        n_layers.append(np.unique(k).size)
+    if max(n_layers) < 2:
+        raise RuntimeError(f"{case}: no particle visits two layers")
 
 
 # ---------------------------------------------------------------------------
@@ -517,7 +562,7 @@ def _fesomc_sigma_rk2(direction):
     numerics = NumericsConfig(dt=450.0, integrator="rk2", output_freq=1,
                               temporal_reconstruction="linear",
                               w_interp="leastsq")
-    with tempfile.TemporaryDirectory(prefix="kelp_golden_") as d:
+    with _scratch() as d:
         p = _write(Path(d) / "fesomc.nc", times, eta, _c(wvel), sig=sig,
                    u_elem=_c(np.broadcast_to(u_e, shp)),
                    v_elem=_c(np.broadcast_to(v_e, shp)), depth=depth)
@@ -545,10 +590,43 @@ def _fesomc_sigma_rk2(direction):
 # HEALPix store (tests/test_healpix_reader._make_uv_store, with_w=True)
 # ---------------------------------------------------------------------------
 
+def _rewrite_healpix_uv(store, plon, plat):
+    """Overwrite the store's u/v (``avg_uoe``/``avg_von``, (time, level,
+    value)) with values that vary by level, cell and record; the NaN padding
+    below each column's finite prefix stays exactly as written."""
+    import netCDF4
+    with netCDF4.Dataset(str(store), "r+") as nc:
+        nc.set_auto_mask(False)
+        u = nc.variables["avg_uoe"]
+        if u.dimensions != ("time", "level", "value"):
+            raise RuntimeError(f"unexpected u layout {u.dimensions}")
+        nt, nl, npix = u.shape
+        t = np.arange(nt, dtype=np.float64)[:, None, None]
+        k = np.arange(nl, dtype=np.float64)[None, :, None]
+        x = (np.asarray(plon) / 360.0)[None, None, :]
+        y = (np.asarray(plat) / 60.0)[None, None, :]
+        new = {"avg_uoe": 0.4 - 0.12 * k + 0.03 * y + 0.01 * t,
+               "avg_von": 0.05 - 0.05 * k + 0.02 * x - 0.005 * t}
+        for name, val in new.items():
+            var = nc.variables[name]
+            old = var[:]
+            var[:] = np.where(np.isfinite(old), val, old)
+            if not np.array_equal(np.isfinite(var[:]), np.isfinite(old)):
+                raise RuntimeError(f"{name}: the NaN padding moved")
+
+
+def _read_healpix_uv(store):
+    import netCDF4
+    with netCDF4.Dataset(str(store)) as nc:
+        nc.set_auto_mask(False)
+        return nc.variables["avg_uoe"][:], nc.variables["avg_von"][:]
+
+
 @_case("healpix_3d_rk2", backward=True)
 def _healpix_3d_rk2(direction):
     """HEALPix native reader: columns of 1, 2 and 3 finite layers (padding
-    and below-bottom zeroing), w on the interfaces, float32 velocities,
+    and below-bottom zeroing), u/v varying by level, cell and record (the
+    store rewritten in place), w on the interfaces, float32 velocities,
     fused node RK2 with a linear time blend."""
     from kelp.core.config import ModeConfig, NumericsConfig
     from kelp.readers import extract_time_info
@@ -562,16 +640,19 @@ def _healpix_3d_rk2(direction):
     nfin[::5] = np.where(_wet(plat[::5]), 1, 0)
     lon = np.repeat([-150.0, -60.0, 0.0, 45.0, 120.0, 170.0], 4)
     lat = np.tile([-8.0, -2.0, 3.0, 51.0], 6)   # wet rows end at 54.3
-    z = np.array([5.0, 15.0, 25.0, 29.5, 35.0, 50.0, 65.0, 69.0] * 3)
+    # off the layer centres (5, 20, 50 m) and the levels (0, 10, 30, 70 m)
+    z = np.array([6.3, 15.0, 25.0, 29.5, 35.0, 47.6, 65.0, 69.0] * 3)
     mode = ModeConfig(Fdrift2D=False, Fdrift3D=True, time_dir=direction)
     numerics = NumericsConfig(dt=21600.0, integrator="rk2",
                               uv_interp="barycentric",
                               w_interp="barycentric", temporal_interp=True,
                               velocity_float32=True)
-    with tempfile.TemporaryDirectory(prefix="kelp_golden_") as d:
+    with _scratch() as d:
         store = _make_uv_store(Path(d) / "3D_golden_ocean.nc", nside=nside,
                                with_eta=True, with_w=True,
                                n_finite_levels=nfin, w_value=1e-4)
+        _rewrite_healpix_uv(store, plon, plat)
+        _check_layer_contrast("healpix_3d_rk2", *_read_healpix_uv(store))
         mesh = HealpixReader.load_mesh(_mesh_cfg(store, levels=LEVELS_M),
                                        mode_cfg=mode)
         ds = HealpixReader.open_dataset(str(store), mode_cfg=mode)
@@ -586,41 +667,82 @@ def _healpix_3d_rk2(direction):
                 temporal_interp=True, file_times=file_times,
                 file_dt=file_dt)
         try:
-            return _run_written(run, init.n_particles, d)
+            out = _run_written(run, init.n_particles, d)
         finally:
             ds.close()
+    from kelp.core.particles import ParticleStatus
+    _check_two_layers_visited("healpix_3d_rk2", z, out["z"],
+                              out["status"] == ParticleStatus.ALIVE, LEVELS_M)
+    return out
 
 
 # ---------------------------------------------------------------------------
 # run_tracking end to end: multi-year FESOM2 files (tests/_fesom2_synth)
 # ---------------------------------------------------------------------------
 
-# w written over write_multiyear's default (0.1 m/s up, which lifts every
-# particle to the surface in one step): small, upward (the file convention),
-# growing with depth on the three interfaces (0, 10, 30 m), larger in 1959
+# write_multiyear writes 0.1 into every value.  The run rewrites unod, vnod,
+# temp and w in place with fields that vary by layer (0-10, 10-30 m), node
+# and year: u/v differ between the layers (a change of the vertical u/v
+# interpolation moves the run), and w is small and upward (the file
+# convention), growing with depth on the interfaces (0, 10, 30 m), so the
+# particles rise a few metres and stay below the surface.
+MULTIYEAR_YEAR = {1958: 1.0, 1959: 1.25}
 MULTIYEAR_W_UP = np.array([1.5e-5, 2.25e-5, 3.0e-5])
-MULTIYEAR_W_YEAR = {1958: 1.0, 1959: 1.25}
 
 
-def _rewrite_multiyear_w(data, years):
-    """Overwrite ``w`` in the ``w.fesom.<year>.nc`` files in place."""
+def _multiyear_field(var, year):
+    """(levels, nodes) values of ``var`` in ``year``."""
+    from tests._fesom2_synth import LAT_DEG, LON_DEG
+    f = MULTIYEAR_YEAR[year]
+    x, y = LON_DEG[None, :], LAT_DEG[None, :]
+    if var == "unod":
+        return (np.array([0.06, 0.02])[:, None] + 0.01 * x - 0.008 * y) * f
+    if var == "vnod":
+        return (np.array([0.03, -0.02])[:, None] + 0.006 * x + 0.004 * y) * f
+    if var == "temp":
+        return (np.array([12.0, 6.0])[:, None] + 0.5 * x - 0.3 * y
+                + 0.5 * (year - 1958))
+    if var == "w":
+        return np.broadcast_to(MULTIYEAR_W_UP[:, None] * f, (3, x.size))
+    raise ValueError(var)
+
+
+def _rewrite_multiyear(data, years):
+    """Overwrite unod, vnod, temp and w in the ``<var>.fesom.<year>.nc``
+    files in place (every record of a year gets the same values)."""
     import netCDF4
-    for year in years:
-        with netCDF4.Dataset(str(data / f"w.fesom.{year}.nc"), "r+") as nc:
-            w = nc.variables["w"]
-            if w.dimensions != ("time", "nz", "nod2"):
-                raise RuntimeError(f"unexpected w layout {w.dimensions}")
-            prof = MULTIYEAR_W_UP * MULTIYEAR_W_YEAR[year]
-            w[:] = np.broadcast_to(prof[None, :, None],
-                                   w.shape).astype(w.dtype)
+    for var, vdim in (("unod", "nz1"), ("vnod", "nz1"), ("temp", "nz1"),
+                      ("w", "nz")):
+        for year in years:
+            path = str(data / f"{var}.fesom.{year}.nc")
+            with netCDF4.Dataset(path, "r+") as nc:
+                v = nc.variables[var]
+                if v.dimensions != ("time", vdim, "nod2"):
+                    raise RuntimeError(
+                        f"unexpected {var} layout {v.dimensions}")
+                v[:] = np.broadcast_to(_multiyear_field(var, year)[None],
+                                       v.shape).astype(v.dtype)
+
+
+def _read_multiyear_uv(data, years):
+    import netCDF4
+    out = []
+    for var in ("unod", "vnod"):
+        parts = []
+        for year in years:
+            with netCDF4.Dataset(str(data / f"{var}.fesom.{year}.nc")) as nc:
+                nc.set_auto_mask(False)
+                parts.append(nc.variables[var][:])
+        out.append(np.concatenate(parts))
+    return out
 
 
 def _multiyear_config(workdir):
     """A node-layout multi-year FESOM2 run crossing the 1958/1959 file
     boundary: prefetch windows of 2, one sampled scalar, failure reasons
-    tracked, daily means (``time_averaging: mean``); the default data of
-    ``write_multiyear`` with ``w`` rewritten (``_rewrite_multiyear_w``) so
-    the particles rise a few metres and stay below the surface."""
+    tracked, daily means (``time_averaging: mean``); the files of
+    ``write_multiyear`` with unod, vnod, temp and w rewritten
+    (``_rewrite_multiyear``)."""
     from kelp.core.config import (AppConfig, DataConfig, MeshConfig,
                                   ModeConfig, NumericsConfig, TimeConfig)
     from tests._fesom2_synth import write_meshdiag, write_multiyear
@@ -631,14 +753,17 @@ def _multiyear_config(workdir):
     for var in ("unod", "vnod", "temp"):
         write_multiyear(data, var, years, node_layout=True, vertical="nz1")
     write_multiyear(data, "w", years, node_layout=True, vertical="nz")
-    _rewrite_multiyear_w(data, years)
     write_multiyear(data, "ssh", years, node_layout=True, vertical=None)
+    _rewrite_multiyear(data, years)
+    _check_layer_contrast("run_tracking_fesom2_multiyear_node",
+                          *_read_multiyear_uv(data, years))
     mesh_path = write_meshdiag(workdir / "fesom.mesh.diag.nc", "ugrid")
     seeds = workdir / "seeds.dat"
-    # depths off the levels (0, 10, 30 m) and the layer centres (5, 20 m)
+    # depths off the levels (0, 10, 30 m) and the layer centres (5, 20 m);
+    # the last seed leaves through the corner on purpose (failure_reason)
     seeds.write_text("".join(f"{lo} {la} {z}\n" for lo, la, z in [
         (0.2, 0.3, 12.3), (0.5, 0.5, 17.6), (0.7, 0.2, 24.1),
-        (0.3, 0.8, 27.4), (0.9, 0.6, 8.7), (0.98, 0.97, 14.2)]))
+        (0.3, 0.8, 27.4), (0.72, 0.55, 8.7), (0.98, 0.97, 14.2)]))
     return AppConfig(
         mode=ModeConfig(Fdrift2D=False, Fdrift3D=True, var_u="unod",
                         var_v="vnod", var_w="w", var_eta="ssh",
@@ -681,7 +806,7 @@ def _run_tracking_fesom2_multiyear_node(direction):
     """``run_tracking`` end to end on ``_multiyear_config``: the whole
     output file, attributes included."""
     from kelp.tracking import run_tracking
-    with tempfile.TemporaryDirectory(prefix="kelp_golden_") as d:
+    with _scratch() as d:
         cfg = _multiyear_config(d)
         with contextlib.redirect_stdout(io.StringIO()):
             run_tracking(cfg)
@@ -692,11 +817,15 @@ def _run_tracking_fesom2_multiyear_node(direction):
 
 def _check_multiyear_depths(out):
     """Every recorded ALIVE depth lies strictly between the surface and the
-    bed, and every particle alive through the run moved > 1 m vertically."""
+    bed, every particle alive through the run moved > 1 m vertically, and
+    one particle visits both layers."""
     from kelp.core.particles import ParticleStatus
-    from tests._fesom2_synth import ZBAR_N_BOTTOM_NEG
+    from tests._fesom2_synth import ZBAR_N_BOTTOM_NEG, ZBAR_NEG
     bed = float(np.abs(ZBAR_N_BOTTOM_NEG).min())
     alive = out["status"] == ParticleStatus.ALIVE
+    _check_two_layers_visited("run_tracking_fesom2_multiyear_node",
+                              out["release_z"], out["z"], alive,
+                              np.abs(ZBAR_NEG))
     z = out["z"][alive]
     if not (z.size and np.all((z > 0.0) & (z < bed))):
         raise RuntimeError(f"multi-year case: alive z outside (0, {bed}): "
@@ -712,9 +841,20 @@ def _check_multiyear_depths(out):
 # entry points
 # ---------------------------------------------------------------------------
 
-def run_case(name: str) -> Dict[str, np.ndarray]:
-    """Run one case; every value is a numpy array (no object arrays)."""
-    out = CASES[name]()
+def run_case(name: str, workdir=None) -> Dict[str, np.ndarray]:
+    """Run one case; every value is a numpy array (no object arrays).
+
+    ``workdir`` holds the scratch files of a run-level case (removed after
+    the case); None leaves them to ``tempfile``'s default (``$TMPDIR``)."""
+    global _WORKDIR
+    saved = _WORKDIR
+    if workdir is not None:
+        Path(workdir).mkdir(parents=True, exist_ok=True)
+    _WORKDIR = None if workdir is None else Path(workdir)
+    try:
+        out = CASES[name]()
+    finally:
+        _WORKDIR = saved
     res = {}
     for k, v in out.items():
         a = np.asarray(v)
@@ -730,12 +870,14 @@ def main(argv=None) -> int:
                     help="directory for <case>.npz")
     ap.add_argument("--case", action="append", choices=sorted(CASES),
                     help="case to run (repeatable; default: all)")
+    ap.add_argument("--workdir", metavar="DIR", default=None,
+                    help="parent of the scratch files (default: $TMPDIR)")
     args = ap.parse_args(argv)
     outdir = Path(args.write)
     outdir.mkdir(parents=True, exist_ok=True)
     for name in args.case or sorted(CASES):
         t0 = time.perf_counter()
-        res = run_case(name)
+        res = run_case(name, workdir=args.workdir)
         path = outdir / f"{name}.npz"
         np.savez_compressed(path, **res)
         print(f"{name:40s} {time.perf_counter() - t0:7.2f} s "
