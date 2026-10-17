@@ -152,6 +152,16 @@ class Mesh:
     #: mesh is rotated (the factors need geographic carrier coords).
     _vec_rot_factors: Optional[dict] = field(default=None, repr=False)
 
+    # Internal: populated lazily by numerics.vertical_uv.depth_points() —
+    # the depth-linear u/v data-point table per placement ("level",
+    # "layer_linear"); each entry holds STRONG references to the sigma,
+    # depth and metadata["uv_data_last"] it was built from (validity is
+    # checked by identity) and the DepthPoints.  Replaced, never mutated in
+    # place, so a shallow copy of the mesh does not see the other's
+    # rebuilds.  Never filled by a reader.
+    _uv_depth_points: Optional[dict] = field(default=None, repr=False,
+                                             compare=False)
+
     @property
     def n_nodes(self) -> int:
         return self.nodes_lon.shape[0]
