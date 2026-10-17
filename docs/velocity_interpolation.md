@@ -318,6 +318,6 @@ Exactness: depth-uniform depth-linear data reproduce the layer answer bit for
 bit wherever every vertex reads a data point directly (the depth on a point,
 or clipped at either end, a NaN depth included); between points each vertex
 value `(1 − α)·c + α·c` is within 1 ulp of `c`, and the combined velocity
-within 2 ulp of the largest vertex value (a few more ulp of the result itself
-when vertex values of opposite sign cancel)
+within 2 ulp of the largest vertex value — an absolute bound: when vertex
+values of opposite sign cancel, the relative error of the sum is unbounded
 (`tests/test_interp_depth_linear.py::test_depth_uniform_field_reproduces_layer_answer`).

@@ -319,6 +319,25 @@ def test_bracket_coincident_points_reads_the_deeper():
     assert vu.uv_bracket(p, 1, 10.0) == (1, -1.0)
 
 
+def test_bracket_coincident_points_at_the_surface_read_point_zero():
+    """The surface exception to the deeper-of-two rule: at or above
+    ``p[0]`` the bracket reads point 0 even when point 1 coincides with it;
+    just below, the blend starts at point 1 (the deeper of the pair)."""
+    vu = _vu()
+    p = np.array([0.0, 0.0, 10.0])
+    f = np.array([[1.0], [2.0], [4.0]])
+    for fn in (vu.uv_bracket, vu.uv_bracket.py_func):
+        assert fn(p, 2, 0.0) == (0, -1.0)
+        assert fn(p, 2, -3.0) == (0, -1.0)
+        k, a = fn(p, 2, 5.0)
+        assert k == 1 and a == 0.5
+    assert vu.uv_at(f, 0, *vu.uv_bracket(p, 2, 0.0)) == 1.0
+    assert vu.uv_at(f, 0, *vu.uv_bracket(p, 2, 5.0)) == 3.0
+    # an interior pair keeps the deeper-of-two rule
+    p2 = np.array([0.0, 10.0, 10.0, 20.0])
+    assert vu.uv_bracket(p2, 3, 10.0) == (2, -1.0)
+
+
 def test_bracket_nan_depth():
     """A NaN depth (pinned as the docstring states): ``k = last_i - 1``
     with a NaN alpha when ``last_i > 0`` (a NaN value, never a point past

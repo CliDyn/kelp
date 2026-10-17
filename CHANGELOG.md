@@ -29,6 +29,13 @@ the tracker was developed privately from 2026-06.
   `uv_vertical = "linear"` — the proof the option was on (a misspelled key is
   ignored silently, like every unknown key). Runs without it are bit for bit
   unchanged and carry no new attribute.
+- The rule cannot change inside one trajectory: `load_restart` returns the rule
+  a checkpoint was written with (`uv_vertical`, `None` = `layer`;
+  `write_restart_file` takes `uv_vertical=`), `tracking._validate_restart_uv_vertical`
+  refuses a resume under the other rule (the resume recipe calls it next to the
+  frame check), and `run_single_realization` refuses a segment whose rule
+  differs from the one its writer already carries. `TrajectoryWriter.global_attr`
+  returns a global attribute written through the writer.
 - Engine: `VelocityField.uv_vertical` (`"layer"`, `"layer_linear"`, `"level"`)
   records where u/v sit in the vertical and travels through every time blend and
   the shared snapshot cache; the new module `numerics/vertical_uv.py` holds the

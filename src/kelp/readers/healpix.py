@@ -1655,7 +1655,8 @@ class HealpixReader:
             # below instead of returned as inf — safer, and impossible
             # for physical velocities)
             w = w.astype(vd, copy=False)
-        if is_3d and getattr(cfg, "uv_vertical", "layer") == "linear":
+        if (is_3d and geometry == "dual"
+                and getattr(cfg, "uv_vertical", "layer") == "linear"):
             # depth-linear layer u/v: validate the RAW record against the
             # depth-point table (bathymetry, kept levels, the declared u
             # prefix) before the zeroing below turns a missing value into

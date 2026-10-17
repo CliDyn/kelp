@@ -237,7 +237,9 @@ def uv_bracket(p: np.ndarray, last_i: int, z: float):
     Two coincident points (a repeated level): a depth exactly at them reads
     the DEEPER one (the larger index), e.g. ``p = [0, 10, 10, 20]``,
     ``z = 10`` gives ``(2, -1.0)``; the shallower one is the end of the
-    bracket above, reached only as a limit.
+    bracket above, reached only as a limit.  Except at the surface end: a
+    depth at or above ``p[0]`` reads point 0 even when point 1 coincides
+    with it (``p = [0, 0, 10]``, ``z = 0`` gives ``(0, -1.0)``).
 
     A NaN ``z`` gives ``k = last_i - 1`` with a NaN ``alpha`` when
     ``last_i > 0`` (a NaN value through :func:`uv_at`, still never past

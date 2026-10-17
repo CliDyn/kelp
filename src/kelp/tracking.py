@@ -1229,6 +1229,7 @@ def _validate_restart_frame(restart_angles, mesh):
 
         r = load_restart(path)
         _validate_restart_frame(r["rotation_angles"], mesh)
+        _validate_restart_uv_vertical(r["uv_vertical"], mode)
         run_single_realization(..., init_state=r["state"],
                                start_step_i=r["step_i"] + 1, ...)
     """
@@ -1239,6 +1240,69 @@ def _validate_restart_frame(restart_angles, mesh):
         raise ValueError(
             f"checkpoint frame {ra} does not match mesh frame {ma}; "
             "resume with the same mesh.rotation as the original run")
+
+
+def _validate_restart_uv_vertical(restart_value, mode) -> None:
+    """Reject resuming a checkpoint under another ``mode.uv_vertical``.
+
+    ``restart_value`` is ``load_restart(path)["uv_vertical"]``: the rule
+    the checkpoint was written with, ``None`` for a checkpoint without it
+    (a ``"layer"`` run, or a file written before the option existed).  A
+    resumed segment must keep the rule, or one trajectory mixes the
+    piecewise-constant and the depth-linear u/v.  Caller-driven, like
+    :func:`_validate_restart_frame`::
+
+        r = load_restart(path)
+        _validate_restart_frame(r["rotation_angles"], mesh)
+        _validate_restart_uv_vertical(r["uv_vertical"], mode)
+        run_single_realization(..., init_state=r["state"], ...)
+
+    Raises
+    ------
+    ValueError
+        The two rules differ (the message names both).
+    """
+    stored = "layer" if restart_value is None else str(restart_value)
+    current = _uv_vertical_option(mode)
+    if stored != current:
+        raise ValueError(
+            f"the checkpoint was written with mode.uv_vertical {stored!r}, "
+            f"this run has {current!r}; resume with mode.uv_vertical: "
+            f"{stored} (a rule change mixes two vertical u/v rules in one "
+            "trajectory — start a new run from the seeds to change it)")
+
+
+def _check_writer_uv_vertical(writer, option: str) -> None:
+    """Keep one ``mode.uv_vertical`` rule per output file.
+
+    The rule a writer already carries is its ``uv_vertical`` attribute
+    (written through it: ``run_tracking``'s metadata or an earlier
+    ``run_single_realization`` segment); without the attribute, a writer
+    that already holds records carries ``"layer"``.  A fresh writer (no
+    attribute, no record) takes any rule.  Writers without
+    ``global_attr`` / ``n_obs`` are not checked.
+
+    Raises
+    ------
+    ValueError
+        The writer carries the other rule (the message names both).
+    """
+    get = getattr(writer, "global_attr", None)
+    if get is None:
+        return
+    stated = get("uv_vertical")
+    if stated is not None:
+        carried = str(stated)
+    elif int(getattr(writer, "n_obs", 0) or 0) > 0:
+        carried = "layer"
+    else:
+        return
+    if carried != option:
+        raise ValueError(
+            f"output {getattr(writer, 'path', '')!r} already holds records "
+            f"written with mode.uv_vertical {carried!r}, this segment has "
+            f"{option!r}; write it to a new output, or keep "
+            f"mode.uv_vertical: {carried}")
 
 
 def _resolve_composition(diff_cfg, integrator_name: str) -> str:
@@ -1802,6 +1866,10 @@ def run_single_realization(
     _check_uv_vertical_option(
         uv_vertical_option, fdrift3d=bool(getattr(mode, "Fdrift3D", False)),
         mesh=mesh, uv_interp=uv_interp_resolved, reader=reader)
+    if writer is not None:
+        # one rule per output file: a writer that already carries the other
+        # rule (an earlier segment) is refused before anything is written
+        _check_writer_uv_vertical(writer, uv_vertical_option)
     if (uv_vertical_option == "linear"
             or getattr(reader, "native_uv_vertical", "layer") == "level"
             or "sigma_full" in (getattr(mesh, "metadata", None) or {})):

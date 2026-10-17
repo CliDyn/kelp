@@ -139,7 +139,7 @@ checkpoints with `numerics.checkpoint_freq: N` (written into the same file).
 from kelp.writers import load_trajectories, load_restart
 data    = load_trajectories("trajectories.nc")  # lon/lat/z/status (P, T), time (s), vel_*,
                                                 # sampled vars, release_* (P,)
-restart = load_restart("trajectories.nc")        # state, step_i, file_idx
+restart = load_restart("trajectories.nc")        # state, step_i, file_idx, uv_vertical, ...
 
 import xarray as xr                             # CF trajectory file (output format 2):
 ds = xr.open_dataset("trajectories.nc")         # time decodes to dates; ds.sel(time=...)

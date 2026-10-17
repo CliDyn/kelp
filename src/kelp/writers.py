@@ -1252,6 +1252,9 @@ class TrajectoryWriter:
         self.path = path
         self.n_particles = n_particles
         self.metadata = metadata
+        # global attributes written through this writer (construction
+        # metadata + set_global_attr), readable back with global_attr()
+        self._attrs_written: Dict[str, object] = dict(metadata or {})
         ext = Path(path).suffix.lower()
         if ext == ".zarr" or path.endswith(".zarr"):
             # Zarr is already lock-free and readable mid-run (chunks are
@@ -1402,6 +1405,17 @@ class TrajectoryWriter:
         ``track_particles`` caller).  Setting an existing key overwrites it.
         """
         self._backend.set_global_attr(name, value)
+        self._attrs_written[str(name)] = value
+
+    def global_attr(self, name: str, default=None):
+        """A global attribute this writer has written, else ``default``.
+
+        Covers the construction ``metadata`` and every
+        :meth:`set_global_attr` call (the value as passed); the file is not
+        read back.  ``run_single_realization`` uses it to keep one
+        ``uv_vertical`` rule per output file.
+        """
+        return self._attrs_written.get(str(name), default)
 
     def close(self) -> None:
         """Flush and close."""
@@ -1433,7 +1447,8 @@ def _detect_format(path: str) -> str:
 
 def write_restart_file(path: str, state, step_i: int, file_idx: int, *,
                        wet_streak=None, rotation_angles=None,
-                       release_step=None, particle_offset=None) -> None:
+                       release_step=None, particle_offset=None,
+                       uv_vertical=None) -> None:
     """Write a STANDALONE restart checkpoint (NetCDF) — readable by
     :func:`load_restart`.
 
@@ -1449,6 +1464,9 @@ def write_restart_file(path: str, state, step_i: int, file_idx: int, *,
     and the delayed-release ``release_step`` (falls back to ``state.release_step``).
     ``particle_offset`` (a shard's first global particle index, the key of its
     random draws) is stored as the attribute ``restart_particle_offset``.
+    ``uv_vertical`` (the run's ``mode.uv_vertical``) is stored as the
+    attribute ``restart_uv_vertical`` when it is ``"linear"``; ``None`` and
+    ``"layer"`` store nothing (a file without it means ``"layer"``).
     ``state.release_lon/lat/z``, when set, are stored as
     ``restart_release_lon/lat/z`` (read from the state like ``elem``).
 
@@ -1512,6 +1530,8 @@ def write_restart_file(path: str, state, step_i: int, file_idx: int, *,
             ds.setncattr("restart_rotation_gamma", g)
         if particle_offset is not None:
             ds.setncattr("restart_particle_offset", int(particle_offset))
+        if uv_vertical is not None and str(uv_vertical) != "layer":
+            ds.setncattr("restart_uv_vertical", str(uv_vertical))
         ds.setncattr("restart_optional", " ".join(
             _restart_optional_present(state, rs, wet_streak)))
         ds.variables["restart_valid"][0] = 1
@@ -1555,7 +1575,12 @@ def load_restart(path: str) -> dict:
         shard offset the random draws were keyed with: the standalone file's
         ``restart_particle_offset`` or the trajectory file's
         ``particle_offset`` attribute; ``None`` when neither is stored; pass it
-        on as ``particle_offset=``, where ``None`` means 0).
+        on as ``particle_offset=``, where ``None`` means 0), ``uv_vertical``
+        (str or ``None`` — the ``mode.uv_vertical`` the checkpoint was written
+        with: the standalone file's ``restart_uv_vertical`` or the trajectory
+        file's ``uv_vertical`` attribute; ``None`` when neither is stored,
+        which means ``"layer"``; validate on resume with
+        :func:`kelp.tracking._validate_restart_uv_vertical`).
         The carried containing element (``restart_elem``, edge-walk
         tracking) is attached to ``state.elem`` when stored, and the release
         positions (``restart_release_lon/lat/z``, mesh frame) to
@@ -1577,6 +1602,7 @@ def load_restart(path: str) -> dict:
     release_step = None
     elem = None
     particle_offset = None
+    uv_vertical = None
     release = {}
     if fmt == "zarr":
         import zarr
@@ -1623,6 +1649,10 @@ def load_restart(path: str) -> dict:
         for key in ("restart_particle_offset", "particle_offset"):
             if key in store.attrs:
                 particle_offset = int(store.attrs[key])
+                break
+        for key in ("restart_uv_vertical", "uv_vertical"):
+            if key in store.attrs:
+                uv_vertical = str(store.attrs[key])
                 break
     else:
         import netCDF4 as nc4
@@ -1677,6 +1707,10 @@ def load_restart(path: str) -> dict:
                 if key in ds.ncattrs():
                     particle_offset = int(ds.getncattr(key))
                     break
+            for key in ("restart_uv_vertical", "uv_vertical"):
+                if key in ds.ncattrs():
+                    uv_vertical = str(ds.getncattr(key))
+                    break
 
     state = ParticleState(
         lon=lon, lat=lat, z=z,
@@ -1690,7 +1724,8 @@ def load_restart(path: str) -> dict:
     )
     return {"state": state, "step_i": step_i, "file_idx": file_idx,
             "wet_streak": wet_streak, "rotation_angles": rotation_angles,
-            "release_step": release_step, "particle_offset": particle_offset}
+            "release_step": release_step, "particle_offset": particle_offset,
+            "uv_vertical": uv_vertical}
 
 
 def load_trajectories(path: str) -> dict:

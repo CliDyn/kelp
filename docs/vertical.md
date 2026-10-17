@@ -127,8 +127,12 @@ LOWER level — for layer data. That is `find_layer`'s rule (§2): a partial
 bottom layer, whose lower level lies below the bed, is never read. `D_i` is a
 reader's declaration of the last finite point of its own data column
 (`mesh.metadata["uv_data_last"]`, the HEALPix reader, `healpix.md`); `-1`
-there means "the surface only", and the surface value must then be finite. A
-node without a finite bed depth gets `last_i = 0`. The table is cached on the
+there means "the surface only", and the surface value must then be finite.
+Infinite bed depths follow the formula as written: `+inf` keeps every point
+(`last_i = M-1`, then capped by `D_i`), `-inf` keeps the surface point only. A
+NaN bed depth compares false with every `lower_k`, so the set is empty and
+`last_i = 0` (the code sets it explicitly: a sorted search would place the
+NaN after the last point). The table is cached on the
 mesh and rebuilt whenever `mesh.sigma`, `mesh.depth` or the declaration is
 replaced (a `max_levels` cut included; an in-place write is not seen).
 
@@ -139,7 +143,9 @@ The rule at one vertex `i` and particle depth `z`:
   the value of that point is used** — constant ends, no extrapolation;
 - between two points it is the linear blend `(1 − α) f_k + α f_{k+1}`; exactly
   on a point the point is read directly (of two coincident points, the deeper
-  one);
+  one — except at the surface end: at or above `p[0]` point 0 is read even
+  when point 1 coincides with it, e.g. `p = [0, 0, 10]`, `z = 0` reads point
+  0);
 - points below `last_i` are **never read**, not even multiplied by zero, so
   dry or fill values there are harmless. Points `<= last_i` must be finite: the
   record check (`check_depth_linear_record`) refuses a record with a

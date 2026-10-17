@@ -192,7 +192,11 @@ blend a zero the reader wrote into a profile. Two mechanisms see to that:
   than the u data never points the table at a zeroed slot (u- and w-family
   bottoms disagree per cell on ng5). A 2-D load, or one without `mode_cfg`,
   skips this extra pass over the first record; a layer run on a 3-D mesh
-  carries the declaration unused.
+  carries the declaration unused. The declaration comes from the first record
+  of the MESH store (`mesh.meshpath`), not of `data.ncinput`: a data store
+  whose u prefix is shorter is refused by the raw-record check below, one
+  whose prefix is longer is capped to the mesh store's prefix — point
+  `mesh.meshpath` at a store of the run's own family.
 - *The raw-record check.* With the option on, `read_velocities` checks each
   RAW record against the table (`check_depth_linear_record`) before the u/v
   rotation mix (§3: after the mix a NaN in one component would be NaN in

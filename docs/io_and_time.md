@@ -668,6 +668,7 @@ position of the continuation:
 ```python
 r = load_restart(path)
 _validate_restart_frame(r["rotation_angles"], mesh)   # see coordinate_frame.md
+_validate_restart_uv_vertical(r["uv_vertical"], mode)  # mode.uv_vertical unchanged
 n = r["step_i"] + 1          # steps done, counted from a first call with start_step_i = 0
 run_single_realization(..., init_state=r["state"],    # carries the release positions
                        start_step_i=n,
@@ -725,7 +726,18 @@ checkpoint's output attribute or from `write_restart_file(...,
 particle_offset=)`), so a driver can refuse a mismatch.
 
 The frame check refuses to resume a checkpoint on a mesh in a different
-coordinate frame — see `coordinate_frame.md` for why that matters. The reason a
+coordinate frame — see `coordinate_frame.md` for why that matters. The
+`uv_vertical` check refuses to resume under another `mode.uv_vertical`
+(`vertical.md` §2.1): a trajectory would mix the piecewise-constant and the
+depth-linear horizontal velocity. `load_restart` returns the rule a checkpoint
+was written with (`r["uv_vertical"]`: the trajectory file's `uv_vertical`
+attribute, or `write_restart_file(..., uv_vertical=)`'s
+`restart_uv_vertical`; `None` = `layer`, so checkpoints of runs without the
+option carry nothing new). A driver that writes several segments through ONE
+writer gets the same protection without a call: `run_single_realization`
+refuses a segment whose rule differs from the one the writer already carries
+(its `uv_vertical` attribute, or `layer` when it holds records without it),
+before anything is written. The reason a
 restart reproduces the original run *bit for bit* (rather than merely
 approximately) is that the stochastic diffusion draws are keyed by the **global**
 step index, not by anything that resets on resume: continuing from step `N`

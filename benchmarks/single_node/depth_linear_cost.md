@@ -22,7 +22,8 @@ two ways, `"layer"` (`_fused_rk2_step_3d_bary_tinterp`) and `"layer_linear"`
   lazy blend of two records plus the next record (`--payload pchip`: the 4-record
   PCHIP twins instead).
 - The thread count is fixed before Numba loads (`--threads`, else
-  `NUMBA_NUM_THREADS`, else the CPU count). One warm-up step per placement
+  `NUMBA_NUM_THREADS`, else the CPU count). Pass `--threads` equal to the
+  physical core count: the default `os.cpu_count()` counts SMT threads. One warm-up step per placement
   (compilation; the record check, which runs once per record and mesh; a check
   that the expected fused kernel was launched). Then `--steps` timed steps per
   placement, interleaved (layer, linear, layer, …), each from the same state,

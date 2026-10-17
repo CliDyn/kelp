@@ -1623,6 +1623,9 @@ def _interp_barycentric_dl(
     # parents (shape and finite prefix) before anything below blends it
     if not is_checked(vel, mesh):
         check_depth_linear_record(vel, mesh)
+    # unreachable for a field checked as it stands (the check refuses
+    # non-2-D u/v); kept because the token survives an attribute replaced
+    # after the check (``vel.u = ...``), which would reach the kernel
     if getattr(vel.u, "ndim", None) != 2 or getattr(vel.v, "ndim", None) != 2:
         raise ValueError(
             f"interp_barycentric: depth-linear u/v (uv_vertical="

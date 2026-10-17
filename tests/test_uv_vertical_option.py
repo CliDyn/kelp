@@ -521,21 +521,20 @@ def test_run_single_realization_and_track_particles_option(tmp_path):
     ds.close()
 
 
-def test_restart_continuous_equals_resumed_option_on(tmp_path):
-    """Option on, RK2 with the next record: a run cut at a checkpoint and
-    resumed equals the continuous run bit for bit (record times, every
-    recorded array, the final restart step and record index)."""
+def _restart_env(tmp_path):
+    """The FESOM2 fixture opened for direct calls, RK2 with the next record,
+    and a runner writing one output (checkpoint every 2 steps)."""
     cfg = _fesom2_cfg(tmp_path)
     reader, mesh, ds = _fesom2_env(cfg)
     file_times, file_dt = extract_time_info(ds)
     numerics = NumericsConfig(dt=DT, integrator="rk2",
                               uv_interp="barycentric",
                               w_interp="barycentric")
-    mode = _fesom2_mode()
 
-    def run(name, state, start, n, start_step_i):
-        path = str(tmp_path / f"{name}.nc")
-        w = TrajectoryWriter(path, state.n_particles).open()
+    def run(name, mode, state, start, n, start_step_i, writer=None,
+            ext=".nc"):
+        path = str(tmp_path / f"{name}{ext}")
+        w = writer or TrajectoryWriter(path, state.n_particles).open()
         try:
             tracking.run_single_realization(
                 mesh, ds, reader, state, mode, numerics,
@@ -543,14 +542,29 @@ def test_restart_continuous_equals_resumed_option_on(tmp_path):
                 checkpoint_freq=2, file_times=file_times, file_dt=file_dt,
                 start_step_i=start_step_i)
         finally:
-            w.close()
+            if writer is None:
+                w.close()
         return path
+    return mesh, ds, run
+
+
+@pytest.mark.parametrize("option", ["linear", "layer"])
+def test_restart_continuous_equals_resumed_option_on(tmp_path, option):
+    """A run cut at a checkpoint and resumed under the same rule (the
+    validator passes) equals the continuous run bit for bit: record times,
+    every recorded array, the final restart step and record index.  The
+    checkpoint carries the rule: ``"linear"`` with the option, nothing
+    (``None``, no attribute) without it."""
+    mesh, ds, run = _restart_env(tmp_path)
+    mode = _fesom2_mode(uv_vertical=option)
     init = _state(mesh, SEEDS)
-    whole = run("whole", init, 0, 4, 0)
-    a = run("a", init, 0, 2, 0)
+    whole = run("whole", mode, init, 0, 4, 0)
+    a = run("a", mode, init, 0, 2, 0)
     r = load_restart(a)
+    assert r["uv_vertical"] == ("linear" if option == "linear" else None)
+    tracking._validate_restart_uv_vertical(r["uv_vertical"], mode)
     n = r["step_i"] + 1
-    b = run("b", r["state"], r["file_idx"] + 1, 2, n)
+    b = run("b", mode, r["state"], r["file_idx"] + 1, 2, n)
     tw, ta, tb = (load_trajectories(p) for p in (whole, a, b))
     assert_bitwise(np.concatenate([ta["time"], tb["time"]]), tw["time"],
                    "time")
@@ -558,10 +572,110 @@ def test_restart_continuous_equals_resumed_option_on(tmp_path):
         assert_bitwise(np.concatenate([ta[k], tb[k]], axis=1), tw[k], k)
     rw, rb = load_restart(whole), load_restart(b)
     assert (rb["step_i"], rb["file_idx"]) == (rw["step_i"], rw["file_idx"])
+    assert rb["uv_vertical"] == rw["uv_vertical"] == r["uv_vertical"]
     for k in ("lon", "lat", "z"):
         assert_bitwise(getattr(rb["state"], k), getattr(rw["state"], k), k)
-    assert _global_attrs(whole)["uv_vertical"] == "linear"
+    attrs = _global_attrs(whole)
+    if option == "linear":
+        assert attrs["uv_vertical"] == "linear"
+    else:
+        assert not any("uv_vertical" in k for k in attrs)
     ds.close()
+
+
+@pytest.mark.parametrize("first,second", [("linear", "layer"),
+                                          ("layer", "linear")])
+def test_restart_with_the_other_rule_refused(tmp_path, first, second):
+    """A checkpoint written under one ``mode.uv_vertical`` does not resume
+    under the other: the validator names both rules before anything of the
+    new segment is written; the same rule resumes."""
+    mesh, ds, run = _restart_env(tmp_path)
+    a = run("a", _fesom2_mode(uv_vertical=first), _state(mesh, SEEDS), 0, 2,
+            0)
+    r = load_restart(a)
+    with pytest.raises(ValueError,
+                       match=rf"written with mode.uv_vertical '{first}', "
+                             rf"this run has '{second}'"):
+        tracking._validate_restart_uv_vertical(
+            r["uv_vertical"], _fesom2_mode(uv_vertical=second))
+    tracking._validate_restart_uv_vertical(r["uv_vertical"],
+                                           _fesom2_mode(uv_vertical=first))
+    ds.close()
+
+
+@pytest.mark.parametrize("option", ["linear", "layer"])
+def test_zarr_checkpoint_carries_the_rule(tmp_path, option):
+    """The Zarr backend: the checkpoint's rule comes back from
+    ``load_restart`` like the NetCDF one (``None`` without the option)."""
+    pytest.importorskip("zarr")
+    mesh, ds, run = _restart_env(tmp_path)
+    path = run("z", _fesom2_mode(uv_vertical=option), _state(mesh, SEEDS),
+               0, 2, 0, ext=".zarr")
+    assert load_restart(path)["uv_vertical"] == (
+        "linear" if option == "linear" else None)
+    ds.close()
+
+
+@pytest.mark.parametrize("first,second", [("linear", "layer"),
+                                          ("layer", "linear")])
+def test_one_writer_keeps_one_rule(tmp_path, first, second):
+    """Two segments written through ONE writer must share the rule: the
+    second segment with the other rule is refused before it writes a
+    record (the file stays one rule); with the same rule both segments
+    go into the file."""
+    mesh, ds, run = _restart_env(tmp_path)
+    init = _state(mesh, SEEDS)
+    # the state after the first segment, from a separate output (the chain
+    # file stays open while it is written)
+    r = load_restart(run("a", _fesom2_mode(uv_vertical=first), init, 0, 2,
+                         0))
+    path = str(tmp_path / "chain.nc")
+    w = TrajectoryWriter(path, init.n_particles).open()
+    try:
+        run("seg1", _fesom2_mode(uv_vertical=first), init, 0, 2, 0, writer=w)
+        n_before = w.n_obs
+        assert n_before == 2
+        with pytest.raises(ValueError,
+                           match=rf"mode.uv_vertical '{first}', this "
+                                 rf"segment has '{second}'"):
+            run("seg2", _fesom2_mode(uv_vertical=second), r["state"],
+                r["file_idx"] + 1, 2, r["step_i"] + 1, writer=w)
+        assert w.n_obs == n_before
+        run("seg2", _fesom2_mode(uv_vertical=first), r["state"],
+            r["file_idx"] + 1, 2, r["step_i"] + 1, writer=w)
+        assert w.n_obs == 4
+    finally:
+        w.close()
+    attrs = _global_attrs(path)
+    assert attrs.get("uv_vertical") == (
+        "linear" if first == "linear" else None)
+    ds.close()
+
+
+def test_standalone_restart_file_carries_the_rule(tmp_path):
+    """``write_restart_file(uv_vertical=...)`` stores ``"linear"`` as
+    ``restart_uv_vertical`` and ``load_restart`` returns it; ``"layer"``
+    and ``None`` store nothing (the files are attribute-identical to a call
+    without the argument) and come back as ``None``."""
+    from kelp.writers import write_restart_file
+    st = make_state(np.array([0.1, 0.2]), np.array([0.3, 0.4]),
+                    np.array([5.0, 6.0]))
+    paths = {}
+    for name, kw in (("lin", {"uv_vertical": "linear"}),
+                     ("lay", {"uv_vertical": "layer"}),
+                     ("none", {"uv_vertical": None}), ("plain", {})):
+        paths[name] = str(tmp_path / f"{name}.nc")
+        write_restart_file(paths[name], st, 3, 4, **kw)
+    assert load_restart(paths["lin"])["uv_vertical"] == "linear"
+    assert _global_attrs(paths["lin"])["restart_uv_vertical"] == "linear"
+    plain = _global_attrs(paths["plain"])
+    for name in ("lay", "none", "plain"):
+        assert load_restart(paths[name])["uv_vertical"] is None
+        assert _global_attrs(paths[name]) == plain
+    with pytest.raises(ValueError, match="'linear', this run has 'layer'"):
+        tracking._validate_restart_uv_vertical(
+            load_restart(paths["lin"])["uv_vertical"],
+            _fesom2_mode(uv_vertical="layer"))
 
 
 # ---------------------------------------------------------------------------
