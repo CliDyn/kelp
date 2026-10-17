@@ -507,7 +507,10 @@ def _flatten_vel(vel: VelocityField):
         a = getattr(vel, f)
         if a is not None:
             arrays[f] = a
+    # uv_vertical rides in the meta; the record-check token (_dl_token)
+    # never does — an attached field is checked again in its own process
     meta = {"uv_layout": vel.uv_layout, "kh_layout": vel.kh_layout,
+            "uv_vertical": vel.uv_vertical,
             "scalar_names": sorted(vel.scalars) if vel.scalars else []}
     for nm in meta["scalar_names"]:
         arrays["scalar__" + nm] = vel.scalars[nm]
@@ -524,7 +527,8 @@ def _assemble_vel(arrays, meta) -> VelocityField:
         kh_meridional=arrays.get("kh_meridional"),
         kh_layout=meta.get("kh_layout"),
         uv_layout=meta.get("uv_layout", "element"),
-        scalars=scal or None, az=arrays.get("az"))
+        scalars=scal or None, az=arrays.get("az"),
+        uv_vertical=meta.get("uv_vertical", "layer"))
 
 
 def _kelp_version() -> str:

@@ -224,6 +224,10 @@ def reconstruct_pchip(snaps: Sequence[VelocityField],
     ``times[1] <= t_query <= times[2]`` (the central interval).  Each field
     (``u``, ``v``, ``w`` if present, ``eta``, every ``scalars[k]``) is blended
     per-element via :func:`_pchip_blend4`.  Kh is not reconstructed.
+
+    The four snapshots must share one ``uv_vertical`` placement (checked
+    before the field shapes); the result carries it, and carries the
+    snapshots' ``_dl_token`` only when all four hold the SAME object.
     """
     if len(snaps) != 4 or len(times) != 4:
         raise ValueError("reconstruct_pchip needs exactly 4 snapshots/times")
@@ -242,6 +246,14 @@ def reconstruct_pchip(snaps: Sequence[VelocityField],
             f"reconstruct_pchip: t_query={t_query} outside the central "
             f"interval [{t1}, {t2}]")
     a, b, c, d = snaps
+    placements = [s.uv_vertical for s in snaps]
+    if len(set(placements)) > 1:
+        raise ValueError(
+            "reconstruct_pchip: uv_vertical mismatch across reconstruction "
+            f"snapshots: {placements}")
+    tok = a._dl_token
+    if any(s._dl_token is not tok for s in snaps):
+        tok = None
 
     def blend(attr):
         xs = [getattr(s, attr) for s in (a, b, c, d)]
@@ -284,8 +296,11 @@ def reconstruct_pchip(snaps: Sequence[VelocityField],
                 "reconstruction snapshots")
         scalars = {k: blend_scalar(k) for k in ref}
 
-    return VelocityField(u=u, v=v, eta=eta, w=w,
-                         uv_layout=b.uv_layout, scalars=scalars)
+    out = VelocityField(u=u, v=v, eta=eta, w=w,
+                        uv_layout=b.uv_layout, scalars=scalars,
+                        uv_vertical=b.uv_vertical)
+    out._dl_token = tok
+    return out
 
 
 def make_stage_vels_recon(snaps, times, sim_time, dt, time_dir, c_coeffs):

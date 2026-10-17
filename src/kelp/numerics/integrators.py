@@ -993,6 +993,15 @@ def _validate_time_aware_inputs(vel, vel_next, dt_to_next, dt):
         return
     _validate_time_aware_kwargs(vel_next, dt_to_next)
 
+    # Placement of u/v (a plain attribute on a LazyLerpField too, so no
+    # blend); a field-like object without it counts as "layer".
+    pa = getattr(vel, "uv_vertical", "layer")
+    pb = getattr(vel_next, "uv_vertical", "layer")
+    if pa != pb:
+        raise ValueError(
+            f"vel and vel_next uv_vertical mismatch: {pa!r} vs {pb!r}"
+        )
+
     vel_u = _probe_field(vel, "u")
     vel_v = _probe_field(vel, "v")
     vel_eta = _probe_field(vel, "eta")
