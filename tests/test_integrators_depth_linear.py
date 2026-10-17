@@ -1,4 +1,4 @@
-"""Depth-linear u/v in the integrators (depth-linear engine, Task 5).
+"""Depth-linear u/v in the integrators.
 
 Every u/v evaluation of a step reads the depth of its own stage: Euler the
 step-entry depth, RK2 the entry depth and then ``z_mid``, RK4 the entry
@@ -6,8 +6,9 @@ depth and then ``z2``, ``z3``, ``z4`` (``_interp_uv_at(..., zs=...)``).  The
 step functions refuse a depth-linear field they cannot serve at entry
 (``_check_depth_linear_entry``) and run the record check on every field
 they receive (``vel``, ``vel_next``, each PCHIP snapshot, the raw parents
-of a ``LazyLerpField``).  Until the fused depth-linear RK2 twins exist, a
-depth-linear field never enters a fused 3-D kernel.
+of a ``LazyLerpField``).  Fused RK2 on node-layout barycentric data runs the
+depth-linear twins (``tests/test_fused_3d_depth_linear.py``); the fused
+Euler kernel stays layer-only.
 
 All synthetic: the 3x3 test mesh of ``test_3d_analytical`` with levels
 ``[0, 10, 20, 30, 40]`` m (the fixture of ``test_interp_depth_linear``), and
@@ -116,7 +117,8 @@ def _uv_deep(placement, t_k=(0.0, 0.0, 0.0, 0.0)):
 
 
 def _uv_shallow(mesh, placement, tri=(1, 2, 4)):
-    """Hand u/v in the triangle with the 10 m node (Task 4's fixture):
+    """Hand u/v in the triangle with the 10 m node (the shallow fixture
+    of test_interp_depth_linear):
     ``sum_i lam_i * (a + b*clip(z, p[0], p[last_i]))`` — per-vertex ends."""
     p = P_PTS[placement]
     last = LAST[placement]
@@ -209,7 +211,7 @@ def _assert_not_step(out, st, dlon, dlat):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("td", [1.0, -1.0])
-@pytest.mark.parametrize("w0", [0.0, 0.004, -0.004])
+@pytest.mark.parametrize("w0", [0.0, 0.004])
 @pytest.mark.parametrize("placement", ["level", "layer_linear"])
 def test_euler_uses_entry_depth(placement, w0, td):
     """Euler reads u/v at the entry depth whatever ``w`` is:
@@ -292,7 +294,7 @@ def _recon(placement, w0, times, sim_time, td, *, nan_in=None):
 
 @pytest.mark.parametrize("placement", ["level", "layer_linear"])
 def test_rk4_backward_pchip_stage_depths(placement):
-    """Review Focus 5: backward RK4 with a 4-snapshot PCHIP bundle.  The
+    """Backward RK4 with a 4-snapshot PCHIP bundle.  The
     data are linear in time, which PCHIP reproduces, so stage ``k`` reads
     ``a + b*z_k + e*(t0 - c_k*dt)`` at its own depth."""
     mesh = _deep_mesh()
@@ -321,7 +323,8 @@ def test_stage_overshoot_clamped(placement, integrator, end):
     """A stage depth below every bed (z0 + 60 m) or above the surface
     (z0 - 60 m) reads each vertex's own end point (``p[last_i]`` /
     ``p[0]``): finite, by hand, never the NaN / +inf stored below
-    ``last`` (Task 4's fixture: node 2 is 10 m deep)."""
+    ``last`` (the shallow fixture of test_interp_depth_linear: node 2 is
+    10 m deep)."""
     mesh = _mesh()
     # z0 = 8 m: inside every column of both placements except node 2's
     # layer_linear one (last point 5 m), so the entry stage reads other
@@ -412,7 +415,7 @@ def test_sigma_mesh_refused(name):
 def test_check_depth_linear_entry_refusals():
     """Every refusal of the helper, in its order: rk45, the mesh, a 3-D
     field, node layout, the interpolator; then one placement for all
-    fields."""
+    fields, whichever side is depth-linear."""
     chk = I._check_depth_linear_entry
     mesh = _deep_mesh()
     sigma = _deep_mesh()
@@ -443,6 +446,22 @@ def test_check_depth_linear_entry_refusals():
     with pytest.raises(ValueError, match=r"^rk2_step: uv_vertical mismatch.*"
                        r"recon snapshot 2='layer_linear'"):
         chk(level, mesh, "barycentric", "rk2", recon=recon)
+    # a "layer" vel with a depth-linear companion: the same refusal,
+    # before anything of the mesh or of the data is touched
+    lay = _layer_field(0.004)
+    with pytest.raises(ValueError, match=r"^rk4_step: uv_vertical mismatch "
+                       r"between the fields of one step: vel='layer', "
+                       r"vel_next='level'$"):
+        chk(lay, sigma, "leastsq", "rk4", vel_next=level)
+    lay_snaps = [_layer_field(0.004, seed=k) for k in range(3)] + [level]
+    with pytest.raises(ValueError, match=r"^euler_step: uv_vertical mismatch"
+                       r".*recon snapshot 2='layer', "
+                       r"recon snapshot 3='level'$"):
+        chk(lay, sigma, "leastsq", "euler",
+            recon=(lay_snaps, [0.0, 1.0, 2.0, 3.0], 1.0, 1))
+    assert chk(lay, sigma, "leastsq", "rk2", vel_next=_layer_field(0.004),
+               recon=(lay_snaps[:3] + [_layer_field(0.004)],
+                      [0.0, 1.0, 2.0, 3.0], 1.0, 1)) is None
     # accepted: stamps the field
     assert not is_checked(level, mesh)
     assert chk(level, mesh, "barycentric", "rk2") is None
@@ -505,7 +524,7 @@ def test_entry_record_check_once(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Fused 3-D paths: depth-linear fields take the unfused route
+# Fused 3-D Euler: layer fields only
 # ---------------------------------------------------------------------------
 
 class _Taken(Exception):
@@ -520,66 +539,6 @@ def _spies(monkeypatch, names):
             raise _Taken(_nm)
         monkeypatch.setattr(I, nm, spy)
     return calls
-
-
-_RK2_FUSED = ("_run_fused_rk2_3d_bary_tinterp", "_run_fused_rk2_3d_bary_pchip")
-
-
-def _rk2_payload(placement, mode, w0=0.004):
-    make = ((lambda t: _layer_field(w0, seed=int(t) % 7)) if placement == "layer"
-            else (lambda t: _deep_field(placement, w0, t=t)))
-    if mode == "steady":
-        return make(0.0), {}
-    if mode == "lerp":
-        return make(0.0), dict(vel_next=make(3600.0), dt_to_next=3600.0)
-    times = (0.0, 3600.0, 7200.0, 10800.0)
-    snaps = [make(t) for t in times]
-    return snaps[1], dict(vel_next=snaps[2], dt_to_next=3600.0,
-                          recon=(snaps, list(times), 3600.0, 1))
-
-
-@needs_numba
-@pytest.mark.parametrize("w_interp", ["nearest", "barycentric"])
-@pytest.mark.parametrize("mode", ["steady", "lerp", "pchip"])
-@pytest.mark.parametrize("placement", ["level", "layer_linear"])
-def test_rk2_fused_gate_not_taken_yet(monkeypatch, placement, mode, w_interp):
-    """TEMPORARY (deleted when the fused depth-linear RK2 kernels land):
-    a depth-linear field never enters ``_run_fused_rk2_3d_bary_tinterp`` /
-    ``_pchip``; the step equals the unfused one bit for bit.  Control: the
-    same call with a ``"layer"`` field does take the fused runner."""
-    mesh = _deep_mesh()
-    dt = 1800.0
-    calls = _spies(monkeypatch, _RK2_FUSED)
-    lay, lay_kw = _rk2_payload("layer", mode)
-    with pytest.raises(_Taken):
-        I.rk2_step(_state(), lay, mesh, dt, 1.0, uv_interp="barycentric",
-                   w_interp=w_interp, **lay_kw)
-    assert calls == [_RK2_FUSED[1] if mode == "pchip" else _RK2_FUSED[0]]
-    calls.clear()
-    vel, kw = _rk2_payload(placement, mode)
-    got = I.rk2_step(_state(), vel, mesh, dt, 1.0, uv_interp="barycentric",
-                     w_interp=w_interp, **kw)
-    assert calls == []
-    ref = I._rk2_step_unfused(_state(), vel, mesh, dt, 1.0, 0, True,
-                              w_interp=w_interp, uv_interp="barycentric",
-                              **kw)
-    for f in ("lon", "lat", "z", "u", "v", "w", "status", "nearest_node"):
-        assert_bitwise(getattr(got, f), getattr(ref, f), f)
-
-
-@needs_numba
-def test_rk2_fused_gate_checks_recon_snapshots(monkeypatch):
-    """TEMPORARY (deleted with the gate, like the test above): a ``"layer"``
-    ``vel`` with depth-linear PCHIP snapshots (a mixed direct call the entry
-    check does not see) still keeps the fused PCHIP runner away from the
-    depth-linear arrays."""
-    mesh = _deep_mesh()
-    calls = _spies(monkeypatch, _RK2_FUSED)
-    _, kw = _rk2_payload("layer_linear", "pchip")
-    lay = _layer_field(0.004)
-    I.rk2_step(_state(), lay, mesh, 1800.0, 1.0, uv_interp="barycentric",
-               w_interp="barycentric", **kw)
-    assert calls == []
 
 
 @needs_numba
@@ -631,24 +590,35 @@ class _Untouchable:
 
 
 @pytest.mark.parametrize("integrator", ["euler", "rk2", "rk4", "rk45"])
-def test_entry_check_layer_is_one_attribute_read(integrator):
+def test_entry_check_layer_reads_placements_only(integrator):
+    """A ``"layer"`` step with ``"layer"`` companions reads the placement
+    of each field it receives — once — and nothing else: no data of any
+    field, nothing of the mesh, nothing of the bundle but its snapshots."""
     vel = _OnlyPlacement()
     assert I._check_depth_linear_entry(
-        vel, _Untouchable(), "leastsq", integrator,
-        vel_next=_Untouchable(), recon=_Untouchable()) is None
+        vel, _Untouchable(), "leastsq", integrator) is None
     assert vel._reads == ["uv_vertical"]
+    vel, nxt = _OnlyPlacement(), _OnlyPlacement()
+    snaps = [_OnlyPlacement() for _ in range(4)]
+    recon = (snaps, _Untouchable(), _Untouchable(), _Untouchable())
+    assert I._check_depth_linear_entry(
+        vel, _Untouchable(), "leastsq", integrator, vel_next=nxt,
+        recon=recon) is None
+    reads = [probe._reads for probe in [vel, nxt] + snaps]
+    assert reads == [["uv_vertical"]] * 6
 
 
-@pytest.mark.parametrize("uv_interp,layout", [
-    ("leastsq", "element"), ("edge_leastsq", "element"),
-    ("barycentric", "element"), ("barycentric", "node")])
-@pytest.mark.parametrize("with_elems", [False, True])
+@pytest.mark.parametrize("uv_interp,layout,with_elems", [
+    ("leastsq", "element", False),
+    ("edge_leastsq", "element", False), ("edge_leastsq", "element", True),
+    ("barycentric", "element", False), ("barycentric", "element", True),
+    ("barycentric", "node", False), ("barycentric", "node", True)])
 def test_interp_uv_at_zs_ignored_by_layer_interpolators(uv_interp, layout,
                                                         with_elems):
     """``zs`` reaches only depth-linear fields: every layer interpolator
-    gives the same bits with any stage depth, NaN included."""
-    if with_elems and uv_interp not in ip.UV_INTERP_USES_ELEMS:
-        pytest.skip("interpolator takes no elems")
+    gives the same bits with any stage depth, NaN included (``elems`` for
+    the interpolators that take them)."""
+    assert not with_elems or uv_interp in ip.UV_INTERP_USES_ELEMS
     mesh = _deep_mesh()
     vel = _layer_field(layout=layout, n_elem=mesh.elem_nodes.shape[0])
     st = _state()

@@ -1366,6 +1366,204 @@ def _loop_interp_bary_dl(
         ok[i] = success
 
 
+# Fused-kernel cores (time-blended inline): each stored (point, node) value
+# is blended in time first, then read in depth, then combined.
+
+@njit(cache=True)
+def _tinterp_point_uv(u_a, v_a, u_b, v_b, u_t, v_t, k, nd, alpha0, alpha):
+    """Time blend of the stored u/v value ``(k, nd)`` for the fused
+    depth-linear twins: the per-vertex expressions and endpoint shortcuts of
+    :func:`_interp_barycentric_core_tinterp_3d` (``u_*[layer, nd]`` there),
+    which reproduce the unfused ``_make_stage_vels`` / ``_blend`` values bit
+    for bit.  The endpoint stages (``alpha`` within 1e-12 of 0 or 1, the
+    thresholds of ``_make_stage_vels``) skip the blend, so a non-finite
+    value in the unused endpoint never turns into NaN (0 * inf).  Returns
+    float64 ``(u, v)``."""
+    if alpha < 1e-12:
+        if alpha0 == 0.0:
+            return float(u_a[k, nd]), float(v_a[k, nd])
+        beta0 = 1.0 - alpha0
+        return (beta0 * u_a[k, nd] + alpha0 * u_b[k, nd],
+                beta0 * v_a[k, nd] + alpha0 * v_b[k, nd])
+    if alpha > 1.0 - 1e-12:
+        return float(u_t[k, nd]), float(v_t[k, nd])
+    beta = 1.0 - alpha
+    if alpha0 == 0.0:
+        return (beta * u_a[k, nd] + alpha * u_t[k, nd],
+                beta * v_a[k, nd] + alpha * v_t[k, nd])
+    beta0 = 1.0 - alpha0
+    ua0 = beta0 * u_a[k, nd] + alpha0 * u_b[k, nd]
+    va0 = beta0 * v_a[k, nd] + alpha0 * v_b[k, nd]
+    return beta * ua0 + alpha * u_t[k, nd], beta * va0 + alpha * v_t[k, nd]
+
+
+@njit(cache=True)
+def _interp_barycentric_core_tinterp_dl(xp, yp, nn_node, z, time_dir,
+                                        alpha0, alpha,
+                                        node_to_elems, node_to_elems_count,
+                                        elem_nodes, nodes_lon, nodes_lat,
+                                        p, last,
+                                        u_a, v_a, u_b, v_b, u_t, v_t,
+                                        r_earth):
+    """Depth-linear twin of :func:`_interp_barycentric_core_tinterp_3d`
+    (node layout, ``uv_vertical`` ``"level"`` / ``"layer_linear"``).
+
+    Identical containment, vertex ring, metric projection and weights;
+    the ``layer`` argument is replaced by the particle depth ``z`` (m,
+    positive down) and the depth-point table ``p`` (``(M,)``), ``last``
+    (``(N,)``); u/v fields are ``(M, N)``.  Per vertex ``nd``, TIME FIRST:
+    each stored value ``(k, nd)`` the vertex reads is blended in time
+    exactly as the layer twin blends ``(layer, nd)`` (same expressions,
+    same endpoint shortcuts — :func:`_tinterp_point_uv`), THEN the
+    vertical rule of ``uv_bracket`` / ``uv_at`` runs on the blended
+    values: ``(k, a) = uv_bracket(p, last[nd], z)``; ``a < 0`` reads point
+    ``k`` only, otherwise ``(1 - a) * f_k + a * f_{k+1}``.  A point below
+    ``last[nd]`` is never read.  This is bit for bit the unfused path
+    (whole-field ``_blend`` materialization, then
+    :func:`_interp_barycentric_core_dl`), including its NaN-depth rule
+    (read like a depth below the bed).  Returns ``(U, V, ok)``."""
+    elem_id, in_dom = _find_containing_element_local(
+        xp, yp, nn_node, node_to_elems, node_to_elems_count,
+        elem_nodes, nodes_lon, nodes_lat)
+    if not in_dom:
+        return 0.0, 0.0, False
+    max_v = elem_nodes.shape[1]
+    verts = np.empty(max_v, dtype=np.int64)
+    nv = 0
+    for k in range(max_v):
+        nd = int(elem_nodes[elem_id, k])
+        if nd < 0:
+            continue
+        if nv > 0 and nd == verts[0]:
+            continue          # FESOM-C tri stored as quad repeats vertex 0
+        verts[nv] = nd
+        nv += 1
+    if nv < 3:
+        return 0.0, 0.0, False
+    DEG2R = 0.017453292519943295
+    R = r_earth
+    lon_ref = nodes_lon[verts[0]]
+    dsum = 0.0; lat0 = 0.0
+    for k in range(nv):
+        dsum += ((nodes_lon[verts[k]] - lon_ref + 180.0) % 360.0) - 180.0
+        lat0 += nodes_lat[verts[k]]
+    lon0 = lon_ref + dsum / nv
+    lat0 /= nv
+    cosl = np.cos(lat0 * DEG2R)
+    vx = np.empty(nv); vy = np.empty(nv)
+    for k in range(nv):
+        dlon = ((nodes_lon[verts[k]] - lon0 + 180.0) % 360.0) - 180.0
+        vx[k] = dlon * DEG2R * R * cosl
+        vy[k] = (nodes_lat[verts[k]] - lat0) * DEG2R * R
+    dlon_p = ((xp - lon0 + 180.0) % 360.0) - 180.0
+    px = dlon_p * DEG2R * R * cosl
+    py = (yp - lat0) * DEG2R * R
+    w = _polygon_weights(px, py, vx, vy, nv)
+    if w[0] == -1.0:
+        return 0.0, 0.0, False
+    zq = z
+    if np.isnan(zq):
+        zq = np.inf           # below the bed, as find_layer reads NaN
+    U = 0.0; V = 0.0
+    for k in range(nv):
+        nd = verts[k]
+        kb, ab = uv_bracket(p, last[nd], zq)
+        un, vn = _tinterp_point_uv(u_a, v_a, u_b, v_b, u_t, v_t, kb, nd,
+                                   alpha0, alpha)
+        if not ab < 0.0:      # uv_at: alpha < 0 reads point kb only
+            un1, vn1 = _tinterp_point_uv(u_a, v_a, u_b, v_b, u_t, v_t,
+                                         kb + 1, nd, alpha0, alpha)
+            un = (1.0 - ab) * un + ab * un1
+            vn = (1.0 - ab) * vn + ab * vn1
+        U += w[k] * un; V += w[k] * vn
+    return time_dir * U, time_dir * V, True
+
+
+@njit(cache=True)
+def _interp_barycentric_core_pchip4_dl(xp, yp, nn_node, z, time_dir,
+                                       node_to_elems, node_to_elems_count,
+                                       elem_nodes, nodes_lon, nodes_lat,
+                                       p, last,
+                                       u_0, v_0, u_1, v_1, u_2, v_2,
+                                       u_3, v_3, t0, t1, t2, t3, tq,
+                                       r_earth):
+    """Depth-linear twin of :func:`_interp_barycentric_core_pchip4_3d`
+    (node layout, ``uv_vertical`` ``"level"`` / ``"layer_linear"``).
+
+    Identical geometry; ``layer`` is replaced by the particle depth ``z``
+    and the table ``p``, ``last``; u/v snapshots are ``(M, N)``.  Per
+    vertex, TIME FIRST: each stored value ``(k, nd)`` the vertex reads goes
+    through ``_pchip_value_scalar`` (the unfused ``reconstruct_pchip``
+    arithmetic), THEN the ``uv_bracket`` / ``uv_at`` rule runs on the
+    reconstructed values.  PCHIP is not linear, so the order matters (the
+    vertical-first result differs).  A point below ``last[nd]`` is never
+    read.  Returns ``(U, V, ok)``."""
+    elem_id, in_dom = _find_containing_element_local(
+        xp, yp, nn_node, node_to_elems, node_to_elems_count,
+        elem_nodes, nodes_lon, nodes_lat)
+    if not in_dom:
+        return 0.0, 0.0, False
+    max_v = elem_nodes.shape[1]
+    verts = np.empty(max_v, dtype=np.int64)
+    nv = 0
+    for k in range(max_v):
+        nd = int(elem_nodes[elem_id, k])
+        if nd < 0:
+            continue
+        if nv > 0 and nd == verts[0]:
+            continue          # FESOM-C tri stored as quad repeats vertex 0
+        verts[nv] = nd
+        nv += 1
+    if nv < 3:
+        return 0.0, 0.0, False
+    DEG2R = 0.017453292519943295
+    R = r_earth
+    lon_ref = nodes_lon[verts[0]]
+    dsum = 0.0; lat0 = 0.0
+    for k in range(nv):
+        dsum += ((nodes_lon[verts[k]] - lon_ref + 180.0) % 360.0) - 180.0
+        lat0 += nodes_lat[verts[k]]
+    lon0 = lon_ref + dsum / nv
+    lat0 /= nv
+    cosl = np.cos(lat0 * DEG2R)
+    vx = np.empty(nv); vy = np.empty(nv)
+    for k in range(nv):
+        dlon = ((nodes_lon[verts[k]] - lon0 + 180.0) % 360.0) - 180.0
+        vx[k] = dlon * DEG2R * R * cosl
+        vy[k] = (nodes_lat[verts[k]] - lat0) * DEG2R * R
+    dlon_p = ((xp - lon0 + 180.0) % 360.0) - 180.0
+    px = dlon_p * DEG2R * R * cosl
+    py = (yp - lat0) * DEG2R * R
+    w = _polygon_weights(px, py, vx, vy, nv)
+    if w[0] == -1.0:
+        return 0.0, 0.0, False
+    zq = z
+    if np.isnan(zq):
+        zq = np.inf           # below the bed, as find_layer reads NaN
+    U = 0.0; V = 0.0
+    for k in range(nv):
+        nd = verts[k]
+        kb, ab = uv_bracket(p, last[nd], zq)
+        un = _pchip_value_scalar(u_0[kb, nd], u_1[kb, nd],
+                                 u_2[kb, nd], u_3[kb, nd],
+                                 t0, t1, t2, t3, tq)
+        vn = _pchip_value_scalar(v_0[kb, nd], v_1[kb, nd],
+                                 v_2[kb, nd], v_3[kb, nd],
+                                 t0, t1, t2, t3, tq)
+        if not ab < 0.0:      # uv_at: alpha < 0 reads point kb only
+            kn = kb + 1
+            un1 = _pchip_value_scalar(u_0[kn, nd], u_1[kn, nd],
+                                      u_2[kn, nd], u_3[kn, nd],
+                                      t0, t1, t2, t3, tq)
+            vn1 = _pchip_value_scalar(v_0[kn, nd], v_1[kn, nd],
+                                      v_2[kn, nd], v_3[kn, nd],
+                                      t0, t1, t2, t3, tq)
+            un = (1.0 - ab) * un + ab * un1
+            vn = (1.0 - ab) * vn + ab * vn1
+        U += w[k] * un; V += w[k] * vn
+    return time_dir * U, time_dir * V, True
+
+
 def _interp_barycentric_dl(
     state: ParticleState,
     mesh: Mesh,
