@@ -45,15 +45,16 @@ except ImportError:
         return range(*args)
 
 from ..core.geometry import METERS_PER_DEG_LAT, DEG2RAD, wrap_lon, clamp_lat
-from ..core.io import _require_same_uv_vertical
+from ..core.io import LazyLerpField, _require_same_uv_vertical
 from .interpolate import (
     interp_leastsq, interp_leastsq_single, VelocityField,
     _interp_leastsq_core, _interp_leastsq_core_tinterp,
     _interp_leastsq_core_pchip4,
     _interp_barycentric_core_tinterp,
     _interp_barycentric_core_tinterp_3d, _interp_barycentric_core_pchip4_3d,
-    get_interpolator, UV_INTERP_USES_ELEMS,
+    get_interpolator, UV_INTERP_USES_ELEMS, _reject_depth_linear,
 )
+from .vertical_uv import check_depth_linear_record, is_checked
 from ..core.mesh import (
     Mesh, find_nearest_nodes, find_containing_elements,
     find_containing_elements_walk, grid_hash_dense_for_elements,
@@ -1040,6 +1041,109 @@ def _validate_time_aware_inputs(vel, vel_next, dt_to_next, dt):
             f"step endpoint past next snapshot: "
             f"dt={dt:.6f}s > dt_to_next={dt_to_next:.6f}s"
         )
+
+
+def _check_depth_linear_entry(vel, mesh, uv_interp: str, integrator: str, *,
+                              vel_next=None, recon=None) -> None:
+    """Entry gate of the step functions for depth-linear u/v.
+
+    A ``"layer"`` ``vel`` returns after ONE attribute read (``uv_vertical``;
+    nothing else of ``vel``, ``vel_next``, ``recon`` or ``mesh`` is
+    touched), so layer runs keep their cost and their bits.
+
+    A depth-linear ``vel`` (``uv_vertical`` ``"level"`` or
+    ``"layer_linear"``) is refused, in this order, for the ``rk45``
+    integrator, a mesh that is not z-level, a field that is not 3-D (no
+    ``w``), a layout other than ``"node"`` and a ``uv_interp`` other than
+    ``"barycentric"`` — the only interpolator that evaluates it.  Then every
+    field the step receives must carry the same placement, and each passes
+    the record check (``check_depth_linear_record``) unless already checked
+    for this mesh's table: ``vel``, ``vel_next``, each ``recon`` snapshot,
+    and the raw parents ``vel_a`` / ``vel_b`` of any ``LazyLerpField`` among
+    them (checked first, so a bad parent is named).
+
+    Parameters
+    ----------
+    vel : VelocityField or LazyLerpField
+        The step's field; one without ``uv_vertical`` counts as ``"layer"``.
+    mesh : Mesh
+        The mesh of the step.
+    uv_interp : str
+        The step's horizontal interpolator name.
+    integrator : str
+        ``"euler"``, ``"rk2"``, ``"rk4"`` or ``"rk45"`` (message prefix
+        ``"<integrator>_step"``).
+    vel_next : VelocityField or LazyLerpField, optional
+        The time-aware neighbour field.
+    recon : tuple, optional
+        The PCHIP bundle ``(snaps, times, sim_time, direction)``.
+
+    Raises
+    ------
+    ValueError
+        An unsupported combination, mixed placements, or a non-finite u/v
+        value at a usable point of any field (the message names the field).
+    """
+    placement = getattr(vel, "uv_vertical", "layer")
+    if placement == "layer":
+        return
+    where = f"{integrator}_step"
+    if integrator == "rk45":
+        _reject_depth_linear(
+            vel, where, "is not supported by the rk45 integrator (2-D only "
+            "in this version); use euler, rk2 or rk4 with "
+            "uv_interp='barycentric'")
+    if mesh.vertical_coord != "zlevel":
+        _reject_depth_linear(
+            vel, where, "needs a z-level mesh (vertical_coord 'zlevel'), "
+            f"got {mesh.vertical_coord!r}")
+    if not _is_3d(vel):
+        _reject_depth_linear(
+            vel, where, "needs a 3-D field (u/v on depth points and a w "
+            "field)")
+    layout = getattr(vel, "uv_layout", "element")
+    if layout != "node":
+        _reject_depth_linear(
+            vel, where, f"needs node layout (uv_layout='node'), got "
+            f"{layout!r}")
+    if uv_interp != "barycentric":
+        _reject_depth_linear(
+            vel, where, f"needs uv_interp='barycentric', got "
+            f"uv_interp={uv_interp!r}")
+
+    named = [("vel", vel)]
+    if vel_next is not None:
+        named.append(("vel_next", vel_next))
+    if recon is not None:
+        named.extend((f"recon snapshot {i}", s)
+                     for i, s in enumerate(recon[0]))
+    found = [(name, getattr(f, "uv_vertical", "layer")) for name, f in named]
+    if any(p != placement for _, p in found):
+        raise ValueError(
+            f"{where}: uv_vertical mismatch between the fields of one step: "
+            + ", ".join(f"{name}={p!r}" for name, p in found))
+
+    seen = set()
+    for name, f in named:
+        group = []
+        if isinstance(f, LazyLerpField):
+            group = [(f"{name}.vel_a", f.vel_a), (f"{name}.vel_b", f.vel_b)]
+        group.append((name, f))
+        for label, g in group:
+            if id(g) in seen:
+                continue
+            seen.add(id(g))
+            if not is_checked(g, mesh):
+                check_depth_linear_record(g, mesh,
+                                          record=f"{label} ({where})")
+
+
+def _recon_all_layer(recon) -> bool:
+    """True when there is no PCHIP bundle or all its snapshots are
+    ``"layer"`` (TEMPORARY fused-RK2 gate helper, removed in depth-linear
+    engine Task 6 with the fused depth-linear twins)."""
+    return recon is None or all(
+        getattr(s, "uv_vertical", "layer") == "layer" for s in recon[0])
 
 
 def _make_stage_vels(vel: VelocityField, vel_next: Optional[VelocityField],
@@ -4328,6 +4432,9 @@ def euler_step(
     ParticleState
         New state after one Euler step.
     """
+    _check_depth_linear_entry(vel, mesh, kwargs.get("uv_interp", "leastsq"),
+                              "euler", vel_next=kwargs.get("vel_next"),
+                              recon=kwargs.get("recon"))
     diffusion: Optional[DiffusionStepArgs] = kwargs.pop("diffusion", None)
     _reject_em_m1_az(diffusion)
     alive = state.alive_mask
@@ -4381,9 +4488,13 @@ def euler_step(
             # through to the unfused dispatcher).  Under mesh.exact_nearest
             # it anchors every site through the in-kernel exact search
             # (_fused_site_anchor -> _grid_hash_nearest_exact), like every
-            # other fused kernel; no flag/heal round trip.
+            # other fused kernel; no flag/heal round trip.  It reads raw
+            # u[layer] rows, so a depth-linear field never enters it (the
+            # entry check already refuses leastsq for one; this keeps the
+            # kernel safe on its own).
             fused_ok = (not is_sigma_3d and w_interp in ("nearest", "leastsq")
-                        and uv_interp == "leastsq")
+                        and uv_interp == "leastsq"
+                        and getattr(vel, "uv_vertical", "layer") == "layer")
             if fused_ok:
                 result = _run_fused_euler_3d(state, vel, mesh, dt, time_dir,
                                              w_interp=w_interp)
@@ -4444,7 +4555,7 @@ def euler_step(
 # ---------------------------------------------------------------------------
 
 def _interp_uv_at(interp_fn, state, mesh, vel, lons, lats, mask,
-                  nn_full, time_dir, layer_arg, elems=None):
+                  nn_full, time_dir, layer_arg, elems=None, zs=None):
     """Vectorised (parallel) u/v interpolation at explicit stage positions.
 
     RK stages after the first evaluate u/v at the midpoint / stage positions,
@@ -4463,6 +4574,12 @@ def _interp_uv_at(interp_fn, state, mesh, vel, lons, lats, mask,
     identical to the per-particle loop — only parallel.  Particles outside
     ``mask`` are skipped by the kernel and return ``0.0 / 0.0 / False``,
     matching the loop's pre-zeroed outputs.
+
+    A depth-linear field (``uv_vertical`` ``"level"`` / ``"layer_linear"``)
+    is read at the depth of the stage state, so the stage depth ``zs`` must
+    reach it: given, it replaces the entry ``z`` in the stage state.  Layer
+    interpolators never read ``state.z`` (they take ``layer_arg``), so
+    passing ``zs`` leaves every layer run bit-identical.
 
     Parameters
     ----------
@@ -4484,6 +4601,8 @@ def _interp_uv_at(interp_fn, state, mesh, vel, lons, lats, mask,
     elems : np.ndarray or None
         Optional pre-validated containing elements at the STAGE positions
         (edge-walk tracker); forwarded to interpolators that accept them.
+    zs : np.ndarray or None, shape ``(P,)``
+        Stage depths (m, positive down); ``None`` keeps ``state.z``.
 
     Returns
     -------
@@ -4492,7 +4611,11 @@ def _interp_uv_at(interp_fn, state, mesh, vel, lons, lats, mask,
     stage_status = np.where(
         mask, int(ParticleStatus.ALIVE), int(ParticleStatus.OUTSIDE)
     ).astype(state.status.dtype)
-    stage_state = state.replace(lon=lons, lat=lats, status=stage_status)
+    if zs is None:
+        stage_state = state.replace(lon=lons, lat=lats, status=stage_status)
+    else:
+        stage_state = state.replace(lon=lons, lat=lats, z=zs,
+                                    status=stage_status)
     if elems is not None:
         return interp_fn(stage_state, mesh, vel, nn_full, time_dir,
                          layer_arg, elems=elems)
@@ -4626,11 +4749,12 @@ def _rk2_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
                 mesh, lon_mid, lat_mid, cur_elems, moves1)
             last_elems = mid_elems
 
-        # Stage-2 u/v in parallel (was a serial per-particle loop).
+        # Stage-2 u/v in parallel (was a serial per-particle loop), at
+        # the stage depth z_mid (read by depth-linear fields only).
         U2, V2, ok2 = _interp_uv_at(
             interp_fn, state, mesh, vel_k2,
             lon_mid, lat_mid, moves1, nn_mid_full, time_dir, layer_arg,
-            elems=mid_elems,
+            elems=mid_elems, zs=z_mid,
         )
 
         if is3d:
@@ -4729,6 +4853,9 @@ def rk2_step(
     Stage 1: half Euler step → midpoint position.
     Stage 2: evaluate velocity at midpoint, full step from original position.
     """
+    _check_depth_linear_entry(vel, mesh, kwargs.get("uv_interp", "leastsq"),
+                              "rk2", vel_next=kwargs.get("vel_next"),
+                              recon=kwargs.get("recon"))
     diffusion: Optional[DiffusionStepArgs] = kwargs.pop("diffusion", None)
     _reject_em_m1_az(diffusion)
     _reject_combined_em_on_rk(diffusion, "rk2")
@@ -4788,7 +4915,13 @@ def rk2_step(
           and state.elem is None
           and w_interp in ("nearest", "barycentric")
           and not (hasattr(vel, "vel_a")
-                   and float(getattr(vel, "alpha", 1.0)) == 0.0)):
+                   and float(getattr(vel, "alpha", 1.0)) == 0.0)
+          # TEMPORARY (depth-linear engine Task 6 removes these two lines
+          # with the fused depth-linear twins): the fused kernels read raw
+          # u[layer] rows, so a depth-linear vel, or PCHIP snapshots, take
+          # the unfused path until then.
+          and getattr(vel, "uv_vertical", "layer") == "layer"
+          and _recon_all_layer(recon)):
         # Fused 3-D barycentric RK2 (2026-08): z-level node-layout only;
         # NO density-certificate gate — the kernels detect empty-window
         # anchors per particle and the runners rerun those few through
@@ -4947,11 +5080,12 @@ def _rk4_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
         if walk_interp:
             stage_elems, _ = _walk_update_elems(
                 mesh, lon, lat, prev_elems, mask)
-        # Per-stage u/v in parallel (was a serial per-particle loop).
+        # Per-stage u/v in parallel (was a serial per-particle loop), at
+        # the stage depth z (read by depth-linear fields only).
         U_out, V_out, ok_out = _interp_uv_at(
             interp_fn, state, mesh, vel_at_stage,
             lon, lat, mask, nn_full_local, time_dir, layer_arg,
-            elems=stage_elems if walk_interp else None,
+            elems=stage_elems if walk_interp else None, zs=z,
         )
         if is3d:
             W_out = _compute_w(vel_at_stage, mesh, z, nn_full_local, mask, time_dir,
@@ -5117,6 +5251,9 @@ def rk4_step(
     Uses a single velocity field (no temporal interpolation).
     Four spatial evaluations at staggered positions.
     """
+    _check_depth_linear_entry(vel, mesh, kwargs.get("uv_interp", "leastsq"),
+                              "rk4", vel_next=kwargs.get("vel_next"),
+                              recon=kwargs.get("recon"))
     diffusion: Optional[DiffusionStepArgs] = kwargs.pop("diffusion", None)
     _reject_em_m1_az(diffusion)
     _reject_combined_em_on_rk(diffusion, "rk4")
@@ -5559,6 +5696,9 @@ def rk45_step(
     ``u``/``v`` were evaluated — the end of the step BEFORE any diffusion
     kick; the tracking layer un-rotates the recorded velocity there).
     """
+    _check_depth_linear_entry(vel, mesh, kwargs.get("uv_interp", "leastsq"),
+                              "rk45", vel_next=kwargs.get("vel_next"),
+                              recon=kwargs.get("recon"))
     diffusion: Optional[DiffusionStepArgs] = kwargs.pop("diffusion", None)
     _reject_em_m1_az(diffusion)
     if diffusion is not None and diffusion.scheme in ("em", "m1"):
