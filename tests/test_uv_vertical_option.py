@@ -147,8 +147,24 @@ def _run(cfg):
 
 
 def _global_attrs(path):
+    if str(path).endswith(".zarr"):
+        import zarr
+        return dict(zarr.open_group(str(path), mode="r").attrs)
     with netCDF4.Dataset(str(path)) as nc:
         return {k: nc.getncattr(k) for k in nc.ncattrs()}
+
+
+#: writer configurations: streaming NetCDF, buffered NetCDF, Zarr
+WRITER_KINDS = {"nc": (".nc", 0), "nc_buffered": (".nc", 2),
+                "zarr": (".zarr", 0)}
+
+
+def _writer(tmp_path, name, kind, n):
+    ext, flush = WRITER_KINDS[kind]
+    if ext == ".zarr":
+        pytest.importorskip("zarr")
+    return TrajectoryWriter(str(tmp_path / f"{name}{ext}"), n,
+                            flush_every=flush)
 
 
 def _fesom2_env(cfg):
@@ -521,7 +537,7 @@ def test_run_single_realization_and_track_particles_option(tmp_path):
     ds.close()
 
 
-def _restart_env(tmp_path):
+def _restart_env(tmp_path, output_freq=1):
     """The FESOM2 fixture opened for direct calls, RK2 with the next record,
     and a runner writing one output (checkpoint every 2 steps)."""
     cfg = _fesom2_cfg(tmp_path)
@@ -529,7 +545,8 @@ def _restart_env(tmp_path):
     file_times, file_dt = extract_time_info(ds)
     numerics = NumericsConfig(dt=DT, integrator="rk2",
                               uv_interp="barycentric",
-                              w_interp="barycentric")
+                              w_interp="barycentric",
+                              output_freq=output_freq)
 
     def run(name, mode, state, start, n, start_step_i, writer=None,
             ext=".nc"):
@@ -649,6 +666,66 @@ def test_one_writer_keeps_one_rule(tmp_path, first, second):
     attrs = _global_attrs(path)
     assert attrs.get("uv_vertical") == (
         "linear" if first == "linear" else None)
+    ds.close()
+
+
+@pytest.mark.parametrize("kind", sorted(WRITER_KINDS))
+@pytest.mark.parametrize("first,second", [("layer", "linear"),
+                                          ("linear", "layer")])
+def test_writer_bound_by_a_segment_without_records(tmp_path, kind, first,
+                                                   second):
+    """A segment that wrote a checkpoint but no record (output every 3
+    steps, checkpoint every 2, two steps) binds the writer to its rule all
+    the same: the next segment with the other rule is refused before it
+    writes anything, on every writer kind."""
+    mesh, ds, run = _restart_env(tmp_path, output_freq=3)
+    init = _state(mesh, SEEDS)
+    r = load_restart(run("a", _fesom2_mode(uv_vertical=first), init, 0, 2,
+                         0))
+    w = _writer(tmp_path, "chain", kind, init.n_particles).open()
+    try:
+        run("seg1", _fesom2_mode(uv_vertical=first), init, 0, 2, 0, writer=w)
+        assert w.n_obs == 0
+        with pytest.raises(ValueError,
+                           match=rf"mode.uv_vertical '{first}', this "
+                                 rf"segment has '{second}'"):
+            run("seg2", _fesom2_mode(uv_vertical=second), r["state"],
+                r["file_idx"] + 1, 2, r["step_i"] + 1, writer=w)
+        assert w.n_obs == 0
+        # the same rule continues
+        run("seg2", _fesom2_mode(uv_vertical=first), r["state"],
+            r["file_idx"] + 1, 2, r["step_i"] + 1, writer=w)
+    finally:
+        w.close()
+    assert ("uv_vertical" in _global_attrs(w.path)) == (first == "linear")
+    ds.close()
+
+
+@pytest.mark.parametrize("kind", sorted(WRITER_KINDS))
+@pytest.mark.parametrize("first,second", [("linear", "layer"),
+                                          ("layer", "linear")])
+def test_reopened_writer_starts_a_new_file(tmp_path, kind, first, second):
+    """``open()`` creates a new file: a writer object reused after
+    ``close()`` forgets the rule (and the attributes) of the run before, so
+    a run with the other rule is accepted, and the new file carries the
+    ``uv_vertical`` attribute only when that run has the option."""
+    mesh, ds, run = _restart_env(tmp_path)
+    init = _state(mesh, SEEDS)
+    w = _writer(tmp_path, "reused", kind, init.n_particles)
+    w.open()
+    try:
+        run("r1", _fesom2_mode(uv_vertical=first), init, 0, 2, 0, writer=w)
+    finally:
+        w.close()
+    w.open()
+    try:
+        run("r2", _fesom2_mode(uv_vertical=second), init, 0, 2, 0, writer=w)
+        assert w.n_obs == 2
+    finally:
+        w.close()
+    attrs = _global_attrs(w.path)
+    assert attrs.get("uv_vertical") == (
+        "linear" if second == "linear" else None)
     ds.close()
 
 

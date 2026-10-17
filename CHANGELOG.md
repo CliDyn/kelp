@@ -34,8 +34,11 @@ the tracker was developed privately from 2026-06.
   `write_restart_file` takes `uv_vertical=`), `tracking._validate_restart_uv_vertical`
   refuses a resume under the other rule (the resume recipe calls it next to the
   frame check), and `run_single_realization` refuses a segment whose rule
-  differs from the one its writer already carries. `TrajectoryWriter.global_attr`
-  returns a global attribute written through the writer.
+  differs from the one its writer already carries — the first segment binds its
+  rule to the writer before any write, in memory only, so a segment that wrote
+  only a checkpoint counts too; `open()` creates a new file and starts unbound.
+  `TrajectoryWriter.global_attr` returns a global attribute written through the
+  writer, `bound_rule`/`bind_rule` the rules bound to it.
 - Engine: `VelocityField.uv_vertical` (`"layer"`, `"layer_linear"`, `"level"`)
   records where u/v sit in the vertical and travels through every time blend and
   the shared snapshot cache; the new module `numerics/vertical_uv.py` holds the

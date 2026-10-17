@@ -1275,12 +1275,16 @@ def _validate_restart_uv_vertical(restart_value, mode) -> None:
 def _check_writer_uv_vertical(writer, option: str) -> None:
     """Keep one ``mode.uv_vertical`` rule per output file.
 
-    The rule a writer already carries is its ``uv_vertical`` attribute
-    (written through it: ``run_tracking``'s metadata or an earlier
-    ``run_single_realization`` segment); without the attribute, a writer
-    that already holds records carries ``"layer"``.  A fresh writer (no
-    attribute, no record) takes any rule.  Writers without
-    ``global_attr`` / ``n_obs`` are not checked.
+    The rule a writer already carries is, in this order: the rule an
+    earlier ``run_single_realization`` segment bound to it
+    (``TrajectoryWriter.bound_rule``; bound before that segment's first
+    write, so also when it wrote only a checkpoint or attributes), else its
+    ``uv_vertical`` attribute (``run_tracking``'s metadata), else
+    ``"layer"`` when it holds records written by other code.  A fresh
+    writer — new, or reopened (``open()`` creates a new file and forgets
+    both) — takes any rule.  Writers without ``global_attr`` are not
+    checked.  Nothing is changed here; :func:`_bind_writer_uv_vertical`
+    binds.
 
     Raises
     ------
@@ -1290,19 +1294,30 @@ def _check_writer_uv_vertical(writer, option: str) -> None:
     get = getattr(writer, "global_attr", None)
     if get is None:
         return
-    stated = get("uv_vertical")
-    if stated is not None:
-        carried = str(stated)
-    elif int(getattr(writer, "n_obs", 0) or 0) > 0:
-        carried = "layer"
-    else:
+    bound = getattr(writer, "bound_rule", None)
+    carried = bound("uv_vertical") if bound is not None else None
+    if carried is None:
+        stated = get("uv_vertical")
+        if stated is not None:
+            carried = str(stated)
+        elif int(getattr(writer, "n_obs", 0) or 0) > 0:
+            carried = "layer"
+    if carried is None or carried == option:
         return
-    if carried != option:
-        raise ValueError(
-            f"output {getattr(writer, 'path', '')!r} already holds records "
-            f"written with mode.uv_vertical {carried!r}, this segment has "
-            f"{option!r}; write it to a new output, or keep "
-            f"mode.uv_vertical: {carried}")
+    raise ValueError(
+        f"output {getattr(writer, 'path', '')!r} is already used by a "
+        f"segment written with mode.uv_vertical {carried!r}, this segment "
+        f"has {option!r}; write it to a new output, or keep "
+        f"mode.uv_vertical: {carried}")
+
+
+def _bind_writer_uv_vertical(writer, option: str) -> None:
+    """Bind this segment's ``mode.uv_vertical`` to the writer (memory
+    only; a writer bound already keeps its rule).  Called right before the
+    segment's first write of any kind."""
+    bind = getattr(writer, "bind_rule", None)
+    if bind is not None:
+        bind("uv_vertical", option)
 
 
 def _resolve_composition(diff_cfg, integrator_name: str) -> str:
@@ -2072,6 +2087,11 @@ def run_single_realization(
                 "resumed run without release positions (a restart written "
                 "before output format 2): release_lon/lat/z are NaN in this "
                 "output", RuntimeWarning, stacklevel=2)
+
+    # one rule per output: bind this segment's mode.uv_vertical to the writer
+    # before its first write of any kind (checked at the entry)
+    if writer is not None:
+        _bind_writer_uv_vertical(writer, uv_vertical_option)
 
     # Rotated-frame provenance, even for caller-supplied writers: run_tracking
     # also sets this via construction metadata, so a doubled set is harmless

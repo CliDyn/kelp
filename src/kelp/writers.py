@@ -1253,8 +1253,11 @@ class TrajectoryWriter:
         self.n_particles = n_particles
         self.metadata = metadata
         # global attributes written through this writer (construction
-        # metadata + set_global_attr), readable back with global_attr()
+        # metadata + set_global_attr), readable back with global_attr(), and
+        # the run-wide rules the segments using it bound (memory only, never
+        # written); open() resets both, since it creates a new file
         self._attrs_written: Dict[str, object] = dict(metadata or {})
+        self._bound_rules: Dict[str, object] = {}
         ext = Path(path).suffix.lower()
         if ext == ".zarr" or path.endswith(".zarr"):
             # Zarr is already lock-free and readable mid-run (chunks are
@@ -1270,9 +1273,14 @@ class TrajectoryWriter:
     def open(self) -> TrajectoryWriter:
         """Create the file and define arrays/variables.
 
-        Returns self for chaining.
+        Returns self for chaining.  Both backends create a NEW file (an
+        existing one is replaced), so the writer also forgets what it knew of
+        the previous one: :meth:`global_attr` answers from the construction
+        metadata again and :meth:`bound_rule` from nothing.
         """
         self._backend.open()
+        self._attrs_written = dict(self.metadata or {})
+        self._bound_rules = {}
         return self
 
     def append(self, state: ParticleState, time_value: float,
@@ -1416,6 +1424,24 @@ class TrajectoryWriter:
         ``uv_vertical`` rule per output file.
         """
         return self._attrs_written.get(str(name), default)
+
+    def bound_rule(self, name: str, default=None):
+        """The value of a run-wide rule bound to this output, else
+        ``default`` (see :meth:`bind_rule`)."""
+        return self._bound_rules.get(str(name), default)
+
+    def bind_rule(self, name: str, value) -> None:
+        """Bind a run-wide rule to this output, in memory only.
+
+        The first segment that uses the writer binds its value (nothing is
+        written to the file, so outputs stay byte-identical); a value bound
+        already is kept.  ``run_single_realization`` binds
+        ``mode.uv_vertical`` before its first write of any kind (attribute,
+        record or checkpoint) and refuses a later segment with another
+        value — also when the first one wrote no record.  :meth:`open`
+        forgets the bindings.
+        """
+        self._bound_rules.setdefault(str(name), value)
 
     def close(self) -> None:
         """Flush and close."""
