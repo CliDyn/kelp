@@ -60,7 +60,9 @@ into its own small dataclass. (Every key is documented in
    the velocity file (or directory of files) as an xarray dataset, without yet
    reading any velocity data — individual time snapshots are read on demand
    during the loop. A reader with the optional hook `prepare(mesh, ds)` gets it
-   called once per (mesh, dataset) pair right after (`tracking._prepare_dataset`).
+   called right after (`tracking._prepare_dataset`); a direct
+   `run_single_realization` calls it again whenever the mesh was prepared for
+   another dataset or other kept levels since.
 
 4. **Load the seed particles.** `read_seeds_with_release(config.data.inicloud)`
    reads the initial positions (`lon lat [depth] [release_sec]`); once `dt` is
@@ -242,7 +244,7 @@ particle is in.
 | `sigma` | `(K,)` | vertical interfaces — physical depths for z-level meshes, sigma values for sigma meshes; empty for 2D |
 | `vertical_coord` | `"zlevel"` / `"sigma"` | selects the vertical-geometry backend |
 | `rotation_angles` | `(α,β,γ)` or `None` | the Euler frame the coordinates live in; `None` = geographic |
-| `metadata` | `dict` | reader and run facts: e.g. the HEALPix u/v data prefix `uv_data_last` (int `(N,)`), the uncut level table `sigma_full`, the run token `kelp_mesh_token`; shared by shallow copies of the mesh |
+| `metadata` | `dict` | reader and run facts: e.g. the HEALPix u/v data prefix `uv_data_last` (int `(N,)`), the uncut level table `sigma_full`, what the mesh is prepared for (`kelp_prepared_dataset`, `kelp_prepared_sigma`); shared by shallow copies of the mesh |
 
 The spatial search index (grid hash with its `(N, 3)` node coordinate table
 `_node_xyz`, plus a lazily built KD-tree) is attached to the mesh by

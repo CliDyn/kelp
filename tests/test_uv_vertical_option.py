@@ -1359,9 +1359,11 @@ def test_apply_max_levels_helper():
 # ---------------------------------------------------------------------------
 
 def test_prepare_called_per_dataset(tmp_path, monkeypatch):
-    """``prepare`` runs once per run_tracking (two realizations), again for
-    a second dataset on the same mesh, never twice for the same pair; the
-    pair is recorded with a uuid token, not an object id."""
+    """``prepare`` runs once per run_tracking (two realizations), right
+    after open_dataset; on direct entries again for a second dataset on the
+    same mesh, never twice in a row for the same dataset; the dataset is
+    named by a uuid token, never an object id, and the mesh remembers the
+    dataset and the level table it is prepared for."""
     base = get_reader("fesom2")
     calls, events = [], []
     out_files = [tmp_path / "traj_r0.nc", tmp_path / "traj_r1.nc"]
@@ -1383,9 +1385,10 @@ def test_prepare_called_per_dataset(tmp_path, monkeypatch):
     # right after open_dataset: before the pre-writer probe, no output yet
     assert events[:2] == [("prepare", False), ("probe", None)]
     m0, d0 = calls[0]
-    tok = m0.metadata["kelp_mesh_token"]
+    tok = d0.attrs["kelp_dataset_token"]
     assert re.fullmatch(r"[0-9a-f]{32}", tok)
-    assert d0.attrs["kelp_prepared_for"] == tok
+    assert m0.metadata["kelp_prepared_dataset"] == tok
+    assert m0.metadata["kelp_prepared_sigma"] is m0.sigma
     # direct entries: a second dataset on the same mesh is prepared too
     calls.clear()
     mesh = Preparing.load_mesh(cfg.mesh)
@@ -1396,16 +1399,118 @@ def test_prepare_called_per_dataset(tmp_path, monkeypatch):
     assert [c[1] is ds1 for c in calls] == [True]
     _rsr(mesh, ds2, Preparing, cfg.mode, SEEDS, n_steps=1)
     assert len(calls) == 2 and calls[1][1] is ds2
-    tok = mesh.metadata["kelp_mesh_token"]
-    assert ds1.attrs["kelp_prepared_for"] == ds2.attrs["kelp_prepared_for"] \
-        == tok
+    assert ds1.attrs["kelp_dataset_token"] != ds2.attrs["kelp_dataset_token"]
+    assert (mesh.metadata["kelp_prepared_dataset"]
+            == ds2.attrs["kelp_dataset_token"])
     # another mesh, the same dataset: prepared for that mesh
     other = Preparing.load_mesh(cfg.mesh)
     _rsr(other, ds1, Preparing, cfg.mode, SEEDS, n_steps=1)
     assert len(calls) == 3 and calls[2][0] is other
-    assert other.metadata["kelp_mesh_token"] != tok
+    # a time window of ds1 is the same dataset (it inherits the token)
+    _rsr(other, ds1.isel(time=slice(0, 4)), Preparing, cfg.mode, SEEDS,
+         n_steps=1)
+    assert len(calls) == 3
     ds1.close()
     ds2.close()
+
+
+def _declaring_reader(placement):
+    """A reader whose ``prepare`` declares the dataset's own u/v data prefix
+    (``ds.attrs["decl"]``, a new array each call) and records its calls
+    (dataset name, kept levels).  ``"layer_linear"``: the FESOM2 reader (the
+    option marks its fields); ``"level"``: u = A + B·z on the levels of
+    ``mesh.sigma`` (``native_uv_vertical = "level"``), w = v = 0."""
+    base = get_reader("fesom2")
+    calls = []
+
+    class Declaring(base):
+        @staticmethod
+        def prepare(mesh, ds):
+            calls.append((ds.attrs["name"], int(mesh.sigma.size)))
+            mesh.metadata["uv_data_last"] = np.array(ds.attrs["decl"],
+                                                     dtype=np.int32)
+    if placement == "level":
+        def read_velocities(ds, timestep, mesh, mode_cfg=None, **kw):
+            z = np.abs(np.asarray(mesh.sigma, dtype=np.float64))
+            n = mesh.n_nodes
+            u = np.ascontiguousarray(
+                np.repeat((A + B * z)[:, None], n, axis=1))
+            return VelocityField(u=u, v=np.zeros_like(u), eta=np.zeros(n),
+                                 w=np.zeros((z.size, n)), uv_layout="node",
+                                 uv_vertical="level")
+        Declaring.native_uv_vertical = "level"
+        Declaring.read_velocities = staticmethod(read_velocities)
+    return Declaring, calls
+
+
+#: per placement: option, particle depth, the full (A) and the shallow (B)
+#: declaration, and the u each gives at that depth
+_SWITCH = {
+    "layer_linear": ("linear", 12.5, [1, 1, 1, 1], [0, 0, 0, 0],
+                     A + B * 12.5, A + B * 5.0),
+    "level": ("layer", 25.0, [2, 2, 2, 2], [1, 1, 1, 1],
+              A + B * 25.0, A + B * 10.0),
+}
+
+
+def _switch_env(tmp_path, placement):
+    option, z, decl_a, decl_b, u_a, u_b = _SWITCH[placement]
+    cfg = _fesom2_cfg(tmp_path)
+    reader, calls = _declaring_reader(placement)
+    mesh = reader.load_mesh(cfg.mesh)
+    dss = {}
+    for name, decl in (("A", decl_a), ("B", decl_b)):
+        dss[name] = reader.open_dataset(cfg.data.ncinput, mode_cfg=cfg.mode)
+        dss[name].attrs.update(name=name, decl=decl)
+    seeds = [(0.15, 0.4, z)]
+
+    def run(name, **mode_kw):
+        mode = _fesom2_mode(uv_vertical=option, **mode_kw)
+        return _rsr(mesh, dss[name], reader, mode, seeds, n_steps=1)
+    return mesh, dss, run, calls, {"A": u_a, "B": u_b}
+
+
+@pytest.mark.parametrize("placement", sorted(_SWITCH))
+@pytest.mark.parametrize("order", ["ABA", "BAB"])
+def test_switching_datasets_prepares_again(tmp_path, placement, order):
+    """Two datasets with different data prefixes on ONE mesh, used A → B → A
+    (and B → A → B): every switch runs ``prepare`` again, so each run reads
+    with its own dataset's declaration and the third run equals the first
+    bit for bit."""
+    mesh, dss, run, calls, u = _switch_env(tmp_path, placement)
+    out = [run(name) for name in order]
+    for name, r in zip(order, out):        # record 0: the 1958 file
+        assert r["vel_u"][0, 0] == pytest.approx(u[name], rel=0, abs=1e-15)
+    for k in ("lon", "lat", "z", "vel_u"):
+        assert_bitwise(out[2][k], out[0][k], k)
+    assert not np.array_equal(out[1]["vel_u"], out[0]["vel_u"])
+    assert [c[0] for c in calls] == list(order)
+    for ds in dss.values():
+        ds.close()
+
+
+@pytest.mark.parametrize("placement", sorted(_SWITCH))
+def test_prepare_follows_the_kept_levels(tmp_path, placement):
+    """The same dataset twice: ``prepare`` once.  A direct call with another
+    ``max_levels`` re-cuts ``mesh.sigma`` and runs ``prepare`` again (it
+    sees the cut table); the same limit again does not; None restores the
+    table and prepares again.  The depth-point table follows the levels."""
+    mesh, dss, run, calls, u = _switch_env(tmp_path, placement)
+    run("A")
+    run("A")
+    assert calls == [("A", 3)]
+    run("A", max_levels=2)
+    assert calls[-1] == ("A", 2) and len(calls) == 2
+    run("A", max_levels=2)
+    assert len(calls) == 2
+    run("A")
+    assert calls[-1] == ("A", 3) and len(calls) == 3
+    dp = depth_points(mesh, placement)
+    full = np.abs(mesh.sigma)
+    np.testing.assert_array_equal(
+        dp.p, full if placement == "level" else 0.5 * (full[:-1] + full[1:]))
+    for ds in dss.values():
+        ds.close()
 
 
 def test_concat_refuses_shards_with_different_option(tmp_path):
