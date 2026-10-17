@@ -34,7 +34,7 @@ except Exception:  # pragma: no cover - broad on purpose: a numpy/numba
             return func
         return decorator
 
-from ..core.io import VelocityField
+from ..core.io import VelocityField, _require_same_uv_vertical, _shared_token
 
 
 def _fc_slope(d_prev, d_next, h_prev, h_next):
@@ -246,14 +246,9 @@ def reconstruct_pchip(snaps: Sequence[VelocityField],
             f"reconstruct_pchip: t_query={t_query} outside the central "
             f"interval [{t1}, {t2}]")
     a, b, c, d = snaps
-    placements = [s.uv_vertical for s in snaps]
-    if len(set(placements)) > 1:
-        raise ValueError(
-            "reconstruct_pchip: uv_vertical mismatch across reconstruction "
-            f"snapshots: {placements}")
-    tok = a._dl_token
-    if any(s._dl_token is not tok for s in snaps):
-        tok = None
+    # placement before any shape check or blend
+    uv_vertical = _require_same_uv_vertical(
+        "reconstruct_pchip", *(s.uv_vertical for s in snaps))
 
     def blend(attr):
         xs = [getattr(s, attr) for s in (a, b, c, d)]
@@ -298,8 +293,8 @@ def reconstruct_pchip(snaps: Sequence[VelocityField],
 
     out = VelocityField(u=u, v=v, eta=eta, w=w,
                         uv_layout=b.uv_layout, scalars=scalars,
-                        uv_vertical=b.uv_vertical)
-    out._dl_token = tok
+                        uv_vertical=uv_vertical)
+    out._dl_token = _shared_token(*snaps)
     return out
 
 

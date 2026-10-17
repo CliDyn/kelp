@@ -105,6 +105,19 @@ def test_layer_linear_requires_node_and_k_minus_1():
     assert _field("layer_linear").u.shape == (K - 1, N)
 
 
+def test_depth_linear_needs_node_layout_without_w():
+    # Ruling R8: node layout belongs to the placement, with or without w
+    for placement in ("level", "layer_linear"):
+        with pytest.raises(ValueError, match="node"):
+            VelocityField(u=np.zeros((K - 1, E)), v=np.zeros((K - 1, E)),
+                          eta=np.zeros(N), w=None, uv_layout="element",
+                          uv_vertical=placement)
+    # the layer default stays free of it (FESOM2 3-D reads without w)
+    vel = VelocityField(u=np.zeros((K - 1, E)), v=np.zeros((K - 1, E)),
+                        eta=np.zeros(N), w=None, uv_layout="element")
+    assert vel.uv_vertical == "layer"
+
+
 def test_2d_field_must_be_layer():
     for placement in ("level", "layer_linear"):
         with pytest.raises(ValueError, match="2-D"):
@@ -222,7 +235,10 @@ def test_pchip_carries_and_checks():
             with pytest.raises(ValueError, match="uv_vertical") as ei:
                 reconstruct_pchip(snaps, _TIMES, 13.0)
             assert "shape mismatch" not in str(ei.value)
-            assert ei.traceback[-1].name == "reconstruct_pchip"
+            # raised by reconstruct_pchip's own placement check (through
+            # the shared helper), not by blend() or the constructor
+            assert [e.name for e in ei.traceback[-2:]] == [
+                "reconstruct_pchip", "_require_same_uv_vertical"]
     # the placement check runs BEFORE the shape checks: a level/layer mix
     # (different u shapes) reports the placement, not the shapes
     snaps = _snaps(["layer", "level", "layer", "layer"])
