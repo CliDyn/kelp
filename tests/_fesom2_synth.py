@@ -6,6 +6,8 @@ multi-year per-variable file set in the ``<var>.fesom.<year>.nc`` layout.
 """
 from __future__ import annotations
 from pathlib import Path
+from typing import Callable
+
 import numpy as np
 import xarray as xr
 
@@ -148,7 +150,9 @@ def write_meshdiag_zarr(path: Path, *, zero_nod_in_elem2D: bool = False) -> Path
 
 def write_multiyear(dirpath: Path, var: str, years_lengths: dict[int, int],
                     *, node_layout: bool = True, vertical: str | None = "nz1",
-                    units_years: dict[int, int] | None = None):
+                    units_years: dict[int, int] | None = None,
+                    values: Callable[[int, int], np.ndarray] | None = None,
+                    continuous_time: bool = False):
     """Write <var>.fesom.<year>.nc files with per-file 'seconds since <year>'.
 
     years_lengths: {1958: 3, 1959: 3, 1960: 4} -> n time records per file.
@@ -157,14 +161,28 @@ def write_multiyear(dirpath: Path, var: str, years_lengths: dict[int, int],
         named ``...<filename_year>.nc`` decodes its ``seconds since`` against
         a DIFFERENT year — used to fabricate overlapping/duplicate merged
         time axes for the time-axis guard test.
+    values: optional ``values(year, k)`` giving level ``k`` of the file of
+        ``year`` (anything that broadcasts to ``(ntime, nspace)``; ``k = 0``
+        for a 2-D variable), stored as float32.  None writes 0.1 everywhere.
+    continuous_time: when True the daily records continue across the files
+        (a file's first record is one day after the previous file's last),
+        all files counting from the first year's 1 January; default: each
+        file counts its records from its own year's 1 January.
     """
     nod = 4
     space_dim = "nod2" if node_layout else "elem"
     nspace = 4 if node_layout else 2
     units_years = units_years or {}
-    for year, ntime in years_lengths.items():
+    first_year = min(years_lengths) if years_lengths else None
+    day0 = 0          # records before this file (continuous_time only)
+    items = (sorted(years_lengths.items()) if continuous_time
+             else years_lengths.items())
+    for year, ntime in items:
         # one record per day, timestamp at 23:15 like the real files
-        secs = (np.arange(ntime) * 86400.0 + 83700.0).astype("float64")
+        secs = ((np.arange(ntime) + day0) * 86400.0
+                + 83700.0).astype("float64")
+        if continuous_time:
+            day0 += ntime
         coords = {"time": ("time", secs)}
         if vertical == "nz1":
             shape = (ntime, 2, nspace); dims = ("time", "nz1", space_dim)
@@ -173,8 +191,19 @@ def write_multiyear(dirpath: Path, var: str, years_lengths: dict[int, int],
         else:
             shape = (ntime, nspace); dims = ("time", space_dim)
         data = np.full(shape, 0.1, dtype=np.float32)
+        if values is not None:
+            if len(shape) == 3:
+                for k in range(shape[1]):
+                    data[:, k, :] = np.broadcast_to(
+                        np.asarray(values(year, k), dtype=np.float32),
+                        (ntime, nspace))
+            else:
+                data[:] = np.broadcast_to(
+                    np.asarray(values(year, 0), dtype=np.float32),
+                    (ntime, nspace))
         ds = xr.Dataset({var: (dims, data)}, coords=coords)
-        units_year = units_years.get(year, year)
+        units_year = units_years.get(
+            year, first_year if continuous_time else year)
         ds["time"].attrs["units"] = f"seconds since {units_year}-01-01 0:0:0"
         ds["time"].attrs["calendar"] = "standard"
         ds.to_netcdf(dirpath / f"{var}.fesom.{year}.nc")

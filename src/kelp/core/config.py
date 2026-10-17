@@ -43,6 +43,14 @@ class ModeConfig:
     # convention, e.g. ``utils/reconstruct_w.py`` output).  "auto" = the
     # variable's CF ``positive`` attribute, else the reader family default.
     w_positive: str = "auto"
+    # Vertical rule for layer-centred horizontal velocity (3-D only):
+    # "layer" = piecewise constant per layer (the default), "linear" =
+    # linear in depth between the layer centres, constant above the first
+    # centre and below a column's last wet centre.  Node-layout u/v on a
+    # z-level mesh with numerics.uv_interp: barycentric only (FESOM2
+    # unod/vnod, HEALPix dual geometry); the output attribute
+    # ``uv_vertical = "linear"`` records that it was on.
+    uv_vertical: str = "layer"
 
     def __post_init__(self) -> None:
         if self.sample_vars is None:
@@ -72,9 +80,22 @@ class ModeConfig:
             raise ValueError(
                 "mode.sigma_layer and mode.sigma_mean are alternatives (one "
                 "layer OR the thickness-weighted mean); set only one")
+        uvv = str(self.uv_vertical).strip().lower()
+        if uvv not in _VALID_UV_VERTICAL_OPTION:
+            raise ValueError(
+                f"mode.uv_vertical must be one of {_VALID_UV_VERTICAL_OPTION}, "
+                f"got {self.uv_vertical!r}")
+        if uvv == "linear" and not self.Fdrift3D:
+            raise ValueError(
+                "mode.uv_vertical: 'linear' interpolates the horizontal "
+                "velocity in depth and needs 3-D tracking (mode.Fdrift3D: "
+                "true); a 2-D run reads one level")
+        self.uv_vertical = uvv
 
 
 _VALID_W_POSITIVE = ("auto", "up", "down")
+#: mode.uv_vertical: the vertical rule for layer-centred u/v
+_VALID_UV_VERTICAL_OPTION = ("layer", "linear")
 #: == numerics.integrators.INTEGRATORS (pinned by test)
 _VALID_INTEGRATORS = ("euler", "rk2", "rk4", "rk45")
 #: == numerics.vertical._W_METHOD_MAP (pinned by test)

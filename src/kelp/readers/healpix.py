@@ -953,6 +953,41 @@ def _compact_3d(da, mesh, name: str, n_keep: int,
     return out
 
 
+def _finite_prefix_per_cell(da, lev_dim) -> Optional[np.ndarray]:
+    """Leading finite count down every column of a ``(level, cell)``
+    DataArray at one record: int64 ``(ncells,)`` in store order, or None
+    when the variable has other dims too.  Read ``_LEVEL_BLOCK`` levels at
+    a time (like :func:`_compact_3d`), so no whole-sphere array is held."""
+    if da.ndim != 2:
+        return None
+    cell_dim = next(d for d in da.dims if d != lev_dim)
+    n_lev = int(da.sizes[lev_dim])
+    run = np.ones(int(da.sizes[cell_dim]), dtype=bool)
+    count = np.zeros(run.size, dtype=np.int64)
+    for k0 in range(0, n_lev, _LEVEL_BLOCK):
+        k1 = min(k0 + _LEVEL_BLOCK, n_lev)
+        blk = np.isfinite(np.asarray(
+            da.isel({lev_dim: slice(k0, k1)}).transpose(lev_dim,
+                                                         cell_dim).values))
+        for row in blk:
+            run &= row
+            count += run
+        if not run.any():
+            break
+    return count
+
+
+def _record_label(ds, timestep) -> str:
+    """Names one record of ``ds`` in a refusal: its index in ``ds`` (a
+    prefetch window counts from its own start) and its time stamp."""
+    label = f"time index {timestep} of the dataset read"
+    try:
+        t = ds["time"].values[timestep]
+    except Exception:
+        return label
+    return f"{label} (time {str(t)[:19]})"
+
+
 def _ffill_columns(arr: np.ndarray) -> np.ndarray:
     """Forward-fill NaNs DOWN each column of a (K, N) array (returns a copy).
 
@@ -1112,6 +1147,22 @@ class HealpixReader:
                 # composes with an extract (a further crop of the sector)
                 wet &= _bbox_wet_mask(hp, nside, order, bbox)
 
+            # u/v data prefix for depth-linear runs (mode.uv_vertical): the
+            # leading finite u count of every store column at t=0, read
+            # BEFORE the bathymetry choice below — a deptho deeper than the
+            # u prefix would otherwise point the depth-linear table at a
+            # slot the reader zeroes.  Mapped to mesh-node order once the
+            # mesh exists; declared for 3-D dual-geometry meshes (layer runs
+            # never read it).
+            nfin_u = None
+            lev_dim_u = next((d for d in u0.dims
+                              if str(d).lower() in _LEVEL_DIMS), None)
+            if (lev_dim_u is not None
+                    and (getattr(mesh_cfg, "healpix_geometry", "dual")
+                         or "dual") == "dual"
+                    and (cfg is None or getattr(cfg, "Fdrift3D", False))):
+                nfin_u = _finite_prefix_per_cell(u0, lev_dim_u)
+
             # bathymetry: a depth variable if the product carries one, else
             # deepest-finite-level x mesh.levels (finite-prefix columns),
             # else zeros (fine for 2-D; beaching depth criteria need one).
@@ -1225,6 +1276,13 @@ class HealpixReader:
                 mesh._healpix_data_idx = carrier_pix
             mesh._healpix_data_order = order
             mesh._healpix_data_ncells = ncells
+            if (nfin_u is not None and geometry == "dual"
+                    and nfin_u.size == ncells):
+                # mesh-node order through the same store index the data
+                # compaction uses; -1 = no u in the column (never on a mesh
+                # node: land is dropped by the wet mask)
+                mesh.metadata["uv_data_last"] = (
+                    nfin_u[mesh._healpix_data_idx] - 1).astype(np.int32)
         finally:
             ds.close()
         HealpixReader._apply_rotation(mesh, mesh_cfg)
@@ -1603,6 +1661,18 @@ class HealpixReader:
         # right after it (bit-equal to the historical cast-at-return)
         u = u.astype(vd, copy=False)
         v = v.astype(vd, copy=False)
+
+        if is_3d and getattr(cfg, "uv_vertical", "layer") == "linear":
+            # depth-linear layer u/v: validate the RAW record against the
+            # depth-point table (bathymetry, kept levels, the declared u
+            # prefix) before the zeroing below turns a missing value into
+            # data; refused naming node, point and record
+            from types import SimpleNamespace
+            from ..numerics.vertical_uv import check_depth_linear_record
+            check_depth_linear_record(
+                SimpleNamespace(u=u, v=v, uv_vertical="layer_linear",
+                                _dl_token=None),
+                mesh, record=_record_label(ds, timestep))
 
         if surf_bad.any():
             # masks are static by convention; a few non-finite wet nodes
