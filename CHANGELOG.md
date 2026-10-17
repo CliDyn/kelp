@@ -5,6 +5,15 @@ All notable changes to KELP are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Public history starts with 0.9.0;
 the tracker was developed privately from 2026-06.
 
+## [Unreleased]
+
+### Documentation
+
+- The per-module notes of `CLAUDE.md` (the module details and the import graph)
+  moved, word for word, to `docs/dev/`: an index (`docs/dev/README.md`) and nine
+  notes files. `CLAUDE.md` shrinks from about 140 kB to 23 kB and names the notes
+  files; agents read them on demand. No code change.
+
 ## [1.0.0] - 2026-10-14
 
 Release 1.0 fixes the trajectory output format (format 2, below): from this

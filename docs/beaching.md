@@ -1,7 +1,7 @@
 # KELP beaching and resuspension
 
 > **Covers:** the beaching model — how a particle near the shore can strand (become BEACHED) and later re-float, the four stranding criteria, the stochastic stranding and release timescales, and how the post-step hook turns those decisions into status changes.
-> **Does not cover:** the YAML keys that switch beaching on and tune it (see `configuration.md` §3.2); the deterministic advection step that moves particles before the hook runs (see `time_integration.md`); how a particle's containing element and the coastal-element flags are computed (see `localization.md` and the mesh notes).
+> **Does not cover:** the YAML keys that switch beaching on and tune it (see `configuration.md` §3.2); the deterministic advection step that moves particles before the hook runs (see `time_integration.md`); how a particle's containing element and the coastal-element flags are computed (see `localization.md` and the mesh notes, [dev/mesh.md](dev/mesh.md)).
 > **Code:** `src/kelp/numerics/beaching.py:evaluate_beaching`, `src/kelp/tracking.py:_apply_beaching_hook` (authoritative implementation).
 > **Verified at:** see `docs/doc_map.yaml` (stamped via check_doc_sync --bless).
 
