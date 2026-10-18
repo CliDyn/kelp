@@ -68,7 +68,7 @@ dev_integrators:
   - src/kelp/numerics/vertical_uv.py:check_depth_linear_record
   - src/kelp/numerics/integrators.py:_check_depth_linear_entry
   doc: docs/dev/integrators.md
-  verified_at: 299f4fa
+  verified_at: 82f76a4
 dev_mesh:
   code:
   - src/kelp/core/mesh.py:Mesh
@@ -93,7 +93,7 @@ dev_numerics:
   - src/kelp/numerics/vertical_uv.py:check_depth_linear_record
   - src/kelp/numerics/interpolate.py:_interp_barycentric_core_dl
   doc: docs/dev/numerics.md
-  verified_at: 299f4fa
+  verified_at: 82f76a4
 dev_readers:
   code:
   - src/kelp/readers/__init__.py:get_reader
@@ -174,7 +174,7 @@ interpolation:
   - src/kelp/core/mesh.py:_polygon_weights
   - src/kelp/numerics/vertical_uv.py:uv_bracket
   doc: docs/interpolation.md
-  verified_at: 299f4fa
+  verified_at: 82f76a4
 io_and_time:
   code:
   - src/kelp/readers/__init__.py:get_reader
@@ -269,7 +269,7 @@ vertical:
   - src/kelp/numerics/vertical_uv.py:depth_points
   - src/kelp/numerics/vertical_uv.py:uv_bracket
   doc: docs/vertical.md
-  verified_at: 299f4fa
+  verified_at: 82f76a4
 w_reconstruction:
   code:
   - src/kelp/w_reconstruct.py:reconstruct_w
