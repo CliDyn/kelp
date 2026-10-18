@@ -46,6 +46,18 @@ about themselves; the checks against the mesh belong to ``prepare``.
 the full level axis, the node coordinates when the data carry them, and the
 wet mask of record 0 of every variable — and changes nothing. The engine
 runs it for every dataset a mesh is used with.
+
+:meth:`Fesom14Reader.read_velocities` and
+:meth:`Fesom14Reader.read_scalar_fields` read one record. Every record of
+every variable is first compared with the mesh's static wet mask (data in
+exactly the wet slots), on all levels, before anything is changed; only then
+are values below the bed set to 0 (u/v/w) or to the last value above the bed
+(sampled scalars), the levels cut to the kept ones (``mesh.sigma``, which
+``mode.max_levels`` may have cut) and u/v rotated into the tracking frame.
+3-D tracking gets u/v/w on the levels, ``(K, N)``, ``uv_vertical="level"``,
+w positive down; 2-D tracking gets u/v ``(N,)`` from one level
+(``mode.sigma_layer``, level 0 by default) or the depth mean to the bed
+(``mode.sigma_mean``). The sea-surface height is optional (0 without it).
 """
 from __future__ import annotations
 
@@ -61,9 +73,10 @@ import cftime
 import numpy as np
 import xarray as xr
 
+from ...core.io import VelocityField
 from ...core.mesh import Mesh, build_node_to_elems, build_search
 from ...core.rotation import euler_matrix, unrotate_lonlat
-from .. import register
+from .. import register, resolve_w_sign
 from ..fesom2 import (
     _apply_mesh_rotation,
     _compute_elem_centres,
@@ -71,16 +84,16 @@ from ..fesom2 import (
     _warn_near_pole_fesom2,
 )
 from ._ascii_mesh import MESH_FILES, NOD2D, NOD3D, read_ascii_mesh
-from ._layout import (_MISSING_TEXT, DEPTH_DIMS, HORIZONTAL_DIMS, TIME_DIM,
-                      _first_node_level, detect_form, is_data,
-                      wet_mask_levelwise)
+from ._layout import (DEPTH_DIMS, HORIZONTAL_DIMS, MISSING_TEXT, TIME_DIM,
+                      check_record, detect_form, first_node_level,
+                      gather_nodes3d, is_data, wet_mask_levelwise)
 from ._polygons import recover_triangles
 from ._timeaxis import (FileAxis, ResolvedAxis, TimeOptions,
                         _canonical_calendar, first_difference,
                         parse_output_schedule, resolve_axis)
 
 if TYPE_CHECKING:
-    from ...core.config import MeshConfig, ModeConfig
+    from ...core.config import DiffusionConfig, MeshConfig, ModeConfig
 
 __all__ = ["Fesom14Reader", "R_EARTH_FESOM14", "DEFAULT_VAR_U", "DEFAULT_VAR_V",
            "DEFAULT_VAR_W", "DEFAULT_VAR_ETA", "DEPTHO"]
@@ -325,7 +338,8 @@ class Fesom14Reader:
             ``"nodes3d"``), ``fesom14_has_eta`` (``1`` or ``0``) and
             ``fesom14_time_source`` (``"options"``, ``"bounds"`` or
             ``"schedule"``: what resolved the u axis). ``close()`` closes
-            every file.
+            every file. Without a sea-surface height, one line of the run
+            summary says so (eta is then 0).
 
         Raises
         ------
@@ -365,14 +379,19 @@ class Fesom14Reader:
         heads = [_header(f) for f in _data_files(sources)]
         roles = _consumed_roles(mode_cfg)
         holders = _holders(roles, heads, sources)
+        eta_name = next(r.name for r in roles if r.eta)
         roles = [r for r in roles if holders[r.name]]
         opened: Dict[str, xr.Dataset] = {}
         try:
-            return _open_consumed(roles, holders, opts, opened)
+            ds = _open_consumed(roles, holders, opts, opened)
         except BaseException:
-            for ds in opened.values():
-                ds.close()
+            for f in opened.values():
+                f.close()
             raise
+        if not ds.attrs["fesom14_has_eta"]:
+            print(f"  FESOM 1.4 data: no sea-surface height ({eta_name!r} is in "
+                  "no file under data.ncinput): eta = 0 at every node")
+        return ds
 
     @staticmethod
     def prepare(mesh: Mesh, ds: xr.Dataset) -> None:
@@ -435,6 +454,222 @@ class Fesom14Reader:
         _check_level_axes(ds, fields, facts)
         _check_mesh_coords(ds, fields, facts)
         _check_first_records(ds, fields, facts)
+
+    @staticmethod
+    def read_velocities(ds: xr.Dataset, timestep: int, mesh: Mesh,
+                        mode_cfg: Optional["ModeConfig"] = None,
+                        diffusion: Optional["DiffusionConfig"] = None,
+                        sample_vars: Optional[Sequence[str]] = None,
+                        velocity_float32: bool = False) -> VelocityField:
+        """Read one record of u, v (and w in 3-D) and the sea-surface height.
+
+        Every variable's record is first compared with the mesh's static wet
+        mask, on every level: data in each wet slot, none in a dry one. Only
+        then are the values changed: 0 below the bed, cut to the kept levels,
+        u/v rotated into the tracking frame.
+
+        Parameters
+        ----------
+        ds : xarray.Dataset
+            A dataset from :meth:`open_dataset`, or a time window of one
+            (a prefetch window counts its records from its own start).
+        timestep : int
+            The record, an index into ``ds.time``.
+        mesh : Mesh
+            The mesh from :meth:`load_mesh`; ``mesh.sigma`` holds the kept
+            levels (``mode.max_levels`` cuts it before the run).
+        mode_cfg : ModeConfig, optional
+            ``Fdrift3D`` (3-D tracking; without a mode, 2-D), ``var_u``,
+            ``var_v``, ``var_w``, ``var_eta`` (defaults ``uo``, ``vo``,
+            ``wo``, ``zos``), ``w_positive``, and for 2-D tracking
+            ``sigma_layer`` or ``sigma_mean``.
+        diffusion : DiffusionConfig, optional
+            Not read: FESOM 1.4 output carries no diffusivity fields.
+        sample_vars : sequence of str, optional
+            Variables read with :meth:`read_scalar_fields` into
+            ``VelocityField.scalars``.
+        velocity_float32 : bool
+            Return u/v/w in float32 (eta and scalars stay float64).
+
+        Returns
+        -------
+        VelocityField
+            Node layout. **3-D**: u, v, w of shape ``(K, N)`` on the levels,
+            ``K = mesh.sigma.size``, C-contiguous, ``uv_vertical="level"``,
+            0 below each column's bed; w positive down (the files' w,
+            positive up unless its ``positive`` attribute, ``standard_name``
+            or ``mode.w_positive`` says otherwise, is negated). **2-D**: u, v
+            of shape ``(N,)``, ``uv_vertical="layer"``, no w: the level
+            ``mode.sigma_layer`` (a 0-based index of a kept level; 0 below
+            the bed), else with ``mode.sigma_mean`` the depth mean from the
+            surface to each node's bed (trapezoids between the kept wet
+            levels, the last kept level held constant down to the bed when
+            ``mode.max_levels`` cut the column; a column wet at the surface
+            only gives its surface value), else level 0. With
+            ``mesh.rotation``, u/v are in the tracking frame. ``eta``: the
+            sea-surface height, float64 ``(N,)``; 0 everywhere when the
+            files have none.
+
+        Raises
+        ------
+        ValueError
+            A record with no value in a wet slot (NaN, an infinity or a fill
+            value) or a value in a dry slot, on any level, also below the
+            kept levels; a vector over the 3-D nodes of another length than
+            the mesh's 3-D nodes; a sea-surface height that is not one value
+            per 2-D node, or lacks one at a node; ``mode.sigma_layer`` that
+            is not a kept level; a variable missing from ``ds``; a mesh not
+            built by this reader. The messages name the variable, the record
+            (by its instant), the node and level, and the fix.
+        """
+        st = _statics(mesh)
+        record = _instant(ds, timestep)
+        is_3d = _is_3d(mode_cfg)
+        names = _uvw_names(mode_cfg)
+        vd = np.float32 if velocity_float32 else np.float64
+        u_full = _record_kn(ds, names[0], "mode.var_u", timestep, st, record)
+        v_full = _record_kn(ds, names[1], "mode.var_v", timestep, st, record)
+        if is_3d:
+            w_full = _record_kn(ds, names[2], "mode.var_w", timestep, st,
+                                record)
+            u = _kept(u_full, st, vd)
+            v = _kept(v_full, st, vd)
+            w = _kept(w_full, st, vd)
+            if resolve_w_sign(ds[names[2]], mode_cfg, "up") < 0.0:
+                # wet slots only: the zeros below the bed stay +0
+                np.negative(w, out=w, where=st.wet[:st.k_kept])
+            placement = "level"
+        else:
+            u = _reduce_2d(_zeroed(u_full, st), st, mesh, mode_cfg)
+            v = _reduce_2d(_zeroed(v_full, st), st, mesh, mode_cfg)
+            w = None
+            placement = "layer"
+        if getattr(mesh, "rotation_angles", None) is not None:
+            # geographic east/north -> the tracking frame: the tangent map
+            # (c, s) of each node, broadcast over the levels
+            c, s = mesh._vec_rot_factors["node"]
+            u, v = c * u - s * v, s * u + c * v
+        u = np.ascontiguousarray(u, dtype=vd)
+        v = np.ascontiguousarray(v, dtype=vd)
+        eta = _read_eta(ds, timestep, mesh, mode_cfg, st, record)
+        scalars = None
+        if sample_vars:
+            scalars = Fesom14Reader.read_scalar_fields(
+                ds, timestep, mesh, list(sample_vars), mode_cfg)
+        return VelocityField(u=u, v=v, eta=eta, w=w, uv_layout="node",
+                             scalars=scalars, uv_vertical=placement)
+
+    @staticmethod
+    def read_scalar_fields(ds: xr.Dataset, timestep: int, mesh: Mesh,
+                           varnames: Sequence[str],
+                           mode_cfg: Optional["ModeConfig"] = None
+                           ) -> Dict[str, np.ndarray]:
+        """Read one record of variables sampled along the trajectories.
+
+        Parameters
+        ----------
+        ds : xarray.Dataset
+            A dataset from :meth:`open_dataset` (opened with these names in
+            ``mode.sample_vars``), or a time window of one.
+        timestep : int
+            The record, an index into ``ds.time``.
+        mesh : Mesh
+            The mesh from :meth:`load_mesh` (``mesh.sigma`` = the kept
+            levels).
+        varnames : sequence of str
+            The variables to read.
+        mode_cfg : ModeConfig, optional
+            ``Fdrift3D`` (without a mode, 2-D), ``sigma_layer``,
+            ``sigma_mean``.
+
+        Returns
+        -------
+        dict of str to numpy.ndarray
+            float64, C-contiguous. A 3-D variable (level-wise, or a vector
+            over the 3-D nodes): in 3-D tracking ``(K, N)`` on the kept
+            levels, every slot below a column's bed holding the column's
+            last value above it (forward-filled, so the sampler never meets
+            a fill value at a shallow neighbour); in 2-D tracking ``(N,)``,
+            reduced as u/v are (``mode.sigma_layer``, the depth mean with
+            ``mode.sigma_mean``, else level 0) from the filled column. A 2-D
+            variable ``(time, <horizontal>)``: ``(N,)``.
+
+        Raises
+        ------
+        ValueError
+            A variable missing from ``ds``, or not a FESOM 1.4 layout; a
+            record with no value in a wet slot or a value in a dry slot (3-D
+            variables, checked on every level before the fill and the cut),
+            or without a value at some node (2-D variables); a vector over
+            the 3-D nodes of another length than the mesh's 3-D nodes;
+            ``mode.sigma_layer`` that is not a kept level. The messages
+            name the variable, the record (by its instant), the node and
+            level, and the fix.
+        """
+        st = _statics(mesh)
+        record = _instant(ds, timestep)
+        is_3d = _is_3d(mode_cfg)
+        levelwise = _is_levelwise(ds)
+        out: Dict[str, np.ndarray] = {}
+        for name in varnames:
+            if name not in ds.data_vars:
+                raise ValueError(
+                    f"fesom14: the sampled variable {name!r} (mode.sample_vars) "
+                    "is not in the dataset; open_dataset opens the variables of "
+                    "mode.sample_vars, so open the data with the same mode, and "
+                    f"check that a file under data.ncinput holds {name!r}")
+            layout = _classify(tuple(ds[name].dims), levelwise)
+            if layout == "2d":
+                out[name] = _record_2d(ds, name, "mode.sample_vars", timestep,
+                                       st, record)
+                continue
+            full = _record_kn(ds, name, "mode.sample_vars", timestep, st,
+                              record)
+            filled = _filled(full, st)
+            if is_3d:
+                out[name] = np.ascontiguousarray(
+                    filled[:st.k_kept] if st.k_kept < filled.shape[0]
+                    else filled)
+            else:
+                out[name] = _reduce_2d(filled, st, mesh, mode_cfg)
+        return out
+
+    @staticmethod
+    def probe_uv_layout(ds: xr.Dataset, mode_cfg: Optional["ModeConfig"] = None,
+                        mesh: Optional[Mesh] = None) -> str:
+        """The layout of u/v: always ``"node"`` (FESOM 1.4 velocities are
+        nodal).
+
+        Run before the output file is created. With a mesh, it also refuses
+        from metadata alone (no record is read) what every read would
+        refuse: a sea-surface height that is not one value per 2-D node, and
+        in 2-D tracking a ``mode.sigma_layer`` that is not a kept level.
+
+        Parameters
+        ----------
+        ds : xarray.Dataset
+            A dataset from :meth:`open_dataset`.
+        mode_cfg : ModeConfig, optional
+            The run's mode.
+        mesh : Mesh, optional
+            The mesh from :meth:`load_mesh`, with the kept levels.
+
+        Returns
+        -------
+        str
+            ``"node"``.
+
+        Raises
+        ------
+        ValueError
+            See above (only with a mesh).
+        """
+        if mesh is not None:
+            st = _statics(mesh)
+            _eta_layout(ds, mode_cfg, st, _is_levelwise(ds))
+            if not _is_3d(mode_cfg):
+                _layer_index(mode_cfg, st)
+        return "node"
 
 
 # ---------------------------------------------------------------------------
@@ -1554,33 +1789,51 @@ def _where(da: xr.DataArray) -> str:
     return f" (first file {src})" if src else ""
 
 
-def _fields(ds: xr.Dataset) -> List[_Field]:
-    """The variables with a leading ``time`` dimension and their layouts.
+def _is_levelwise(ds: xr.Dataset) -> bool:
+    """True when a variable of the dataset is level-wise ``(time, <depth>,
+    <horizontal>)``."""
+    return any(ds[n].ndim == 3 and tuple(ds[n].dims[:1]) == (TIME_DIM,)
+               for n in ds.data_vars)
+
+
+def _classify(dims: Tuple[str, ...], levelwise: bool) -> Optional[str]:
+    """The layout of a variable from its dimensions: ``"levelwise"``,
+    ``"nodes3d"``, ``"2d"``, or None for none of them.
 
     A ``(time, nodes_3d)`` variable is a vector over the 3-D nodes, unless
-    the dataset is level-wise: there it is a 2-D field over a horizontal
-    dimension named ``nodes_3d`` (the level-wise writer's name).
+    the dataset is level-wise (``levelwise``): there it is a 2-D field over a
+    horizontal dimension named ``nodes_3d`` (the level-wise writer's name).
     """
+    if not dims or dims[0] != TIME_DIM:
+        return None
+    if len(dims) == 3 and dims[1] in DEPTH_DIMS and dims[2] in HORIZONTAL_DIMS:
+        return "levelwise"
+    if dims == (TIME_DIM, "nodes_3d") and not levelwise:
+        return "nodes3d"
+    if len(dims) == 2 and dims[1] in HORIZONTAL_DIMS:
+        return "2d"
+    return None
+
+
+def _fields(ds: xr.Dataset) -> List[_Field]:
+    """The variables with a leading ``time`` dimension and their layouts
+    (:func:`_classify`)."""
     names = [n for n in ds.data_vars if tuple(ds[n].dims[:1]) == (TIME_DIM,)]
     if not names:
         raise ValueError(
             f"fesom14: the dataset holds no variable with a {TIME_DIM!r} "
             "dimension; the data are checked against the mesh as opened by "
             "the fesom14 reader's open_dataset")
-    levelwise = any(ds[n].ndim == 3 for n in names)
+    levelwise = _is_levelwise(ds)
     out: List[_Field] = []
     for name in names:
         da = ds[name]
         dims = tuple(da.dims)
         where = _where(da)
-        if len(dims) == 3 and dims[1] in DEPTH_DIMS and dims[2] in HORIZONTAL_DIMS:
-            out.append(_Field(name, "levelwise", dims[2], da.sizes[dims[2]],
-                              dims[1], where))
-        elif dims == (TIME_DIM, "nodes_3d") and not levelwise:
-            out.append(_Field(name, "nodes3d", dims[1], da.sizes[dims[1]],
-                              None, where))
-        elif len(dims) == 2 and dims[1] in HORIZONTAL_DIMS:
-            out.append(_Field(name, "2d", dims[1], da.sizes[dims[1]], None,
+        layout = _classify(dims, levelwise)
+        if layout is not None:
+            out.append(_Field(name, layout, dims[-1], da.sizes[dims[-1]],
+                              dims[1] if layout == "levelwise" else None,
                               where))
         else:
             raise ValueError(
@@ -1745,13 +1998,13 @@ def _check_first_records(ds: xr.Dataset, fields: List[_Field],
         if f.layout == "nodes3d":
             node_of, level_of = _owners(facts.idx, facts.n3d)
             raise ValueError(
-                f"{head}: no value ({_MISSING_TEXT}) at 3-D node {i} (node "
+                f"{head}: no value ({MISSING_TEXT}) at 3-D node {i} (node "
                 f"{int(node_of[i])}, level {int(level_of[i])}); "
                 f"{int(missing.sum())} 3-D node(s) without one. Every 3-D node "
                 "of the mesh is wet, so a vector over the 3-D nodes holds a value "
                 f"in every entry. {fix}")
         raise ValueError(
-            f"{head}: no value ({_MISSING_TEXT}) at node {i}; "
+            f"{head}: no value ({MISSING_TEXT}) at node {i}; "
             f"{int(missing.sum())} node(s) without one. A 2-D field holds a "
             "value at every node of the mesh, which is wet at the surface "
             f"everywhere. {fix}")
@@ -1765,10 +2018,10 @@ def _check_mask_kn(head: str, first: np.ndarray, data: np.ndarray,
         return
     missing = wet & ~data
     extra = data & ~wet
-    n, k = _first_node_level(missing | extra)
+    n, k = first_node_level(missing | extra)
     mesh_state = "wet" if wet[k, n] else "dry (below the bed)"
     data_state = (f"the value {float(first[k, n]):g}" if data[k, n]
-                  else f"no value ({_MISSING_TEXT})")
+                  else f"no value ({MISSING_TEXT})")
     if extra.any() and np.all(first[extra] == 0):
         why = ("The data are written as 0 below the bed (not as a fill value "
                "such as NaN or 1e30): such a record looks wet at every level, "
@@ -1783,3 +2036,254 @@ def _check_mask_kn(head: str, first: np.ndarray, data: np.ndarray,
         f"level {k} (0-based): the mesh: {mesh_state}, the data: {data_state} "
         f"({int(missing.sum())} wet slot(s) without data, {int(extra.sum())} "
         f"dry slot(s) with data). {why}")
+
+
+# ---------------------------------------------------------------------------
+# Reads: velocities, sampled scalars, the sea-surface height
+# ---------------------------------------------------------------------------
+
+
+_RECORD_FIX = ("Replace the file holding this record (it is damaged, or of "
+               "another run or mesh), or keep the run's time window clear of "
+               "this record")
+
+
+@dataclass(frozen=True)
+class _Statics:
+    """What the reads take from the mesh."""
+
+    levels: np.ndarray              # (K_full,) the full level table
+    wet: np.ndarray                 # (K_full, N) the static wet mask
+    idx: Optional[np.ndarray]       # (N, K_full) ASCII only, -1 = dry
+    k_kept: int                     # mesh.sigma.size (max_levels may cut it)
+    n_nodes: int
+
+
+def _statics(mesh: Mesh) -> _Statics:
+    """The static facts of a mesh from :meth:`Fesom14Reader.load_mesh`."""
+    md = getattr(mesh, "metadata", None) or {}
+    missing = [k for k in ("fesom14_levels", "fesom14_wet") if k not in md]
+    if missing:
+        raise ValueError(
+            f"fesom14: the mesh has no {missing[0]!r} in mesh.metadata; the "
+            "data are read on a mesh built by the fesom14 reader's load_mesh "
+            "(mesh.type: fesom14). Build the mesh with that reader")
+    levels = np.asarray(md["fesom14_levels"], dtype=np.float64)
+    wet = np.asarray(md["fesom14_wet"], dtype=bool)
+    k_kept = int(np.asarray(mesh.sigma).size)
+    if not 1 <= k_kept <= levels.size:
+        raise ValueError(
+            f"fesom14: mesh.sigma holds {k_kept} levels, but the mesh's level "
+            f"table has {levels.size}; mesh.sigma keeps the first 1 .. "
+            f"{levels.size} of them (mode.max_levels cuts it)")
+    return _Statics(levels=levels, wet=wet, idx=md.get("fesom14_idx"),
+                    k_kept=k_kept, n_nodes=int(wet.shape[1]))
+
+
+def _last_wet(st: _Statics) -> np.ndarray:
+    """The index of each column's last wet level, ``(N,)`` (the mask is a
+    non-empty prefix of every column)."""
+    return st.wet.sum(axis=0) - 1
+
+
+def _instant(ds: xr.Dataset, timestep: int) -> str:
+    """A record of ``ds``, named by its instant."""
+    try:
+        return str(ds[TIME_DIM].values[timestep])
+    except (KeyError, IndexError):
+        return f"time index {timestep}"
+
+
+def _is_3d(mode_cfg: Optional["ModeConfig"]) -> bool:
+    return mode_cfg is not None and bool(getattr(mode_cfg, "Fdrift3D", False))
+
+
+def _uvw_names(mode_cfg: Optional["ModeConfig"]) -> Tuple[str, str, str]:
+    """The names of u, v and w (``mode.var_u/var_v/var_w`` or the defaults,
+    as :meth:`Fesom14Reader.open_dataset` takes them)."""
+    def name(attr: str, default: str) -> str:
+        value = getattr(mode_cfg, attr, None) if mode_cfg is not None else None
+        return str(value or default)
+
+    return (name("var_u", DEFAULT_VAR_U), name("var_v", DEFAULT_VAR_V),
+            name("var_w", DEFAULT_VAR_W))
+
+
+def _record_kn(ds: xr.Dataset, name: str, key: str, timestep: int,
+               st: _Statics, record: str) -> np.ndarray:
+    """One record of a 3-D variable as ``(K_full, N)`` levels x nodes, on
+    every level, checked against the static wet mask and otherwise as read
+    (NaN or fill values below the bed)."""
+    if name not in ds.data_vars:
+        raise ValueError(
+            f"fesom14: the dataset has no variable {name!r} ({key}); open the "
+            "data with the fesom14 reader's open_dataset and the run's mode, "
+            f"or set {key} to the name the files use")
+    da = ds[name]
+    dims = tuple(da.dims)
+    layout = _classify(dims, _is_levelwise(ds))
+    if layout == "levelwise":
+        arr = np.asarray(da.isel({TIME_DIM: timestep}).values)
+    elif layout == "nodes3d":
+        if st.idx is None:
+            raise ValueError(
+                f"fesom14: variable {name!r} is one vector over the 3-D nodes "
+                "(dimensions (time, nodes_3d)), but the mesh was built from "
+                "cell polygons, which give no 3-D node table to place its "
+                "entries on the levels. Set mesh.meshpath to the FESOM 1.4 "
+                f"ASCII mesh directory of the run (holding {', '.join(MESH_FILES)})")
+        vec = np.asarray(da.isel({TIME_DIM: timestep}).values)
+        n3d = int(np.count_nonzero(st.wet))
+        if vec.shape != (n3d,):
+            raise ValueError(
+                f"fesom14: variable {name!r}, record {record}: a vector over the "
+                f"3-D nodes with {vec.size} entries, but the ASCII mesh has "
+                f"{n3d} 3-D nodes. {_SAME_RUN}")
+        arr = gather_nodes3d(vec, st.idx)
+    else:
+        raise ValueError(
+            f"fesom14: variable {name!r} ({key}) has dimensions {dims}, but a "
+            f"3-D variable is level-wise ('{TIME_DIM}', <depth>, <horizontal>) "
+            f"or one vector over the 3-D nodes ('{TIME_DIM}', 'nodes_3d'), with "
+            f"<depth> one of {DEPTH_DIMS} and <horizontal> one of "
+            f"{HORIZONTAL_DIMS}. Set {key} to a 3-D variable of the files")
+    try:
+        check_record(arr, st.wet, name=name, record=record)
+    except ValueError as exc:
+        raise ValueError(f"{exc} {_RECORD_FIX}") from exc
+    return arr
+
+
+def _record_2d(ds: xr.Dataset, name: str, key: str, timestep: int,
+               st: _Statics, record: str) -> np.ndarray:
+    """One record of a 2-D field, float64 ``(N,)`` (a new array), with a
+    value at every node."""
+    da = ds[name]
+    if da.ndim != 2 or da.shape[1] != st.n_nodes:
+        raise ValueError(
+            f"fesom14: variable {name!r} ({key}) has the layout "
+            f"{_describe_layout(da)}, but a 2-D field holds one value per 2-D "
+            f"node: the mesh has {st.n_nodes}. {_SAME_RUN}")
+    vals = np.array(da.isel({TIME_DIM: timestep}).values, dtype=np.float64)
+    missing = ~is_data(vals)
+    if missing.any():
+        n = int(np.argmax(missing))
+        raise ValueError(
+            f"fesom14: variable {name!r}, record {record}: no value "
+            f"({MISSING_TEXT}) at node {n} ({int(missing.sum())} node(s) "
+            "without one); a 2-D field holds a value at every node of the "
+            f"mesh, which is wet at the surface everywhere. {_RECORD_FIX}")
+    return vals
+
+
+def _kept(full: np.ndarray, st: _Statics, dtype) -> np.ndarray:
+    """The kept levels of a checked record, 0 below the bed: a new
+    C-contiguous ``(K, N)`` array of ``dtype``."""
+    k = st.k_kept
+    out = np.zeros((k, full.shape[1]), dtype=dtype)
+    np.copyto(out, full[:k], where=st.wet[:k])
+    return out
+
+
+def _zeroed(full: np.ndarray, st: _Statics) -> np.ndarray:
+    """A checked record on every level, float64, 0 below the bed."""
+    return np.where(st.wet, np.asarray(full, dtype=np.float64), 0.0)
+
+
+def _filled(full: np.ndarray, st: _Statics) -> np.ndarray:
+    """A checked record on every level, float64, each slot below a column's
+    bed holding the column's last value above it."""
+    rows = np.minimum(np.arange(full.shape[0])[:, None], _last_wet(st)[None, :])
+    return np.take_along_axis(np.asarray(full, dtype=np.float64), rows, axis=0)
+
+
+def _layer_index(mode_cfg: Optional["ModeConfig"], st: _Statics) -> Optional[int]:
+    """``mode.sigma_layer`` as the index of a kept level, or None."""
+    layer = getattr(mode_cfg, "sigma_layer", None) if mode_cfg is not None else None
+    if layer is None:
+        return None
+    k = st.k_kept
+    if (isinstance(layer, (bool, np.bool_))
+            or not isinstance(layer, (int, np.integer)) or not 0 <= layer < k):
+        cut = (f"; mode.max_levels keeps {k} of the mesh's {st.levels.size} "
+               "levels" if k < st.levels.size else "")
+        raise ValueError(
+            f"fesom14: mode.sigma_layer = {layer!r} is not a kept level: 2-D "
+            "tracking on 3-D data reads the level of that 0-based index, one of "
+            f"0 .. {k - 1} ({st.levels[0]:g} .. {st.levels[k - 1]:g} m{cut}). "
+            "Set mode.sigma_layer to one of them, or mode.sigma_mean: true for "
+            "the depth mean")
+    return int(layer)
+
+
+def _reduce_2d(full: np.ndarray, st: _Statics, mesh: Mesh,
+               mode_cfg: Optional["ModeConfig"]) -> np.ndarray:
+    """``(N,)`` float64 from a checked record on every level, zeroed or
+    filled below the bed: the level ``mode.sigma_layer``, the depth mean
+    (``mode.sigma_mean``) or level 0."""
+    k = _layer_index(mode_cfg, st)
+    if k is not None:
+        return np.array(full[k], dtype=np.float64)
+    if mode_cfg is not None and getattr(mode_cfg, "sigma_mean", False):
+        return _depth_mean(full, st, mesh)
+    return np.array(full[0], dtype=np.float64)
+
+
+def _depth_mean(full: np.ndarray, st: _Statics, mesh: Mesh) -> np.ndarray:
+    """The mean of each column from the surface to its bed ``mesh.depth``.
+
+    Trapezoids between the kept levels down to ``L``, the column's last kept
+    wet level, then the value at ``L`` held constant from that level to the
+    bed (a column cut by ``max_levels`` above its bed), divided by the bed
+    depth; a column wet at the surface only (bed at 0 m) gives its surface
+    value.
+    """
+    k = st.k_kept
+    p = st.levels[:k]
+    last = np.minimum(_last_wet(st), k - 1)
+    a = np.asarray(full, dtype=np.float64)
+    acc = np.zeros(a.shape[1])
+    for j in range(k - 1):
+        seg = 0.5 * (a[j] + a[j + 1]) * (p[j + 1] - p[j])
+        acc += np.where(last >= j + 1, seg, 0.0)
+    depth = np.asarray(mesh.depth, dtype=np.float64)
+    acc += a[last, np.arange(a.shape[1])] * (depth - p[last])
+    out = a[0].copy()
+    deep = depth > 0.0
+    out[deep] = acc[deep] / depth[deep]
+    return out
+
+
+def _eta_layout(ds: xr.Dataset, mode_cfg: Optional["ModeConfig"],
+                st: _Statics, levelwise: bool) -> Optional[str]:
+    """The name of the sea-surface height when the dataset holds it, once it
+    is known to be one value per 2-D node (from metadata only)."""
+    name = str((getattr(mode_cfg, "var_eta", None) if mode_cfg is not None
+                else None) or DEFAULT_VAR_ETA)
+    if name not in ds.data_vars:
+        return None
+    da = ds[name]
+    layout = _classify(tuple(da.dims), levelwise)
+    if layout == "2d" and da.shape[1] == st.n_nodes:
+        return name
+    if layout == "nodes3d":
+        what = (f"one vector over the 3-D nodes ({da.shape[1]} entries along "
+                "'nodes_3d')")
+    else:
+        what = f"of the layout {_describe_layout(da)}"
+    raise ValueError(
+        f"fesom14: the sea-surface height {name!r} is {what}, but it holds one "
+        f"value per 2-D node: the mesh has {st.n_nodes} 2-D nodes. Leave the "
+        f"{name!r} files out of data.ncinput (the sea-surface height is then "
+        "0), or give it as a 2-D field over the 2-D nodes")
+
+
+def _read_eta(ds: xr.Dataset, timestep: int, mesh: Mesh,
+              mode_cfg: Optional["ModeConfig"], st: _Statics,
+              record: str) -> np.ndarray:
+    """The sea-surface height of a record, float64 ``(N,)``; zeros without
+    one."""
+    name = _eta_layout(ds, mode_cfg, st, _is_levelwise(ds))
+    if name is None:
+        return np.zeros(st.n_nodes, dtype=np.float64)
+    return _record_2d(ds, name, "mode.var_eta", timestep, st, record)

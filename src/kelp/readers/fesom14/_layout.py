@@ -30,8 +30,8 @@ import numpy as np
 import xarray as xr
 
 __all__ = ["FILL_THRESHOLD", "TIME_DIM", "DEPTH_DIMS", "HORIZONTAL_DIMS",
-           "is_data", "detect_form", "gather_nodes3d", "wet_mask_levelwise",
-           "check_record"]
+           "MISSING_TEXT", "is_data", "detect_form", "gather_nodes3d",
+           "first_node_level", "wet_mask_levelwise", "check_record"]
 
 #: a value with ``|x| >= FILL_THRESHOLD`` is a fill value, not data
 FILL_THRESHOLD = 1e29
@@ -46,7 +46,7 @@ DEPTH_DIMS: Tuple[str, ...] = ("depth", "lev", "level")
 HORIZONTAL_DIMS: Tuple[str, ...] = ("ncells", "nodes_2d", "nodes_3d")
 
 #: how a missing value is described in messages (FILL_THRESHOLD written out)
-_MISSING_TEXT = "NaN, an infinity or a fill value with |x| >= 1e29"
+MISSING_TEXT = "NaN, an infinity or a fill value with |x| >= 1e29"
 
 
 def is_data(x: np.ndarray) -> np.ndarray:
@@ -161,8 +161,20 @@ def gather_nodes3d(vec: np.ndarray, idx: np.ndarray) -> np.ndarray:
     return out
 
 
-def _first_node_level(sel: np.ndarray) -> Tuple[int, int]:
-    """Return ``(node, level)`` of the first True slot, lowest node first."""
+def first_node_level(sel: np.ndarray) -> Tuple[int, int]:
+    """Return ``(node, level)`` of the first True slot, lowest node first.
+
+    Parameters
+    ----------
+    sel : array_like of bool, shape (K, N)
+        Levels x nodes; at least one slot must be True.
+
+    Returns
+    -------
+    tuple of int
+        ``(node, level)``, 0-based: the lowest node with a True slot, and
+        its first True level.
+    """
     n = int(np.argmax(sel.any(axis=0)))
     k = int(np.argmax(sel[:, n]))
     return n, k
@@ -204,7 +216,7 @@ def wet_mask_levelwise(arr_kn: np.ndarray) -> np.ndarray:
         k_data = k_gap + 1 + int(np.argmax(wet[k_gap + 1:, n]))
         raise ValueError(
             f"fesom14: the data of node {n} is not a prefix of its column: "
-            f"no data at level {k_gap} ({_MISSING_TEXT}) but data again at "
+            f"no data at level {k_gap} ({MISSING_TEXT}) but data again at "
             f"level {k_data} (0-based indices; {int(cols.sum())} column(s) "
             f"with such a hole). A column must hold data from the surface "
             f"down to its bottom level and nothing below.")
@@ -259,14 +271,14 @@ def check_record(arr_kn: np.ndarray, wet: np.ndarray, *, name: str,
             "static mask, which is fixed once per mesh; a record whose bottom "
             "moved or that carries gaps cannot be read.")
     if n_missing:
-        n, k = _first_node_level(missing)
+        n, k = first_node_level(missing)
         also = (f"; also {n_extra} dry slot(s) with data" if n_extra else "")
         raise ValueError(
             f"fesom14: variable {name!r}, record {record}: no data at node "
             f"{n}, level {k} (0-based), a wet slot of the static mask "
-            f"({_MISSING_TEXT}; {n_missing} wet slot(s) without data in this "
+            f"({MISSING_TEXT}; {n_missing} wet slot(s) without data in this "
             f"record{also}). {rule}")
-    n, k = _first_node_level(extra)
+    n, k = first_node_level(extra)
     raise ValueError(
         f"fesom14: variable {name!r}, record {record}: data ({float(arr[k, n]):g}) "
         f"at node {n}, level {k} (0-based), a dry slot of the static mask "

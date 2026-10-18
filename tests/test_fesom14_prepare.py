@@ -33,7 +33,6 @@ pytest.importorskip("cftime")
 
 from kelp import tracking  # noqa: E402
 from kelp.core.config import MeshConfig, ModeConfig, NumericsConfig  # noqa: E402
-from kelp.core.io import VelocityField  # noqa: E402
 from kelp.core.mesh import find_nearest_nodes  # noqa: E402
 from kelp.core.particles import make_state  # noqa: E402
 from kelp.readers.fesom14 import Fesom14Reader  # noqa: E402
@@ -569,18 +568,6 @@ def test_reads_record_zero_only(tmp_path):
 # Datasets in turn, and the engine contract
 # ---------------------------------------------------------------------------
 
-class _StubReads(Fesom14Reader):
-    """The reader with zero velocities on the kept levels, so that
-    ``run_single_realization`` runs through ``prepare``."""
-
-    @staticmethod
-    def read_velocities(ds, timestep, mesh, mode_cfg=None, **kw):
-        k, n = mesh.sigma.size, mesh.n_nodes
-        return VelocityField(u=np.zeros((k, n)), v=np.zeros((k, n)),
-                             w=np.zeros((k, n)), eta=np.zeros(n),
-                             uv_layout="node", uv_vertical="level")
-
-
 def _rsr(mesh, ds):
     """One euler step of one particle inside the first triangle at 5 m."""
     tri = EXPECTED_TRI[0]
@@ -592,7 +579,7 @@ def _rsr(mesh, ds):
                               uv_interp="barycentric", w_interp="barycentric")
     with contextlib.redirect_stdout(io.StringIO()):
         return tracking.run_single_realization(
-            mesh, ds, _StubReads, st, MODE_3D, numerics, start_time_idx=0,
+            mesh, ds, Fesom14Reader, st, MODE_3D, numerics, start_time_idx=0,
             n_steps=1)
 
 
