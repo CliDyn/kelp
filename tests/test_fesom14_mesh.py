@@ -356,8 +356,13 @@ def test_polygons_deptho_in_the_data_file(tmp_path, island):
     bad_depth[7] += 15.0
     bad = _write_levelwise(tmp_path / "bad.nc", lon, lat, lon_b, lat_b, ncol,
                            deptho=bad_depth)
-    with pytest.raises(ValueError, match=r"node 7\b.*deptho"):
+    with pytest.raises(ValueError, match=r"node 7\b.*deptho") as info:
         _load(bad)
+    # deptho DEEPER than the last level with data: data are missing where
+    # deptho says ocean -- not the "0 written below the bed" explanation
+    msg = str(info.value)
+    assert "deeper" in msg and "missing" in msg, msg
+    assert "below the bed" not in msg, msg
 
 
 def test_polygons_without_deptho_cannot_see_zero_below_bed(tmp_path, island):
