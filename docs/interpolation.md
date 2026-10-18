@@ -463,8 +463,9 @@ f_i(z) = (1-\alpha)\,f_{k,i} + \alpha\,f_{k+1,i}, \qquad
 \alpha = \frac{z_i - p_k}{p_{k+1} - p_k}, $$
 
 with `p_k <= z_i < p_{k+1}`, and `f_i = f_{k,i}` read directly when `z_i` is on
-a point or at an end (of two coincident points the deeper; a spacing
-`< 1e-12 m` reads `p_k`, the shallower). The data points `p` are the layer
+a point or at an end (of two coincident points the deeper — except at
+the surface end: at or above `p_0` point 0 is read even when point 1
+coincides with it; a spacing `< 1e-12 m` reads `p_k`, the shallower). The data points `p` are the layer
 centres `(z_k + z_{k+1})/2` (`"layer_linear"`, `K-1` points) or the levels
 (`"level"`, `K` points), and `ℓ_i` is the node's last usable point,
 

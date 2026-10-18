@@ -19,8 +19,11 @@ reader's declaration ``mesh.metadata["uv_data_last"][i]`` when present
 (the last finite point of the field's own vertical axis).  ``-1`` declares
 the surface only: point 0 is the only one read, and the record check
 requires it to be finite — a column with no data at all must not be a mesh
-node, or must carry a finite surface value.  A non-finite ``depth_i``
-gives ``last_i = 0``.
+node, or must carry a finite surface value.  Infinite bed depths follow
+the formula as written: ``+inf`` keeps every point (``last_i = M-1``, then
+capped by ``D_i``), ``-inf`` the surface point only.  A NaN ``depth_i``
+compares false with every ``lower_k``, so ``last_i = 0`` (set explicitly:
+a sorted search would place the NaN after the last point).
 
 Above ``p[0]`` and below ``p[last_i]`` the value of that point is used (no
 extrapolation); in between, the two bracketing points are blended.  The
@@ -32,7 +35,9 @@ cached in ``mesh._uv_depth_points``; an entry is valid while
 ``mesh.sigma``, ``mesh.depth`` and ``mesh.metadata["uv_data_last"]`` are
 the very objects it was built from (identity, never ``id()``), so a
 ``max_levels`` cut or a new depth or declaration rebuilds it.  Replace
-those arrays to change them; an in-place write is not detected.
+those arrays to change them; an in-place write is not detected — so the
+declaration is frozen (``setflags(write=False)``) once a table uses it,
+and writing into it raises.
 
 The record check (:func:`check_depth_linear_record`) refuses a field whose
 u or v is non-finite at a point ``<= last_i`` and stamps a passing field
@@ -159,6 +164,10 @@ def _build_depth_points(sigma, depth, decl, placement: str,
                 "only: point 0 is read and must be finite), got minimum "
                 f"{int(dl.min())}")
         last = np.minimum(last, dl.astype(np.int64))
+        if isinstance(decl, np.ndarray):
+            # the table holds the declaration by identity: an in-place write
+            # would go unseen, so it raises from now on (assign a new array)
+            decl.setflags(write=False)
     last = np.maximum(last, 0).astype(np.int32)
     p.setflags(write=False)
     last.setflags(write=False)

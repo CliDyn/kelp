@@ -145,6 +145,22 @@ def test_layer_linear_matches_find_layer_on_many_depths():
     assert dp.last.tolist() == want
 
 
+def test_declaration_frozen_once_used():
+    """The table keeps the declaration by identity, so the engine freezes
+    it: an in-place write after the first use raises instead of leaving a
+    stale table in force; a new array is a new declaration."""
+    vu = _vu()
+    decl = np.array([0, 2, 1, 1], dtype=np.int32)
+    mesh = _mesh()
+    mesh.metadata["uv_data_last"] = decl
+    vu.depth_points(mesh, "level")
+    assert not decl.flags.writeable
+    with pytest.raises(ValueError, match="read-only"):
+        decl[0] = 3
+    mesh.metadata["uv_data_last"] = np.array([3, 2, 1, 0], dtype=np.int32)
+    assert vu.depth_points(mesh, "level").last.tolist() == [3, 2, 1, 0]
+
+
 def test_declared_prefix_caps_last():
     vu = _vu()
     mesh = _mesh(decl=[0, 2, 1, 1])

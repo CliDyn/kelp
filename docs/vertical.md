@@ -134,7 +134,9 @@ NaN bed depth compares false with every `lower_k`, so the set is empty and
 `last_i = 0` (the code sets it explicitly: a sorted search would place the
 NaN after the last point). The table is cached on the
 mesh and rebuilt whenever `mesh.sigma`, `mesh.depth` or the declaration is
-replaced (a `max_levels` cut included; an in-place write is not seen).
+replaced (a `max_levels` cut included; an in-place write is not seen — the
+declaration is therefore frozen once a table uses it, and writing into it
+raises).
 
 The rule at one vertex `i` and particle depth `z`:
 

@@ -1418,8 +1418,9 @@ def test_prepare_called_per_dataset(tmp_path, monkeypatch):
 
 def _declaring_reader(placement):
     """A reader whose ``prepare`` declares the dataset's own u/v data prefix
-    (``ds.attrs["decl"]``, a new array each call) and records its calls
-    (dataset name, kept levels).  ``"layer_linear"``: the FESOM2 reader (the
+    (``ds.attrs["decl"]``, a new array each call — written INTO the existing
+    one when ``ds.attrs["in_place"]``) and records its calls (dataset name,
+    kept levels); it raises after declaring when ``ds.attrs["fail"]``.  ``"layer_linear"``: the FESOM2 reader (the
     option marks its fields); ``"level"``: u = A + B·z on the levels of
     ``mesh.sigma`` (``native_uv_vertical = "level"``), w = v = 0."""
     base = get_reader("fesom2")
@@ -1429,8 +1430,14 @@ def _declaring_reader(placement):
         @staticmethod
         def prepare(mesh, ds):
             calls.append((ds.attrs["name"], int(mesh.sigma.size)))
-            mesh.metadata["uv_data_last"] = np.array(ds.attrs["decl"],
-                                                     dtype=np.int32)
+            decl = np.array(ds.attrs["decl"], dtype=np.int32)
+            old = mesh.metadata.get("uv_data_last")
+            if ds.attrs.get("in_place") and old is not None:
+                old[:] = decl            # a reader mistake: written in place
+            else:
+                mesh.metadata["uv_data_last"] = decl
+            if ds.attrs.get("fail"):
+                raise RuntimeError(f"prepare failed for {ds.attrs['name']}")
     if placement == "level":
         def read_velocities(ds, timestep, mesh, mode_cfg=None, **kw):
             z = np.abs(np.asarray(mesh.sigma, dtype=np.float64))
@@ -1487,6 +1494,43 @@ def test_switching_datasets_prepares_again(tmp_path, placement, order):
         assert_bitwise(out[2][k], out[0][k], k)
     assert not np.array_equal(out[1]["vel_u"], out[0]["vel_u"])
     assert [c[0] for c in calls] == list(order)
+    for ds in dss.values():
+        ds.close()
+
+
+@pytest.mark.parametrize("placement", sorted(_SWITCH))
+def test_failed_prepare_leaves_the_mesh_unprepared(tmp_path, placement):
+    """A → B (whose ``prepare`` replaces the declaration and then raises) →
+    A: the failed call leaves no stamp, so A is prepared again and reads
+    with its own declaration, bit for bit the first A run."""
+    mesh, dss, run, calls, u = _switch_env(tmp_path, placement)
+    first = run("A")
+    dss["B"].attrs["fail"] = True
+    with pytest.raises(RuntimeError, match="prepare failed for B"):
+        run("B")
+    assert "kelp_prepared_dataset" not in mesh.metadata
+    assert "kelp_prepared_sigma" not in mesh.metadata
+    again = run("A")
+    assert again["vel_u"][0, 0] == pytest.approx(u["A"], rel=0, abs=1e-15)
+    for k in ("lon", "lat", "z", "vel_u"):
+        assert_bitwise(again[k], first[k], k)
+    assert [c[0] for c in calls] == ["A", "B", "A"]
+    for ds in dss.values():
+        ds.close()
+
+
+@pytest.mark.parametrize("placement", sorted(_SWITCH))
+def test_declaration_written_in_place_is_refused(tmp_path, placement):
+    """The depth-point table holds the declaration by identity, so a
+    ``prepare`` that writes INTO the declaration array would not be seen:
+    the engine freezes the array once a table uses it, and the in-place
+    write raises at the reader's own line."""
+    mesh, dss, run, calls, u = _switch_env(tmp_path, placement)
+    run("A")
+    assert not mesh.metadata["uv_data_last"].flags.writeable
+    dss["B"].attrs["in_place"] = True
+    with pytest.raises(ValueError, match="read-only"):
+        run("B")
     for ds in dss.values():
         ds.close()
 

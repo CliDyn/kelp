@@ -573,7 +573,10 @@ def _prepare_dataset(reader, mesh, ds, *, always: bool = False) -> None:
     mesh facts such as ``uv_data_last``), or ``max_levels`` re-cut the
     levels.  ``always`` (``run_tracking``, right after ``open_dataset``)
     runs it unconditionally.  A dataset without ``attrs`` is prepared every
-    time.  Readers without the hook: nothing is created or stored.
+    time.  The two stamps are removed before the hook runs and set only
+    after it returns, so a hook that raises leaves the mesh unprepared (the
+    next call prepares again).  Readers without the hook: nothing is created
+    or stored.
     """
     prep = getattr(reader, "prepare", None)
     if prep is None:
@@ -592,6 +595,10 @@ def _prepare_dataset(reader, mesh, ds, *, always: bool = False) -> None:
             and md.get("kelp_prepared_dataset") == token
             and md.get("kelp_prepared_sigma") is mesh.sigma):
         return
+    # unprepared while the hook runs: a hook that replaces mesh facts and
+    # then raises must not leave the stamp of the dataset prepared before
+    md.pop("kelp_prepared_dataset", None)
+    md.pop("kelp_prepared_sigma", None)
     prep(mesh, ds)
     md["kelp_prepared_dataset"] = token
     md["kelp_prepared_sigma"] = mesh.sigma

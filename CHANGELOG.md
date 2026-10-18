@@ -48,7 +48,10 @@ the tracker was developed privately from 2026-06.
   `prepare` runs right after `open_dataset` and again on a direct
   `run_single_realization` whenever the mesh was prepared for another dataset
   (named by the token `ds.attrs["kelp_dataset_token"]`) or other kept levels
-  since, so mesh facts a dataset declares (`uv_data_last`) are its own.
+  since, so mesh facts a dataset declares (`uv_data_last`) are its own; a
+  `prepare` that raises leaves the mesh unprepared, and the declaration is frozen
+  once a depth-point table uses it (assign a new array each call — writing into
+  it raises).
 - The cost of the option is measured by
   `benchmarks/single_node/depth_linear_cost.py` (rows pending).
 
