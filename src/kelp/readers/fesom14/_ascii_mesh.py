@@ -21,31 +21,42 @@ list-directed input. This module reads the four that KELP needs:
     gives, for each 2-D node in turn, ``max_num_layers`` slots holding the
     1-based 3-D node at each level of its column, or a value ``<= 0``
     (normally -999) when the slot is dry; ``nod2D_corresp_to_nod3D``, the
-    1-based 2-D node of every 3-D node; and a block about 3-D elements, which
-    is not read.
+    1-based 2-D node of every 3-D node; and a block about 3-D elements.
+    Reading stops before that last block, so it is never parsed and need not
+    even be numeric.
 
 Each file is read as one stream of whitespace-separated numbers, the way a
 list-directed read sees it, so how the records are spread over lines does
 not matter. The number of values must still match the counts the headers
 give, which catches a record with a missing or an extra column. Fortran
-``D`` exponents (``1.0D+01``, ``-2.5d-3``) read like ``E`` exponents; a value
-written with one is still refused where the file holds an integer (a count,
-an index or a flag), since Fortran writes integers without exponents.
+``D`` exponents (``1.0D+01``, ``-2.5d-3``) read like ``E`` exponents
+everywhere. Where the file holds an integer (a count, an index or a flag),
+any number whose value is an integer is accepted (``7``, ``+7``, ``7.0``,
+``7E0``, ``7D0``) and any other value is refused. A file is read and parsed
+whole, so the peak memory while reading it is about three times its size.
 
 The level table comes from ``nod3d.out``: walking its ``z`` values in file
 order, every change of value starts a new level; the depths are stored
-positive down, the first exactly 0. Before anything is returned, the index
-table, the 2-D node of every 3-D node and the 3-D node depths are checked
-against each other (see :func:`read_ascii_mesh`). A failed check raises a
-``ValueError`` that names the file and the first offending index.
+positive down. The first level is the surface, stored as exactly 0 (a first
+``z`` within 1e-6 m of 0 counts as the surface). Before anything is
+returned, the index table, the 2-D node of every 3-D node and the 3-D node
+depths are checked against each other (see :func:`read_ascii_mesh`). A
+failed check raises a ``ValueError`` that names the file and the first
+offending index.
+
+Meshes whose top wet node lies below z = 0 (meshes with ice-shelf cavities)
+are not supported: every column must start at the surface, and slot ``k`` of
+every column must lie at the ``k``-th level. Such a mesh is refused with a
+message that says so.
 """
 from __future__ import annotations
 
 import os
+import re
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, NoReturn
+from typing import Callable
 
 import numpy as np
 
@@ -64,6 +75,15 @@ _D_TO_E = bytes.maketrans(b"Dd", b"EE")
 # the bytes that separate numbers (C isspace; also what bytes.split uses)
 _BLANK = np.zeros(256, dtype=bool)
 _BLANK[list(b" \t\n\r\x0b\x0c")] = True
+
+# bytes scanned at a time when looking for the end of a token
+_CHUNK = 1 << 24
+
+# a first z within this distance of 0 (m) is the surface
+_SURFACE_TOL = 1e-6
+
+# two z values closer than this (m) differ only by rounding
+_ROUNDING = 1e-3
 
 
 @dataclass(frozen=True)
@@ -122,18 +142,21 @@ def read_ascii_mesh(meshdir: str | os.PathLike) -> AsciiMesh:
         If ``meshdir`` lacks one of the four files.
     ValueError
         If a file cannot be read as a stream of numbers, its length disagrees
-        with its header, or the files disagree. The checks, in order: every
-        triangle corner is a node of ``nod2d.out``; the first 3-D node lies
-        at z = 0 and each new level is deeper than the one before (otherwise
-        ``nod3d.out`` is not level-major); every slot of
-        ``nod3D_below_nod2D`` is ``<= 0`` (dry) or a 3-D node, and every entry
-        of ``nod2D_corresp_to_nod3D`` is a 2-D node; the wet slots of each
-        column come first, without gaps, and include the surface slot; every
-        3-D node fills exactly one slot; each 3-D node's slot belongs to the
-        2-D node ``nod2D_corresp_to_nod3D`` gives it, and lies at the level
-        of its ``z`` in ``nod3d.out``; within each level the 3-D nodes follow
-        increasing 2-D order. The message names the file and the first
-        offending index (1-based, as in the files) and says how to fix it.
+        with its header, an integer field holds a value that is not an
+        integer, or the files disagree. The checks, in order: every triangle
+        corner is a node of ``nod2d.out``; the first 3-D node lies at z = 0
+        (within 1e-6 m), no 3-D node lies above the surface, and each new
+        level is deeper than the one before (otherwise ``nod3d.out`` is not
+        level-major); every slot of ``nod3D_below_nod2D`` is ``<= 0`` (dry) or
+        a 3-D node, and every entry of ``nod2D_corresp_to_nod3D`` is a 2-D
+        node; the wet slots of each column come first, without gaps, and
+        include the surface slot; every 3-D node fills exactly one slot; each
+        3-D node's slot belongs to the 2-D node ``nod2D_corresp_to_nod3D``
+        gives it, and lies at the level of its ``z`` in ``nod3d.out`` (a mesh
+        with ice-shelf cavities fails here and is refused as unsupported);
+        within each level the 3-D nodes follow increasing 2-D order. The
+        message names the file and the first offending index (1-based, as in
+        the files) and says how to fix it.
     """
     meshdir = Path(meshdir)
     missing = [name for name in MESH_FILES if not (meshdir / name).is_file()]
@@ -167,12 +190,8 @@ def read_ascii_mesh(meshdir: str | os.PathLike) -> AsciiMesh:
 # ---------------------------------------------------------------------------
 
 
-def _read_numbers(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    """All whitespace-separated numbers of a file, in order, as float64.
-
-    Returns the values and, per value, whether its token was written with a
-    Fortran ``D`` exponent (read as ``E``).
-    """
+def _read_bytes(path: Path) -> bytes:
+    """The bytes of a mesh file; refuses an empty one."""
     raw = path.read_bytes()
     if not raw or raw.isspace():
         # (numpy parses a whitespace-only string as [-1.0])
@@ -180,14 +199,24 @@ def _read_numbers(path: Path) -> tuple[np.ndarray, np.ndarray]:
             f"{path.name}: the file is empty; write the mesh file again from "
             f"the mesh generator ({path})"
         )
-    values = _parse(raw)
-    if values is not None:
-        # (zeros are not touched in memory until written)
-        return values, np.zeros(values.size, dtype=bool)
-    if b"D" in raw or b"d" in raw:
-        values = _parse(raw.translate(_D_TO_E))
-        if values is not None:
-            return values, _d_exponent_tokens(raw, values.size, path)
+    return raw
+
+
+def _read_numbers(path: Path) -> np.ndarray:
+    """All whitespace-separated numbers of a file, in order, as float64."""
+    return _parse_numbers(_read_bytes(path), path)
+
+
+def _parse_numbers(raw: bytes, path: Path) -> np.ndarray:
+    """The numbers of ``raw`` as float64; a Fortran D exponent reads as E."""
+    text = raw.translate(_D_TO_E) if (b"D" in raw or b"d" in raw) else raw
+    with warnings.catch_warnings():
+        # older numpy only warns and returns the numbers before a bad token
+        warnings.simplefilter("error", DeprecationWarning)
+        try:
+            return np.fromstring(text, dtype=np.float64, sep=" ")
+        except (ValueError, DeprecationWarning):
+            pass
     position, token = _first_non_number(raw)
     where = (f"number {position} of the file, {token!r}, is not a number"
              if token is not None else "the file holds something that is not a number")
@@ -196,36 +225,6 @@ def _read_numbers(path: Path) -> tuple[np.ndarray, np.ndarray]:
         "numbers (with a decimal point, not a comma) separated by blanks or "
         f"line breaks ({path})"
     )
-
-
-def _parse(raw: bytes) -> np.ndarray | None:
-    """The numbers of ``raw`` as float64, or None if a token is not a number."""
-    with warnings.catch_warnings():
-        # older numpy only warns and returns the numbers before a bad token
-        warnings.simplefilter("error", DeprecationWarning)
-        try:
-            return np.fromstring(raw, dtype=np.float64, sep=" ")
-        except (ValueError, DeprecationWarning):
-            return None
-
-
-def _d_exponent_tokens(raw: bytes, n_values: int, path: Path) -> np.ndarray:
-    """Per value of ``raw``: does its token contain a ``D`` or ``d``?"""
-    buf = np.frombuffer(raw, dtype=np.uint8)
-    blank = _BLANK[buf]
-    start = ~blank
-    start[1:] &= blank[:-1]
-    starts = np.flatnonzero(start)
-    if starts.size != n_values:
-        raise ValueError(
-            f"{path.name}: the file splits into {starts.size} blank-separated "
-            f"tokens, but {n_values} numbers were read from it; remove unusual "
-            f"control characters from the file ({path})"
-        )
-    d_at = np.flatnonzero((buf == ord("D")) | (buf == ord("d")))
-    dexp = np.zeros(n_values, dtype=bool)
-    dexp[np.searchsorted(starts, d_at, side="right") - 1] = True
-    return dexp
 
 
 def _first_non_number(raw: bytes) -> tuple[int | None, str | None]:
@@ -241,11 +240,29 @@ def _first_non_number(raw: bytes) -> tuple[int | None, str | None]:
     return None, None
 
 
-def _header(values: np.ndarray, dexp: np.ndarray, path: Path, what: str) -> int:
+def _cut_after_tokens(raw: bytes, count: int) -> bytes:
+    """``raw`` up to its ``count``-th blank-separated token (all of it when it
+    holds no more), scanned in chunks so that no per-token array is built."""
+    buf = np.frombuffer(raw, dtype=np.uint8)
+    seen = 0
+    prev_blank = True
+    for lo in range(0, buf.size, _CHUNK):
+        blank = _BLANK[buf[lo:lo + _CHUNK]]
+        start = ~blank
+        start[0] &= prev_blank
+        start[1:] &= blank[:-1]
+        n_start = int(np.count_nonzero(start))
+        if seen + n_start > count:
+            # token number count + 1 starts in this chunk: cut before it
+            return raw[:lo + int(np.flatnonzero(start)[count - seen])]
+        seen += n_start
+        prev_blank = bool(blank[-1])
+    return raw
+
+
+def _header(values: np.ndarray, path: Path, what: str) -> int:
     """The leading count of a file: a positive integer."""
     first = values[0]
-    if dexp[0]:
-        _refuse_d_exponent(path, f"the first number, {what},", first)
     if not (np.isfinite(first) and first == np.trunc(first) and 1 <= first < _EXACT_INT):
         raise ValueError(
             f"{path.name}: the first number must be {what}, a positive "
@@ -255,11 +272,8 @@ def _header(values: np.ndarray, dexp: np.ndarray, path: Path, what: str) -> int:
     return int(first)
 
 
-def _records(
-    values: np.ndarray, dexp: np.ndarray, path: Path, count: int, layout: tuple[str, ...]
-) -> tuple[np.ndarray, np.ndarray]:
-    """The ``count`` records after the header as a (count, width) array, and
-    the same view of the D-exponent flags."""
+def _records(values: np.ndarray, path: Path, count: int, layout: tuple[str, ...]) -> np.ndarray:
+    """The ``count`` records after the header, as a (count, width) array."""
     width = len(layout)
     expected = 1 + count * width
     if values.size != expected:
@@ -269,14 +283,11 @@ def _records(
             f"file holds {values.size}; check that every record has exactly "
             f"{width} numbers and that the header count is right ({path})"
         )
-    return values[1:].reshape(count, width), dexp[1:].reshape(count, width)
+    return values[1:].reshape(count, width)
 
 
-def _integers(
-    values: np.ndarray, dexp: np.ndarray, path: Path, name: Callable[[int], str]
-) -> np.ndarray:
-    """``values`` as int64; refuses the first value that is not an integer or
-    was written with a ``D`` exponent.
+def _integers(values: np.ndarray, path: Path, name: Callable[[int], str]) -> np.ndarray:
+    """``values`` as int64; refuses the first value that is not an integer.
 
     ``name(i)`` describes the position of the flat index ``i``.
     """
@@ -284,11 +295,8 @@ def _integers(
     bad = ~finite
     bad[finite] = (values[finite] != np.trunc(values[finite])) | (
         np.abs(values[finite]) >= _EXACT_INT)
-    bad |= dexp
     if bad.any():
         i = int(np.argmax(bad))
-        if dexp[i]:
-            _refuse_d_exponent(path, name(i), values[i])
         raise ValueError(
             f"{path.name}: {name(i)} is {float(values[i])!r}, which is not an integer; "
             f"this position of the file holds an integer index or flag, so the "
@@ -297,13 +305,12 @@ def _integers(
     return values.astype(np.int64)
 
 
-def _refuse_d_exponent(path: Path, what: str, value: float) -> NoReturn:
-    raise ValueError(
-        f"{path.name}: {what} is written with a Fortran D exponent (it reads as "
-        f"{float(value)!r}), but this position of the file holds an integer, "
-        f"which Fortran writes without an exponent; the file is corrupt or its "
-        f"records are shifted ({path})"
-    )
+def _rounding_hint(z_a: float, z_b: float) -> str:
+    """A sentence for two z values that differ only by rounding, else ''."""
+    if abs(z_a - z_b) < _ROUNDING:
+        return (" The two values differ only by rounding: a level's z must be "
+                "written identically for every node of the level.")
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -312,9 +319,9 @@ def _refuse_d_exponent(path: Path, what: str, value: float) -> NoReturn:
 
 
 def _read_nod2d(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    values, dexp = _read_numbers(path)
-    n2d = _header(values, dexp, path, "the number of 2-D nodes")
-    recs, drecs = _records(values, dexp, path, n2d, ("index", "lon", "lat", "flag"))
+    values = _read_numbers(path)
+    n2d = _header(values, path, "the number of 2-D nodes")
+    recs = _records(values, path, n2d, ("index", "lon", "lat", "flag"))
     lon = np.ascontiguousarray(recs[:, 1])
     lat = np.ascontiguousarray(recs[:, 2])
     bad = ~(np.isfinite(lon) & np.isfinite(lat))
@@ -325,7 +332,7 @@ def _read_nod2d(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
             f"(lon {float(lon[n])!r}, lat {float(lat[n])!r}); every node needs finite "
             f"coordinates in degrees ({path})"
         )
-    flag = _integers(recs[:, 3], drecs[:, 3], path, lambda n: f"the flag of 2-D node {n + 1}")
+    flag = _integers(recs[:, 3], path, lambda n: f"the flag of 2-D node {n + 1}")
     info = np.iinfo(np.int8)
     bad = (flag < info.min) | (flag > info.max)
     if bad.any():
@@ -339,11 +346,11 @@ def _read_nod2d(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def _read_elem2d(path: Path, n2d: int) -> np.ndarray:
-    values, dexp = _read_numbers(path)
-    n_elem = _header(values, dexp, path, "the number of triangles")
-    recs, drecs = _records(values, dexp, path, n_elem, ("node 1", "node 2", "node 3"))
+    values = _read_numbers(path)
+    n_elem = _header(values, path, "the number of triangles")
+    recs = _records(values, path, n_elem, ("node 1", "node 2", "node 3"))
     nodes = _integers(
-        recs.ravel(), drecs.ravel(), path,
+        recs.ravel(), path,
         lambda i: f"corner {i % 3 + 1} of element {i // 3 + 1}",
     ).reshape(n_elem, 3)
     bad = (nodes < 1) | (nodes > n2d)
@@ -360,9 +367,9 @@ def _read_elem2d(path: Path, n2d: int) -> np.ndarray:
 
 def _read_nod3d_z(path: Path) -> np.ndarray:
     """The z column of ``nod3d.out`` (metres, negative down)."""
-    values, dexp = _read_numbers(path)
-    n3d = _header(values, dexp, path, "the number of 3-D nodes")
-    recs, _ = _records(values, dexp, path, n3d, ("index", "lon", "lat", "z", "flag"))
+    values = _read_numbers(path)
+    n3d = _header(values, path, "the number of 3-D nodes")
+    recs = _records(values, path, n3d, ("index", "lon", "lat", "z", "flag"))
     z = np.ascontiguousarray(recs[:, 3])
     bad = ~np.isfinite(z)
     if bad.any():
@@ -376,43 +383,57 @@ def _read_nod3d_z(path: Path) -> np.ndarray:
 
 def _level_table(z3d: np.ndarray, meshdir: Path) -> tuple[np.ndarray, np.ndarray]:
     """Levels (positive down) from the z values in file order, and the level
-    of each 3-D node. Refuses a first node below the surface and a level that
-    is not deeper than the one before it."""
-    if z3d[0] != 0.0:
+    of each 3-D node. Refuses a first node away from the surface, a node above
+    the surface, and a level that is not deeper than the one before it."""
+    if abs(z3d[0]) > _SURFACE_TOL:
         raise ValueError(
-            f"{NOD3D}: 3-D node 1 has z = {z3d[0]:g} m, but the first 3-D node "
-            f"of a FESOM 1.4 mesh lies at the surface, z = 0; the file must "
-            f"list the surface nodes first (level-major order) ({meshdir})"
+            f"{NOD3D}: 3-D node 1 has z = {float(z3d[0])!r} m, but the first 3-D "
+            f"node of a FESOM 1.4 mesh lies at the surface, z = 0 (within "
+            f"{_SURFACE_TOL:g} m); the file must list the surface nodes first "
+            f"(level-major order) ({meshdir})"
+        )
+    above = np.flatnonzero(z3d[1:] > _SURFACE_TOL)
+    if above.size:
+        j = int(above[0]) + 1
+        raise ValueError(
+            f"{NOD3D}: 3-D node {j + 1} has z = {float(z3d[j])!r} m, above the "
+            f"surface; FESOM 1.4 writes z negative down (0 at the surface), so "
+            f"a file with positive-down depths must have its z column negated "
+            f"({meshdir})"
         )
     new_level = np.empty(z3d.size, dtype=bool)
     new_level[0] = True
     new_level[1:] = z3d[1:] != z3d[:-1]
     starts = np.flatnonzero(new_level)
-    levels = -z3d[starts] + 0.0  # + 0.0 turns -0.0 into 0.0
+    levels = -z3d[starts]
     bad = np.flatnonzero(np.diff(levels) <= 0.0)
     if bad.size:
         k = int(bad[0]) + 1
         j = int(starts[k])
         raise ValueError(
             f"{NOD3D} is not level-major: 3-D node {j + 1} has z = "
-            f"{z3d[j]:g} m, not deeper than the level before it (z = "
-            f"{z3d[j - 1]:g} m). FESOM 1.4 lists every surface node first and "
-            f"then each deeper level in turn, so z only goes down through the "
-            f"file; a file ordered column by column must be renumbered "
-            f"level by level, together with {AUX3D} ({meshdir})"
+            f"{float(z3d[j])!r} m, not deeper than the level before it (z = "
+            f"{float(z3d[j - 1])!r} m).{_rounding_hint(z3d[j], z3d[j - 1])} "
+            f"FESOM 1.4 lists every surface node first and then each deeper "
+            f"level in turn, so z only goes down through the file; a file "
+            f"ordered column by column must be renumbered level by level, "
+            f"together with {AUX3D} ({meshdir})"
         )
+    levels[0] = 0.0  # the surface, within the tolerance (also no -0.0)
     level_of = np.cumsum(new_level) - 1
     return levels, level_of
 
 
 def _read_aux3d(path: Path, n2d: int, n3d: int) -> tuple[int, np.ndarray, np.ndarray]:
     """``max_num_layers``, the (N, max_num_layers) slot table and the 2-D node
-    of every 3-D node (both 1-based, as in the file). The trailing block about
-    3-D elements is not interpreted."""
-    values, dexp = _read_numbers(path)
-    max_layers = _header(values, dexp, path, "max_num_layers")
+    of every 3-D node (both 1-based, as in the file). Parsing stops before the
+    trailing block about 3-D elements."""
+    raw = _read_bytes(path)
+    first = re.match(rb"\s*(\S+)", raw).group(1)
+    max_layers = _header(_parse_numbers(first, path), path, "max_num_layers")
     n_table = n2d * max_layers
     need = 1 + n_table + n3d
+    values = _parse_numbers(_cut_after_tokens(raw, need), path)
     if values.size < need:
         raise ValueError(
             f"{path.name}: the file holds {values.size} numbers, fewer than the "
@@ -422,12 +443,12 @@ def _read_aux3d(path: Path, n2d: int, n3d: int) -> tuple[int, np.ndarray, np.nda
             f"belongs to the same mesh as {NOD2D} and {NOD3D} ({path})"
         )
     table = _integers(
-        values[1:1 + n_table], dexp[1:1 + n_table], path,
+        values[1:1 + n_table], path,
         lambda i: (f"nod3D_below_nod2D for 2-D node {i // max_layers + 1}, "
                    f"slot {i % max_layers + 1}"),
     ).reshape(n2d, max_layers)
     corresp = _integers(
-        values[1 + n_table:need], dexp[1 + n_table:need], path,
+        values[1 + n_table:need], path,
         lambda j: f"nod2D_corresp_to_nod3D for 3-D node {j + 1}",
     )
     return max_layers, table, corresp
@@ -540,14 +561,28 @@ def _index_table(
     if bad.any():
         j = int(np.argmax(bad))
         k = int(slot[j])
-        at = (f"the level at {levels[k]:g} m" if k < n_levels
-              else f"beyond the {n_levels} levels of {NOD3D}")
+        n = int(owner[j])
+        if k < n_levels:
+            at = f"the level at z = {float(0.0 - levels[k])!r} m"
+            hint = _rounding_hint(z3d[j], 0.0 - levels[k])
+        else:
+            at = f"beyond the {n_levels} levels of {NOD3D}"
+            hint = ""
+        if k == 0:
+            # the top wet node of the column lies below the surface
+            cavity = (f" This is the top wet node of 2-D node {n + 1}, and it "
+                      f"lies below z = 0: meshes whose top wet node lies below "
+                      f"z = 0 (ice-shelf cavities) are not supported.")
+        else:
+            cavity = (" Meshes whose top wet node lies below z = 0 (ice-shelf "
+                      "cavities) are not supported.")
         raise ValueError(
             f"{NOD3D} and {AUX3D} disagree on the depth of 3-D node {j + 1}: "
-            f"{AUX3D} places it in slot {k + 1} of 2-D node {owner[j] + 1} "
-            f"({at}), but {NOD3D} gives it z = {z3d[j]:g} m (level "
+            f"{AUX3D} places it in slot {k + 1} of 2-D node {n + 1} ({at}), "
+            f"but {NOD3D} gives it z = {float(z3d[j])!r} m (level "
             f"{level_of[j] + 1}); slot k of a column must hold the column's "
-            f"3-D node at the k-th level of {NOD3D} - {same_mesh}"
+            f"3-D node at the k-th level of {NOD3D}.{hint}{cavity} Otherwise, "
+            f"{same_mesh}"
         )
 
     # within a level, the 3-D nodes follow increasing 2-D order
@@ -557,7 +592,7 @@ def _index_table(
         raise ValueError(
             f"{NOD3D} is not level-major: 3-D node {j + 1} (2-D node "
             f"{owner[j] + 1}) follows 3-D node {j} (2-D node {owner[j - 1] + 1}) "
-            f"on the level at {levels[level_of[j]]:g} m. FESOM 1.4 numbers the "
+            f"on the level at z = {float(z3d[j])!r} m. FESOM 1.4 numbers the "
             f"wet nodes of each level in increasing 2-D order; renumber "
             f"{NOD3D} and {AUX3D} together ({meshdir})"
         )

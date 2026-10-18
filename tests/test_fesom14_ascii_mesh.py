@@ -139,10 +139,15 @@ def _file_tokens(fx: dict, fmt=_fmt) -> dict[str, list[list[str]]]:
     }
 
 
-def _write(meshdir: Path, fx: dict | None = None) -> Path:
+def _fmt_repr(v) -> str:
+    """Floats written with all their digits (for values like -1e-12)."""
+    return repr(v) if isinstance(v, float) else str(v)
+
+
+def _write(meshdir: Path, fx: dict | None = None, fmt=_fmt) -> Path:
     """Write the four files the way FESOM 1.4 meshes are laid out."""
     meshdir.mkdir(parents=True, exist_ok=True)
-    for name, records in _file_tokens(fx or _fixture()).items():
+    for name, records in _file_tokens(fx or _fixture(), fmt).items():
         text = "".join(" ".join(rec) + "\n" for rec in records)
         (meshdir / name).write_text(text)
     return meshdir
@@ -249,13 +254,80 @@ def test_zero_is_dry(tmp_path):
 
 
 def test_elem3d_block_is_skipped(tmp_path):
-    """The trailing elem2D_corresp_to_elem3D block is not interpreted: any
-    length, including none, reads the same mesh."""
+    """The trailing elem2D_corresp_to_elem3D block is never parsed: any
+    length, including none, and any content read the same mesh."""
     ref = read_ascii_mesh(_write(tmp_path / "ref"))
-    for n, dummy in enumerate(([], [7] * 40)):
+    for n, dummy in enumerate(([], [7] * 40, ["end", "#", "1,5", "x"])):
         fx = _fixture()
         fx["elem_dummy"] = dummy
         _assert_mesh_equal(read_ascii_mesh(_write(tmp_path / f"m{n}", fx)), ref)
+
+
+@pytest.mark.parametrize("chunk", [1, 2, 3, 7])
+def test_aux3d_cut_across_chunks(tmp_path, monkeypatch, chunk):
+    """The end of the needed values is found by scanning aux3d.out in chunks;
+    tokens cut by a chunk boundary are counted once. With tiny chunks every
+    boundary case occurs, and a non-numeric elem3D block right after the
+    needed values shows where the cut fell."""
+    import kelp.readers.fesom14._ascii_mesh as am
+
+    ref = read_ascii_mesh(_write(tmp_path / "ref"))
+    fx = _fixture()
+    fx["elem_dummy"] = ["end", "x"]
+    d = _write_reflowed(tmp_path / "mesh", fx)
+    monkeypatch.setattr(am, "_CHUNK", chunk)
+    _assert_mesh_equal(read_ascii_mesh(d), ref)
+
+
+def test_max_num_layers_equal_to_k(tmp_path):
+    """No trailing dry slot: max_num_layers equals the number of levels."""
+    fx = _fixture()
+    fx["max_num_layers"] = 4
+    fx["table"] = [row[:4] for row in fx["table"]]
+    m = read_ascii_mesh(_write(tmp_path / "mesh", fx))
+    np.testing.assert_array_equal(m.idx, EXPECTED_IDX)
+    np.testing.assert_array_equal(m.levels, EXPECTED_LEVELS)
+
+
+def test_coast_flag_open_boundary(tmp_path):
+    """Flag 2 (open boundary) is kept as it is."""
+    fx = _fixture()
+    fx["nod2d"][4] = (5, 12.0, 50.0, 2)
+    m = read_ascii_mesh(_write(tmp_path / "mesh", fx))
+    np.testing.assert_array_equal(m.coast, [1, 0, 0, 0, 2])
+    assert m.coast.dtype == np.int8
+
+
+@pytest.mark.parametrize("z0", [-1e-12, 5e-7, -1e-6])
+def test_surface_tolerance(tmp_path, z0):
+    """A surface written within 1e-6 m of 0 (the same value for every surface
+    node) is the surface: levels[0] is exactly +0.0."""
+    fx = _fixture()
+    for j in range(1, 6):
+        _set_z(fx, j, z0)
+    m = read_ascii_mesh(_write(tmp_path / "mesh", fx, fmt=_fmt_repr))
+    assert m.levels[0] == 0.0 and not np.signbit(m.levels[0])
+    np.testing.assert_array_equal(m.levels, EXPECTED_LEVELS)
+    np.testing.assert_array_equal(m.idx, EXPECTED_IDX)
+
+
+def test_integer_fields_accept_integral_spellings(tmp_path):
+    """An integer field takes any number whose value is an integer: +7, 7.0,
+    7E0, 7D0, 0.7D+01; the mesh is the same as with plain integers."""
+    ref = read_ascii_mesh(_write(tmp_path / "ref"))
+    fx = _fixture()
+    _set_table(fx, 2, 2, "0.7D+01")
+    _set_table(fx, 1, 1, "+1")
+    _set_table(fx, 3, 3, "-999.0")
+    _set_corresp(fx, 4, "4E0")
+    _set_corresp(fx, 9, "4d0")
+    _set_elem(fx, 1, 2, "2.0")
+    fx["nod2d"][2] = (3, 10.5, 51.0, "0D0")
+    fx["max_num_layers"] = "6.0"
+    d = _write(tmp_path / "mesh", fx)
+    elem = (d / "elem2d.out").read_text()
+    (d / "elem2d.out").write_text("+3.0E0" + elem[1:])  # the header
+    _assert_mesh_equal(read_ascii_mesh(d), ref)
 
 
 # ---------------------------------------------------------------------------
@@ -361,11 +433,19 @@ def test_refuses_wrong_corresp(tmp_path):
     [
         # still four monotonic levels, but node 9 now sits at 25 m while the
         # table puts it in slot 2 (10 m)
-        (9, -25.0, ["depth of 3-D node 9", "slot 2", "2-D node 4", "z = -25 m"]),
+        (9, -25.0, ["depth of 3-D node 9", "slot 2", "2-D node 4", "z = -25.0 m",
+                    "ice-shelf cavities"]),
         # the last surface node moved to 10 m: the second level starts one early
-        (5, -10.0, ["depth of 3-D node 5", "slot 1", "2-D node 5", "z = -10 m"]),
+        (5, -10.0, ["depth of 3-D node 5", "slot 1", "2-D node 5", "z = -10.0 m",
+                    "top wet node of 2-D node 5", "not supported"]),
         # the first node is not at the surface
-        (1, -5.0, ["3-D node 1", "z = -5 m", "at the surface"]),
+        (1, -5.0, ["3-D node 1", "z = -5.0 m", "at the surface"]),
+        # just outside the 1e-6 m surface tolerance
+        (1, -2e-6, ["3-D node 1", "z = -2e-06 m", "at the surface"]),
+        # the last node of the second level written with a rounding error: it
+        # starts a level of its own, so its slot (2) no longer matches
+        (9, -10.000001, ["depth of 3-D node 9", "slot 2", "z = -10.000001 m",
+                         "differ only by rounding"]),
         # the deepest node moved up to 25 m: nod3d.out has three levels, but
         # the table still puts it in slot 4
         (13, -25.0, ["depth of 3-D node 13", "slot 4", "beyond the 3 levels"]),
@@ -377,6 +457,77 @@ def test_refuses_wrong_z(tmp_path, node3d, z, needles):
     msg = _refusal(tmp_path, fx)
     assert "nod3d.out" in msg, msg
     for needle in needles:
+        assert needle in msg, (needle, msg)
+
+
+@pytest.mark.parametrize(
+    "zs, needles",
+    [
+        # 3-D node 7 in the middle of the second level
+        ({7: -10.000001}, ["3-D node 8", "z = -10.0 m", "z = -10.000001 m"]),
+        # the surface level, within the surface tolerance but not written the
+        # same for every node: node 5 lies above the nodes before it
+        ({1: -5e-7, 2: -5e-7, 3: -5e-7, 4: -5e-7, 5: -1e-7},
+         ["3-D node 5", "z = -1e-07 m", "z = -5e-07 m"]),
+    ],
+)
+def test_refuses_rounding_inside_level(tmp_path, zs, needles):
+    """A rounding error inside a level breaks the level walk; the message
+    shows both values in full and names the cause."""
+    fx = _fixture()
+    for j, z in zs.items():
+        _set_z(fx, j, z)
+    with pytest.raises(ValueError) as info:
+        read_ascii_mesh(_write(tmp_path / "mesh", fx, fmt=_fmt_repr))
+    msg = str(info.value)
+    for needle in ["nod3d.out is not level-major", *needles, "differ only by rounding"]:
+        assert needle in msg, (needle, msg)
+
+
+def test_refuses_positive_down_z(tmp_path):
+    """Depths written positive down are named as such, not as a level-order
+    problem."""
+    fx = _fixture()
+    for j in range(6, 14):
+        _set_z(fx, j, -fx["nod3d"][j - 1][3])
+    msg = _refusal(tmp_path, fx)
+    for needle in ("nod3d.out", "3-D node 6", "z = 10.0 m", "above the surface",
+                   "negative down"):
+        assert needle in msg, (needle, msg)
+
+
+def test_refuses_cavity_mesh(tmp_path):
+    """An ice-shelf cavity: 2-D node 5's column starts at the second level
+    (10 m). Numbered level-major and consistent in every file, it is refused
+    as unsupported, naming the column's top wet node."""
+    fx = _fixture()
+    fx["nod3d"] = [
+        (1, 10.0, 50.0, 0.0, 0),
+        (2, 11.0, 50.0, 0.0, 0),
+        (3, 10.5, 51.0, 0.0, 0),
+        (4, 11.5, 51.0, 0.0, 0),
+        (5, 10.0, 50.0, -10.0, 0),
+        (6, 11.0, 50.0, -10.0, 0),
+        (7, 10.5, 51.0, -10.0, 0),
+        (8, 11.5, 51.0, -10.0, 0),
+        (9, 12.0, 50.0, -10.0, 0),  # 2-D node 5, under the ice shelf
+        (10, 10.0, 50.0, -25.0, 0),
+        (11, 11.0, 50.0, -25.0, 0),
+        (12, 11.5, 51.0, -25.0, 0),
+        (13, 10.0, 50.0, -50.0, 0),
+    ]
+    fx["table"] = [
+        [1, 5, 10, 13, -999, -999],
+        [2, 6, 11, -999, -999, -999],
+        [3, 7, -999, -999, -999, -999],
+        [4, 8, 12, -999, -999, -999],
+        [9, -999, -999, -999, -999, -999],
+    ]
+    fx["corresp"] = [1, 2, 3, 4, 1, 2, 3, 4, 5, 1, 2, 4, 1]
+    msg = _refusal(tmp_path, fx)
+    for needle in ("nod3d.out", "3-D node 9", "slot 1", "2-D node 5", "z = -10.0 m",
+                   "top wet node of 2-D node 5", "ice-shelf cavities",
+                   "not supported"):
         assert needle in msg, (needle, msg)
 
 
@@ -460,34 +611,31 @@ def test_refuses_non_number(tmp_path, token):
     assert "nod3d.out" in msg and repr(token) in msg and "not a number" in msg, msg
 
 
-@pytest.mark.parametrize(
-    "mutate, needles",
-    [
-        # integral values: refused for the D exponent itself, not the value
-        (lambda fx: _set_table(fx, 2, 2, "0.7D+01"), ["aux3d.out", "2-D node 2, slot 2"]),
-        (lambda fx: _set_corresp(fx, 4, "4D0"), ["aux3d.out", "3-D node 4"]),
-        (lambda fx: _set_elem(fx, 1, 2, "2d0"), ["elem2d.out", "corner 2 of element 1"]),
-        (lambda fx: fx["nod2d"].__setitem__(2, (3, 10.5, 51.0, "0D0")),
-         ["nod2d.out", "2-D node 3"]),
-        (lambda fx: fx.__setitem__("max_num_layers", "6D0"), ["aux3d.out", "max_num_layers"]),
-        # a non-integral value is refused too
-        (lambda fx: _set_table(fx, 2, 3, "1.15D+01"), ["aux3d.out", "2-D node 2, slot 3"]),
-    ],
-)
-def test_refuses_d_exponent_in_integer_field(tmp_path, mutate, needles):
+@pytest.mark.parametrize("token", ["11.5", "1.15D+01", "1.15e1"])
+def test_refuses_non_integer_index(tmp_path, token):
+    """A value that is not an integer is refused in an integer field, however
+    it is spelt."""
     fx = _fixture()
-    mutate(fx)
-    msg = _refusal(tmp_path, fx)
-    for needle in [*needles, "Fortran D exponent"]:
-        assert needle in msg, (needle, msg)
-
-
-def test_refuses_non_integer_index(tmp_path):
-    fx = _fixture()
-    _set_table(fx, 2, 3, 11.5)
+    _set_table(fx, 2, 3, token)
     msg = _refusal(tmp_path, fx)
     for needle in ("aux3d.out", "2-D node 2", "slot 3", "is 11.5", "not an integer"):
         assert needle in msg, (needle, msg)
+
+
+@pytest.mark.parametrize(
+    "mutate, needle",
+    [
+        (lambda fx: _set_table(fx, 4, 2, "nine"), "'nine'"),
+        # the last value reading needs: the parse reaches it
+        (lambda fx: _set_corresp(fx, 13, "x1"), "'x1'"),
+    ],
+)
+def test_refuses_non_number_in_aux3d(tmp_path, mutate, needle):
+    fx = _fixture()
+    mutate(fx)
+    msg = _refusal(tmp_path, fx)
+    for n in ("aux3d.out", needle, "not a number"):
+        assert n in msg, (n, msg)
 
 
 def test_refuses_empty_file(tmp_path):
