@@ -6,9 +6,11 @@ validates the record (prefetch windows and the shared snapshot cache
 included); the HEALPix reader declares its u/v data prefix
 (``mesh.metadata["uv_data_last"]``) and checks its raw records before it
 zeroes them; ``max_levels`` cuts the mesh on every entry point of a
-depth-linear run; the reader hook ``prepare(mesh, ds)`` runs once per
-(mesh, dataset) pair; the output records the option (``uv_vertical =
-"linear"``).  With the option off every run stays bit-identical.
+depth-linear run; the reader hook ``prepare(mesh, ds)`` runs whenever the
+mesh is not prepared for this dataset and level table (a dataset switch or a
+``max_levels`` re-cut prepares again); the output records the option
+(``uv_vertical = "linear"``).  With the option off every run stays
+bit-identical.
 
 Fixtures: the 4-node FESOM2 square of ``tests/_fesom2_synth`` (levels 0, 10,
 30 m, layer centres 5 and 20 m, bed 30 m) with u = A + B·z + C·(year −
