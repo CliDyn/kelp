@@ -161,6 +161,36 @@ def test_declaration_frozen_once_used():
     assert vu.depth_points(mesh, "level").last.tolist() == [3, 2, 1, 0]
 
 
+@pytest.mark.parametrize("placement", ["level", "layer_linear"])
+@pytest.mark.parametrize("how", ["deepcopy", "pickle"])
+def test_copied_mesh_revalidates_its_declaration(placement, how):
+    """A deep copy or an unpickled mesh (default protocol) carries a NEW,
+    WRITEABLE declaration array (numpy drops the read-only flag), while
+    its table cache still matches it by identity: the first use of the copy
+    rebuilds the table from the current values — an in-place write made
+    before it is seen — and freezes the declaration again, so a later
+    in-place write raises."""
+    import copy
+    import pickle
+    vu = _vu()
+    mesh = _mesh(decl=[3, 2, 1, 0])
+    dp0 = vu.depth_points(mesh, placement)
+    assert not mesh.metadata["uv_data_last"].flags.writeable
+    clone = (copy.deepcopy(mesh) if how == "deepcopy"
+             else pickle.loads(pickle.dumps(mesh)))
+    decl = clone.metadata["uv_data_last"]
+    assert decl.flags.writeable                     # numpy's copy semantics
+    decl[0] = 0                                     # unseen without the fix
+    dp = vu.depth_points(clone, placement)
+    assert dp.last[0] == 0 and dp0.last[0] > 0
+    assert not decl.flags.writeable
+    with pytest.raises(ValueError, match="read-only"):
+        decl[1] = 0
+    assert vu.depth_points(clone, placement) is dp   # frozen again: cached
+    # the original is untouched
+    assert vu.depth_points(mesh, placement) is dp0
+
+
 def test_declared_prefix_caps_last():
     vu = _vu()
     mesh = _mesh(decl=[0, 2, 1, 1])

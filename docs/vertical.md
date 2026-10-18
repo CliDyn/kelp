@@ -136,7 +136,8 @@ NaN after the last point). The table is cached on the
 mesh and rebuilt whenever `mesh.sigma`, `mesh.depth` or the declaration is
 replaced (a `max_levels` cut included; an in-place write is not seen — the
 declaration is therefore frozen once a table uses it, and writing into it
-raises).
+raises; a copied or unpickled mesh, whose declaration numpy returns
+writeable, is re-validated and frozen again on first use).
 
 The rule at one vertex `i` and particle depth `z`:
 

@@ -37,7 +37,8 @@ the very objects it was built from (identity, never ``id()``), so a
 ``max_levels`` cut or a new depth or declaration rebuilds it.  Replace
 those arrays to change them; an in-place write is not detected — so the
 declaration is frozen (``setflags(write=False)``) once a table uses it,
-and writing into it raises.
+and writing into it raises.  A copied or unpickled mesh (whose declaration
+numpy returns writeable) is re-validated and frozen again on first use.
 
 The record check (:func:`check_depth_linear_record`) refuses a field whose
 u or v is non-finite at a point ``<= last_i`` and stamps a passing field
@@ -217,8 +218,14 @@ def depth_points(mesh: Mesh, placement: str) -> DepthPoints:
     cache = mesh._uv_depth_points
     if cache:
         entry = cache.get(placement)
+        # a WRITEABLE declaration is not the frozen one the entry was built
+        # from, even when identical: a deep copy or an unpickled mesh gets a
+        # new, writeable array (numpy drops the flag) that still matches
+        # its cache entry by identity — rebuild from the current values
         if (entry is not None and entry.sigma is sigma
-                and entry.depth is depth and entry.decl is decl):
+                and entry.depth is depth and entry.decl is decl
+                and not (isinstance(decl, np.ndarray)
+                         and decl.flags.writeable)):
             return entry.points
     points = _build_depth_points(sigma, depth, decl, placement, mesh.n_nodes)
     # copy-on-write: a shallow copy of the mesh (dataclasses.replace,
