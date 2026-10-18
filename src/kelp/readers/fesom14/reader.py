@@ -336,17 +336,21 @@ class Fesom14Reader:
             dimension sizes, levels (beyond 1e-3 m) or node coordinates
             (beyond 1e-6 deg, either longitude convention); any refusal of
             the time resolution (no source of time, a stamp off its schedule
-            or convention, a gap, an overlap); variables written on
-            different output schedules, or whose resolved records (instants
-            and windows) differ. Messages name the files, variables and
-            records (by their instant) and the fix.
+            or convention, a gap, an overlap); variables whose resolved
+            records (instants and windows) differ — compared by value, so
+            output schedules written differently but giving the same events
+            are accepted, and different schedules are named when the records
+            differ. Messages name the files, variables and records (by their
+            instant) and the fix.
 
         Notes
         -----
         Files are grouped per variable by the variables they hold, never by
         their names. The time axis of every variable is resolved on its own
         from all its files (each with its own epoch and calendar), then
-        every consumed variable must have exactly the records of u.
+        every consumed variable must have exactly the records of u: the
+        same instants and windows (within 1 ms), whatever source of time
+        (bounds, schedule, options) resolved them.
         """
         opts = TimeOptions(stamp=time_stamp, window=time_window,
                            offset=time_offset)
@@ -820,6 +824,7 @@ class _Role:
     key: str         # the config key that names it (for messages)
     kind: str        # "u" | "v" | "w" | "eta" | "sample"
     required: bool
+    eta: bool = False    # it is the sea-surface height (also when sampled)
 
 
 def _data_files(sources: Sequence[str]) -> List[str]:
@@ -896,7 +901,7 @@ def _consumed_roles(mode_cfg: Optional["ModeConfig"]) -> List[_Role]:
                            "w", mode_cfg is not None))
     eta = cfg("var_eta")
     roles.append(_Role(str(eta or DEFAULT_VAR_ETA), "mode.var_eta", "eta",
-                       bool(eta)))
+                       bool(eta), eta=True))
     for name in cfg("sample_vars") or ():
         roles.append(_Role(str(name), "mode.sample_vars", "sample", True))
     out: List[_Role] = []
@@ -904,8 +909,14 @@ def _consumed_roles(mode_cfg: Optional["ModeConfig"]) -> List[_Role]:
         same = [i for i, o in enumerate(out) if o.name == r.name]
         if not same:
             out.append(r)
-        elif r.required and not out[same[0]].required:
-            out[same[0]] = replace(out[same[0]], required=True)
+            continue
+        first = out[same[0]]
+        if r.required and not first.required:
+            # the key that made it required speaks in the messages (e.g. zos
+            # in mode.sample_vars); it stays the sea-surface height
+            out[same[0]] = replace(r, eta=first.eta or r.eta)
+        elif r.eta and not first.eta:
+            out[same[0]] = replace(first, eta=True)
     return out
 
 
@@ -960,20 +971,27 @@ def _holders(roles: List[_Role], heads: List[_Head],
             if kinds[h.path]:
                 raise _kind_error(h, kinds[h.path],
                                   f", and {r.key} selects its variable {r.name!r}")
+    # a file KELP does not read that holds a consumed variable was refused
+    # above, so such files never hold a missing variable: they are only noted
     foreign = [h for h in heads if kinds[h.path]]
     for r in roles:
         if holders[r.name] or not r.required:
             continue
-        why = f"; no other file holds the variable {r.name!r} ({r.key})"
-        if foreign:
-            raise _kind_error(foreign[0], kinds[foreign[0].path], why)
         found = sorted({n for h in heads for n in h.dims})
         shown = ", ".join(found[:40]) + (", ..." if len(found) > 40 else "")
+        note = ""
+        if foreign:
+            more = (f" ({len(foreign) - 1} more such file(s) are not read either)"
+                    if len(foreign) > 1 else "")
+            note = (" Not read: "
+                    + _strip(_kind_error(foreign[0], kinds[foreign[0].path], ""))
+                    + more)
+        what = "the sea-surface height" if r.eta else _ROLE_WHAT[r.kind]
         raise ValueError(
             f"fesom14: no file under {', '.join(sources)} holds the variable "
-            f"{r.name!r}, {_ROLE_WHAT[r.kind]} ({r.key}); the files hold "
+            f"{r.name!r}, {what} ({r.key}); the files hold "
             f"{shown or 'no variable'}. Add its files to data.ncinput, or set "
-            f"{r.key} to the name the files use")
+            f"{r.key} to the name the files use.{note}")
     return holders
 
 
@@ -1161,6 +1179,10 @@ def _role_hint(role: _Role, velocities: str = "") -> str:
         return (f"{role.name!r} is optional: leave the {role.name!r} files out of "
                 "data.ncinput (the sea-surface height is then 0), or give it the "
                 "records of the velocities")
+    if role.kind == "sample" and role.eta:
+        return (f"Remove {role.name!r} from mode.sample_vars and leave its files "
+                "out of data.ncinput (the sea-surface height is then 0), or give "
+                "it the records of the velocities")
     if role.kind == "sample":
         return (f"Remove {role.name!r} from mode.sample_vars, or give it the "
                 "records of the velocities")
@@ -1269,12 +1291,17 @@ def _record_text(ax: ResolvedAxis, i: int) -> str:
 
 
 def _misaligned(ref: _Role, rax: ResolvedAxis, role: _Role,
-                ax: ResolvedAxis) -> ValueError:
-    """The refusal of a variable whose records differ from those of u."""
+                ax: ResolvedAxis, schedules: str = "") -> ValueError:
+    """The refusal of a variable whose records differ from those of u;
+    ``schedules`` names their output schedules when those differ."""
     rule = ("every variable KELP reads must have the same records (the same "
             "instants and windows)")
-    hint = _role_hint(role, "Add the missing files, or leave out the files "
-                            "that only some variables have")
+    if schedules:
+        rule = f"{schedules}; {rule}"
+    hint = _role_hint(role, (
+        "u, v and w must come from output written on one schedule" if schedules
+        else "Add the missing files, or leave out the files that only some "
+             "variables have"))
     for big, bax, small, sax in ((ref.name, rax, role.name, ax),
                                  (role.name, ax, ref.name, rax)):
         a = _start_in(bax, sax)
@@ -1287,8 +1314,11 @@ def _misaligned(ref: _Role, rax: ResolvedAxis, role: _Role,
             f"fesom14: variable {small!r} has no record from "
             f"{', nor from '.join(gaps)}, where {big!r} has records; {rule}. {hint}")
     i = first_difference(rax, ax)
-    hint = _role_hint(role, "Check the time axes (stamps and bounds) of the "
-                            "files of both variables")
+    if not schedules:
+        hint = _role_hint(role, "Check the time axes (stamps and bounds) of "
+                                "the files of both variables")
+    # ResolvedAxis.calendar is cftime's canonical name ("gregorian" comes back
+    # as "standard", "365_day" as "noleap"), so this set test is exact
     cals = {rax.calendar, ax.calendar}
     calendars = ""
     if len(cals) > 1 and not cals <= {"standard", "proleptic_gregorian"}:
@@ -1304,27 +1334,27 @@ def _misaligned(ref: _Role, rax: ResolvedAxis, role: _Role,
 
 def _align(roles: List[_Role], axes: Dict[str, ResolvedAxis],
            files: Dict[str, List[Tuple[_Head, xr.Dataset]]]) -> None:
-    """Every consumed variable has exactly the records of u (and, for
-    files of the raw writer, its output schedule)."""
+    """Every consumed variable has exactly the records of u, compared by
+    value (instants and windows). Output schedules written differently but
+    giving the same events (``first: 0`` and ``first: 1``) are the same; when
+    the records differ, schedules that differ are named in the refusal."""
     ref = roles[0]
     rax = axes[ref.name]
     for r in roles[1:]:
         ax = axes[r.name]
+        if first_difference(rax, ax) is None:
+            continue
+        schedules = ""
         if rax.source == "schedule" and ax.source == "schedule":
             s_ref, s_r = _schedules(files[ref.name]), _schedules(files[r.name])
             if set(s_ref) != set(s_r):
                 def show(s, name):
-                    return (", ".join(repr(t) for t in s.values()) + " ("
-                            + files[name][0][0].path + ")")
-                raise ValueError(
-                    f"fesom14: variables {ref.name!r} and {r.name!r} are written "
-                    f"on different output schedules: {ref.name!r} on "
-                    f"{show(s_ref, ref.name)}, {r.name!r} on {show(s_r, r.name)}; "
-                    "every variable KELP reads must have the same records. "
-                    + _role_hint(r, "u, v and w must come from output written "
-                                    "on one schedule"))
-        if first_difference(rax, ax) is not None:
-            raise _misaligned(ref, rax, r, ax)
+                    return (", ".join(repr(t) for t in s.values()) + " in "
+                            + files[name][0][0].path)
+                schedules = (f"they are written on different output schedules: "
+                             f"{ref.name!r} on {show(s_ref, ref.name)} / "
+                             f"{r.name!r} on {show(s_r, r.name)}")
+        raise _misaligned(ref, rax, r, ax, schedules)
 
 
 # ---------------------------------------------------------------------------
@@ -1374,10 +1404,9 @@ def _open_consumed(roles: List[_Role], holders: Dict[str, List[_Head]],
     if node_coords is not None:
         coords["lon"] = (hdim, node_coords[0])
         coords["lat"] = (hdim, node_coords[1])
-    eta = [r for r in roles if r.kind == "eta"]
     ds = xr.Dataset(data_vars, coords=coords, attrs={
         "fesom14_form": form,
-        "fesom14_has_eta": int(bool(eta)),
+        "fesom14_has_eta": int(any(r.eta for r in roles)),
         "fesom14_time_source": axes[u].source,
     })
     ds.set_close(partial(_close_all, list(opened.values())))

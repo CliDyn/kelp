@@ -369,6 +369,44 @@ def test_different_schedules_refused(tmp_path):
     _assert_names(msg, "'uo'", "'wo'", MONTHLY, DAILY, "one schedule")
 
 
+def test_schedules_compared_by_events(tmp_path):
+    """Output schedules are compared by the records they give, not by their
+    text: ``first: 0`` and ``first: 1`` give the same monthly events, as do
+    ``first: 5`` and ``first: 12`` with ``rate: 12`` (one event a year at the
+    end of each 12th month of the job); ``first: 5 rate: 1`` gives a first
+    window of five months and is refused, naming both schedules."""
+    same = tmp_path / "first_0_1"
+    same.mkdir()
+    _raw_months(same, "uo")
+    _raw_months(same, "vo")
+    _raw_months(same, "wo", schedule="unit: m first: 0 rate: 1")
+    ds = _open(same, MODE_3D)
+    assert _iso(ds) == ["1948-01-16T12:00:00", "1948-02-15T00:00:00",
+                        "1948-03-16T12:00:00"]
+    ds.close()
+
+    yearly = tmp_path / "first_5_12"
+    yearly.mkdir()
+    for var, first in (("uo", 12), ("vo", 12), ("wo", 5)):
+        _raw(yearly, var, "1948-01-01", [365, 730],
+             schedule=f"unit: m first: {first} rate: 12")
+    ds = _open(yearly, MODE_3D)
+    # noleap: the centre of each 365-day year is 182.5 days after 1 January
+    assert _iso(ds) == ["1948-07-02T12:00:00", "1949-07-02T12:00:00"]
+    ds.close()
+
+    other = tmp_path / "first_5_rate_1"
+    other.mkdir()
+    _raw(other, "uo", "1948-01-01", NOLEAP_MONTH_ENDS[:7])
+    _raw(other, "vo", "1948-01-01", NOLEAP_MONTH_ENDS[:7])
+    _raw(other, "wo", "1948-01-01", [151, 181, 212],
+         schedule="unit: m first: 5 rate: 1")
+    msg = _refusal(other, MODE_3D)
+    _assert_names(msg, "'uo'", "'wo'", "different output schedules", MONTHLY,
+                  "unit: m first: 5 rate: 1", "1948-01-16T12:00:00",
+                  "1948-06-01T00:00:00")
+
+
 def test_daily_zos_with_monthly_velocities_refused(tmp_path):
     for var in ("uo", "vo", "wo"):
         _raw_months(tmp_path, var)
@@ -555,6 +593,36 @@ def test_has_eta_attribute(tmp_path):
     assert int(ds.attrs["fesom14_has_eta"]) == 1
     assert ds["zos"].dims == ("time", "nodes_2d")
     ds.close()
+
+
+def test_sampled_zos(tmp_path):
+    """``zos`` in ``mode.sample_vars``: required, named by that key when
+    missing; when present it is also the sea-surface height."""
+    for var in ("uo", "vo", "wo"):
+        _raw_months(tmp_path, var)
+    mode = ModeConfig(Fdrift3D=True, sample_vars=["zos"])
+    msg = _refusal(tmp_path, mode)
+    _assert_names(msg, "'zos'", "mode.sample_vars")
+    assert "mode.var_eta" not in msg, msg
+    _raw_months(tmp_path, "zos", two_d=True)
+    ds = _open(tmp_path, mode)
+    assert "zos" in ds.data_vars
+    assert int(ds.attrs["fesom14_has_eta"]) == 1
+    ds.close()
+
+
+def test_missing_variable_not_blamed_on_a_restart(tmp_path):
+    """A missing ``wo`` is reported as missing; a restart file that does not
+    hold it is only noted as not read."""
+    _raw_months(tmp_path, "uo")
+    _raw_months(tmp_path, "vo")
+    _restart(tmp_path / "run.1948.oce.nc")
+    msg = _refusal(tmp_path, MODE_3D)
+    assert msg.startswith("fesom14: no file under "), msg
+    _assert_names(msg, "holds the variable 'wo'", "mode.var_w", "Not read:",
+                  "run.1948.oce.nc", "restart")
+    assert msg.index("holds the variable 'wo'") < msg.index("restart"), msg
+    assert "no other file" not in msg, msg
 
 
 def test_explicit_var_eta_missing_refused(tmp_path):
