@@ -409,14 +409,104 @@ def test_raw_yearly_rate_2():
                  "1951-01-01T00:00:00")
 
 
-def test_raw_yearly_not_january_start_refused():
-    # the writer counts the months of a year from the job's start month: a
-    # yearly schedule from a job that started in July is not resolved here
-    f = raw("uo_run_19490701.nc", "1949-07-01", [365],
-            schedule="unit: y first: 1 rate: 1", cal="standard")
-    msg = refusal([f])
-    assert_names(msg, "uo_run_19490701.nc", "'uo'", "data.time_stamp",
-                 "data.time_window")
+def test_raw_yearly_july_start():
+    # the writer counts a year's months from the job's start month: a job
+    # started in July writes its yearly means at the end of June
+    sched = "unit: y first: 1 rate: 1"
+    f = raw("uo_run_19490701.nc", "1949-07-01", [365], schedule=sched,
+            cal="standard")
+    ax = resolve_axis([f], NO_OPTS, variable="uo")
+    assert iso_w(ax.windows) == [("1949-07-01T00:00:00", "1950-07-01T00:00:00")]
+    assert iso(ax.instants) == ["1949-12-30T12:00:00"]
+    # started mid-month (07-15): July is still the first of the twelve months
+    g = raw("uo_run_19490715.nc", "1949-07-15", [351], schedule=sched,
+            cal="standard")
+    ax = resolve_axis([g], NO_OPTS, variable="uo")
+    assert iso_w(ax.windows) == [("1949-07-15T00:00:00", "1950-07-01T00:00:00")]
+    assert iso(ax.instants) == ["1950-01-06T12:00:00"]
+    # the end of the calendar year is not an output event of such a job
+    h = raw("uo_run_19490701.nc", "1949-07-01", [184], schedule=sched,
+            cal="standard")
+    assert_names(refusal([h]), "uo_run_19490701.nc", "1950-01-01T00:00:00",
+                 "1950-07-01T00:00:00")
+
+
+def test_raw_yearly_july_start_rate_2():
+    # start 1950-07-01: the year ending 1951-06-30 is odd (no record), the one
+    # ending 1952-06-30 is even
+    sched = "unit: y first: 1 rate: 2"
+    f = raw("uo_run_19500701.nc", "1950-07-01", [731, 1461], schedule=sched,
+            cal="standard")
+    ax = resolve_axis([f], NO_OPTS, variable="uo")
+    assert iso_w(ax.windows) == [
+        ("1950-07-01T00:00:00", "1952-07-01T00:00:00"),
+        ("1952-07-01T00:00:00", "1954-07-01T00:00:00")]
+    assert iso(ax.instants) == ["1951-07-01T12:00:00", "1953-07-01T00:00:00"]
+    g = raw("uo_run_19500701.nc", "1950-07-01", [365], schedule=sched,
+            cal="standard")
+    assert_names(refusal([g]), "uo_run_19500701.nc", "1951-07-01T00:00:00",
+                 "1952-07-01T00:00:00")
+
+
+def test_raw_yearly_first():
+    # first: 1951 -- the years ending before 1951 write no record, so the
+    # first window spans 1949, 1950 and 1951 (365 + 365 + 365 d)
+    sched = "unit: y first: 1951 rate: 1"
+    f = raw("uo_run_19490101.nc", "1949-01-01", [1095, 1461], schedule=sched,
+            cal="standard")
+    ax = resolve_axis([f], NO_OPTS, variable="uo")
+    assert iso_w(ax.windows) == [
+        ("1949-01-01T00:00:00", "1952-01-01T00:00:00"),
+        ("1952-01-01T00:00:00", "1953-01-01T00:00:00")]
+    assert iso(ax.instants) == ["1950-07-02T12:00:00", "1952-07-02T00:00:00"]
+    g = raw("uo_run_19490101.nc", "1949-01-01", [365], schedule=sched,
+            cal="standard")
+    assert_names(refusal([g]), "uo_run_19490101.nc", "1950-01-01T00:00:00",
+                 "1952-01-01T00:00:00")
+
+
+@pytest.mark.parametrize("unit,epoch,days,cal,instants", [
+    ("m", "1948-01-01", [31, 59, 90], "noleap",
+     ["1948-01-16T12:00:00", "1948-02-15T00:00:00", "1948-03-16T12:00:00"]),
+    ("d", "1948-02-27", [1, 2], "noleap",
+     ["1948-02-27T12:00:00", "1948-02-28T12:00:00"]),
+    ("y", "1949-01-01", [365], "standard", ["1949-07-02T12:00:00"]),
+])
+def test_raw_first_0(unit, epoch, days, cal, instants):
+    # first: 0 behaves like first: 1 (the count starts at 1)
+    for first in (0, 1):
+        f = raw("x.nc", epoch, days, cal=cal,
+                schedule=f"unit: {unit} first: {first} rate: 1")
+        assert iso(resolve_axis([f], NO_OPTS, variable="uo").instants) == \
+            instants
+
+
+def test_tolerance_one_millisecond():
+    near = raw("uo_run_19480101.nc", "1948-01-01", [31, 59], early_s=-0.0005)
+    ax = resolve_axis([near], NO_OPTS, variable="uo")
+    assert iso(ax.instants) == ["1948-01-16T12:00:00", "1948-02-15T00:00:00"]
+    assert iso_w(ax.windows)[0] == ("1948-01-01T00:00:00",
+                                    "1948-02-01T00:00:00")
+    off = raw("uo_run_19480101.nc", "1948-01-01", [31, 59], early_s=-1.0)
+    assert_names(refusal([off]), "uo_run_19480101.nc", "1948-02-01T00:00:01")
+    p_near = plain("p.nc", "seconds since 1948-01-01",
+                   [31 * DAY + 0.0005, 59 * DAY + 0.0005], cal="noleap")
+    ax = resolve_axis([p_near], END_MONTH, variable="uo")
+    assert iso(ax.instants) == ["1948-01-16T12:00:00", "1948-02-15T00:00:00"]
+    p_off = plain("p.nc", "seconds since 1948-01-01",
+                  [31 * DAY + 1.0, 59 * DAY + 1.0], cal="noleap")
+    assert_names(refusal([p_off], END_MONTH), "p.nc", "1948-02-01T00:00:01",
+                 "data.time_offset")
+
+
+def test_raw_offset_moving_epoch_to_another_day_refused():
+    # the raw writer's stamps are only ever early by the job's start time of
+    # day: an offset that moves the job start out of its day is refused
+    f = raw("uo_run_19480301.nc", "1948-03-01", [31])
+    for text, shown in (("-6 h", "-6 h"), ("+1 d", "+1 d")):
+        msg = refusal([f], TimeOptions(offset=text))
+        assert_names(msg, "uo_run_19480301.nc", "'uo'", "data.time_offset",
+                     shown, "1948-03-01T00:00:00")
 
 
 def test_raw_gap_between_segments_refused():
@@ -434,9 +524,13 @@ def test_raw_gap_between_segments_refused():
         "1948-01-16T15:00:00", "1948-02-15T00:00:00"]
     assert iso(resolve_axis([e2], off, variable="uo").instants) == [
         "1948-03-16T15:00:00"]
-    assert_names(refusal([e1, e2], off), "uo_run_19480101.nc",
-                 "uo_run_19480301.nc", "'uo'", "1948-03-01T00:00:00",
-                 "1948-03-01T06:00:00")
+    short = refusal([e1, e2], off)
+    assert_names(short, "uo_run_19480101.nc", "uo_run_19480301.nc", "'uo'",
+                 "1948-03-01T00:00:00", "1948-03-01T06:00:00",
+                 "time of day other than 00:00", "never written",
+                 "several segments")
+    # a gap of a month carries no mid-day explanation
+    assert "never written" not in refusal([s1, s2])
 
 
 def test_raw_unit_s_refused():

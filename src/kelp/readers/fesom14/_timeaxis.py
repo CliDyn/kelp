@@ -23,19 +23,25 @@ window are resolved ONCE, from exactly one source:
    Its output events are enumerated from the file's epoch and the stamps must
    be exactly those events.  Units ``d``/``m`` fire at the end of the
    ``count``-th day/month of the job (the day or month the job starts in is
-   ``count == 1``) when ``first <= count`` and ``count % rate == 0``; unit
-   ``y`` fires at the end of a calendar year ``Y`` when ``first <= Y`` and
-   ``Y % rate == 0`` (resolved for jobs that start in January only: the
-   writer counts a year's months from the job's start month, so a yearly
-   schedule from another start month is refused).  Unit ``s`` (a window of
+   ``count == 1``) when ``first <= count`` and ``count % rate == 0``.  Unit
+   ``y`` counts a year's months from the job's start month: it fires at the
+   end of the 12th, 24th, ... month of the job when the calendar year ``Y``
+   of that ending month satisfies ``first <= Y`` and ``Y % rate == 0`` (for
+   a job that starts in January: the end of calendar year ``Y``; for one that
+   starts in July: the end of June of ``Y``).  Unit ``s`` (a window of
    ``rate`` model steps; the step is not in the file) is refused.  Segment
    ``i + 1`` of a run must start (its epoch, after the offset) exactly at the
-   last output event of segment ``i``.
+   last output event of segment ``i``.  A job that started at a time of day
+   other than 00:00 also ends at that time, so the hours after its last
+   output event are never written: a run of several such segments is refused
+   as a gap.
 
 An optional fixed offset (``data.time_offset``, ``"<±number> <s|min|h|d>"``)
 is added to the decoded stamps, the bounds and the epoch of every file before
 anything else, for every source — e.g. for a raw job that started at a time of
-day other than 00:00, whose stamps all sit early by that time of day.
+day other than 00:00, whose stamps all sit early by that time of day.  For a
+raw-writer file the offset must keep the job start within its day (from 0 up
+to, not including, 24 h); any other offset is refused.
 
 A window is never estimated from the spacing of neighbouring stamps.  Every
 record the source says must exist, from the first to the last one observed,
@@ -536,20 +542,26 @@ class _Rec:
 
 
 def _check_tiling(recs: List[_Rec], variable: Optional[str],
-                  hint: str = "") -> None:
-    """Consecutive windows must touch: no gap, no overlap."""
+                  hint: str = "", short_gap_note: str = "") -> None:
+    """Consecutive windows must touch: no gap, no overlap.
+
+    ``hint`` follows every gap's interval; ``short_gap_note`` is added to a
+    gap shorter than one day.
+    """
     for r, n in zip(recs[:-1], recs[1:]):
         if _same(r.end, n.start):
             continue
         files = (f"in {r.path}" if r.path == n.path
                  else f"between {r.path} and {n.path}")
         if n.start > r.end:
+            note = (short_gap_note
+                    if n.start - r.end < timedelta(days=1) else "")
             raise ValueError(
                 f"variable {variable!r}: gap {files} — no record covers "
                 f"{_iso(r.end)} to {_iso(n.start)} (between the record at "
                 f"{_iso(r.instant)}, window {_iso(r.start)} – {_iso(r.end)}, "
                 f"and the record at {_iso(n.instant)}, window "
-                f"{_iso(n.start)} – {_iso(n.end)}){hint}. Gaps are not "
+                f"{_iso(n.start)} – {_iso(n.end)}){hint}.{note} Gaps are not "
                 f"allowed: add the missing record or file, or leave out "
                 f"{n.path} and the files after it")
         dup = " (a duplicate record)" if _same(r.instant, n.instant) else ""
@@ -638,10 +650,17 @@ def _events(epoch, unit: str, first: int, rate: int) -> Iterator:
         while True:
             yield _add_months(epoch, epoch.year, epoch.month, k)
             k += rate
-    else:  # "y": the end of every calendar year Y with first <= Y, Y % rate == 0
-        year = _first_multiple(max(first, epoch.year), rate)
+    else:
+        # "y": the end of the 12th, 24th, ... month counted from the job's
+        # start month, kept when the calendar year Y of that ending month
+        # satisfies first <= Y and Y % rate == 0; the ending month of the
+        # j-th such boundary lies in year y1 + j - 1
+        start = epoch.year * 12 + (epoch.month - 1)
+        y1 = (start + 11) // 12
+        year = -(-max(first, y1) // rate) * rate
         while True:
-            yield _make(epoch, year + 1, 1, 1)
+            j = year - y1 + 1
+            yield _add_months(epoch, epoch.year, epoch.month, 12 * j)
             year += rate
 
 
@@ -666,12 +685,15 @@ def _schedule_records(d: _Decoded, variable) -> List[_Rec]:
             f"units {d.units!r} are not the raw writer's 'seconds since "
             "<date> 0:0:0' — the file was re-timed after the run, so the "
             f"schedule does not describe its stamps: {_OPTIONS_FIX}")
-    if unit == "y" and d.epoch.month != 1:
+    if (d.epoch.year, d.epoch.month, d.epoch.day) != (e.year, e.month, e.day):
         raise ValueError(
-            f"{who}: output_schedule {d.schedule!r} in a job that started in "
-            f"month {d.epoch.month} ({_iso(d.epoch)}): yearly windows are "
-            "resolved only for jobs that start in January (the writer counts "
-            f"a year's months from the job's start month): {_OPTIONS_FIX}")
+            f"{who}: data.time_offset ({_describe_duration(d.epoch - e)}) "
+            f"moves the job start of this raw-writer file from {_iso(e)} to "
+            f"{_iso(d.epoch)}, out of its day. The raw writer stamps against "
+            "the job's start DATE at 00:00, so its stamps are only ever early "
+            "by the time of day at which the job started: a raw file takes an "
+            "offset from 0 up to (not including) 24 h. Correct "
+            "data.time_offset, or set data.time_stamp and data.time_window")
     events = _events(d.epoch, unit, first, rate)
     prev, ev = d.epoch, next(events)
     recs: List[_Rec] = []
@@ -713,7 +735,13 @@ def _schedule_all(decoded: List[_Decoded], variable) -> List[_Rec]:
         recs.extend(_schedule_records(d, variable))
     _check_tiling(recs, variable,
                   hint=(": a job segment must start at the previous one's "
-                        "last output event"))
+                        "last output event"),
+                  short_gap_note=(
+                      " A gap shorter than a day between job segments: a job "
+                      "that started at a time of day other than 00:00 also "
+                      "ends at that time, and the hours after its last output "
+                      "event are never written, so a run of several segments "
+                      "started that way cannot be read."))
     return recs
 
 
