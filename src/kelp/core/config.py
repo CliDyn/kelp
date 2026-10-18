@@ -453,7 +453,7 @@ _GRID_HASH_CELL_RULES = ("occupancy", "legacy")
 @dataclass
 class MeshConfig:
     """Mesh source settings."""
-    type: str = "fesomc"           # fesomc / fesom2 / nemo / healpix
+    type: str = "fesomc"           # fesomc / fesom2 / nemo / healpix / fesom14
     meshpath: str = ""             # path to mesh files (ASCII dir or NC file)
     # Earth radius (m) for mesh-derived areas/metrics.  None -> the mesh
     # family default chosen by the reader: FESOM2 6_367_500.0 (the FESOM
@@ -505,6 +505,14 @@ class MeshConfig:
     #            (element-layout u/v => the fused leastsq kernels;
     #            v1 is 2-D only, no sampling / spatial Kh).
     healpix_geometry: str = "dual"
+    # --- fesom14-only key (ignored by the other readers) ----------------
+    # Euler angles [alpha, beta, gamma] (degrees, as in the run's namelist)
+    # of the rotated frame a FESOM 1.4 ASCII mesh is stored in; the reader
+    # rotates the coordinates back to geographic on load.  None = the mesh
+    # is geographic.  Never defaulted: the reader warns when a global mesh
+    # without an Arctic node is loaded without it.  Unrelated to `rotation`
+    # (the frame KELP tracks in).
+    input_rotation: Optional[List[float]] = None
 
     def __post_init__(self) -> None:
         if self.r_earth is not None and self.r_earth <= 0:
@@ -594,6 +602,23 @@ class MeshConfig:
                         f"mesh.rotation must be 'fesom2' or a 3-list of "
                         f"finite Euler angles (deg), got {self.rotation!r}")
                 self.rotation = vals
+        if self.input_rotation is not None:
+            vals = None
+            if not isinstance(self.input_rotation, (str, bytes)):
+                try:
+                    items = list(self.input_rotation)
+                    if not any(_is_boolean(x) for x in items):
+                        vals = [float(x) for x in items]
+                except (TypeError, ValueError):
+                    vals = None
+            if (vals is None or len(vals) != 3
+                    or not all(math.isfinite(v) for v in vals)):
+                raise ValueError(
+                    "mesh.input_rotation must be the 3 finite Euler angles "
+                    "[alpha, beta, gamma] (deg) of the frame a FESOM 1.4 "
+                    "ASCII mesh is stored in, as in the run's namelist, got "
+                    f"{self.input_rotation!r}")
+            self.input_rotation = vals
 
 
 @dataclass
