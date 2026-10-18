@@ -41,6 +41,11 @@ nodes_3d)`` — grouping the files by the variables they hold, resolves what
 time each record of each variable represents (:mod:`._timeaxis`) and requires
 every variable to have the records of u. It checks only what the files say
 about themselves; the checks against the mesh belong to ``prepare``.
+
+:meth:`Fesom14Reader.prepare` checks a dataset against the mesh — the sizes,
+the full level axis, the node coordinates when the data carry them, and the
+wet mask of record 0 of every variable — and changes nothing. The engine
+runs it for every dataset a mesh is used with.
 """
 from __future__ import annotations
 
@@ -66,7 +71,8 @@ from ..fesom2 import (
     _warn_near_pole_fesom2,
 )
 from ._ascii_mesh import MESH_FILES, NOD2D, NOD3D, read_ascii_mesh
-from ._layout import (HORIZONTAL_DIMS, TIME_DIM, detect_form, is_data,
+from ._layout import (_MISSING_TEXT, DEPTH_DIMS, HORIZONTAL_DIMS, TIME_DIM,
+                      _first_node_level, detect_form, is_data,
                       wet_mask_levelwise)
 from ._polygons import recover_triangles
 from ._timeaxis import (FileAxis, ResolvedAxis, TimeOptions,
@@ -367,6 +373,68 @@ class Fesom14Reader:
             for ds in opened.values():
                 ds.close()
             raise
+
+    @staticmethod
+    def prepare(mesh: Mesh, ds: xr.Dataset) -> None:
+        """Check a dataset against the mesh; change nothing.
+
+        The engine calls this hook whenever the mesh is not prepared for the
+        dataset and its kept levels (another dataset, a ``max_levels``
+        re-cut). It only checks: neither the mesh (``sigma``, ``depth``,
+        ``metadata``, ``uv_data_last`` included) nor the dataset is changed,
+        so a second call on the same pair is harmless. The static wet mask of
+        the mesh is never re-declared from the data, only compared with it.
+
+        Parameters
+        ----------
+        mesh : Mesh
+            A mesh from :meth:`load_mesh`. The facts compared come from
+            ``mesh.metadata``: the FULL level table ``fesom14_levels``
+            (``mesh.sigma`` may already be cut by ``max_levels``), the node
+            coordinates ``fesom14_lon``/``fesom14_lat``, the 3-D node index
+            table ``fesom14_idx`` (ASCII) or the static wet mask
+            ``fesom14_wet`` (cell polygons).
+        ds : xarray.Dataset
+            A dataset from :meth:`open_dataset`, or a time window of one.
+            Every variable with a leading ``time`` dimension is checked.
+
+        Raises
+        ------
+        ValueError
+            In this order: the mesh is not from this reader; the dataset
+            has no variable with a ``time`` dimension, or a variable's
+            dimensions are not a FESOM 1.4 layout; a ``(time, nodes_3d)``
+            vector on a mesh from cell polygons (it has no 3-D node table);
+            a horizontal size other than the mesh's 2-D nodes (level-wise
+            and 2-D fields) or 3-D nodes (``(time, nodes_3d)`` vectors); a
+            level axis other than the mesh's full level table (in length, or
+            by more than 1e-3 m at a level), or a level dimension without a
+            coordinate; node coordinates ``lon``/``lat`` in the dataset that
+            differ from the mesh's by more than 1e-6 deg (either longitude
+            convention); a dataset without records; record 0 of a variable
+            whose wet mask is not the mesh's: a level-wise record with a
+            value in a dry slot or none in a wet one (the ASCII mesh's index
+            table, or the mask a mesh from cell polygons was built with), a
+            2-D field or a ``(time, nodes_3d)`` vector without a value at
+            some node. The messages name the variable, its first file, the
+            record (by its instant), the node and level, and the fix.
+
+        Notes
+        -----
+        Only record 0 of each variable is read, lazily, one record per
+        variable: the mask of a FESOM 1.4 run is static, and the reads
+        compare every record with it. A dataset whose nodes are ALL in
+        another order than the mesh's (a common permutation) can have masks
+        that agree with the mesh's (columns of equal length); only its node
+        coordinates show it, so data without ``lon``/``lat`` cannot be
+        checked for it.
+        """
+        facts = _mesh_facts(mesh)
+        fields = _fields(ds)
+        _check_sizes(fields, facts)
+        _check_level_axes(ds, fields, facts)
+        _check_mesh_coords(ds, fields, facts)
+        _check_first_records(ds, fields, facts)
 
 
 # ---------------------------------------------------------------------------
@@ -1411,3 +1479,307 @@ def _open_consumed(roles: List[_Role], holders: Dict[str, List[_Head]],
     })
     ds.set_close(partial(_close_all, list(opened.values())))
     return ds
+
+
+# ---------------------------------------------------------------------------
+# prepare: the dataset against the mesh
+# ---------------------------------------------------------------------------
+
+
+_SAME_RUN = ("The data must be output of a run on this mesh: point data.ncinput "
+             "at that output, or mesh.meshpath at the mesh of these data")
+
+
+@dataclass(frozen=True)
+class _MeshFacts:
+    """What ``prepare`` compares a dataset with, from ``mesh.metadata``."""
+
+    levels: np.ndarray              # (K,) the full level table
+    lon: np.ndarray                 # (N,) geographic, [-180, 180)
+    lat: np.ndarray
+    wet: np.ndarray                 # (K, N) the static wet mask
+    mask_text: str                  # where the mask comes from (messages)
+    idx: Optional[np.ndarray]       # (N, K) ASCII only, -1 = dry
+    n3d: int                        # number of 3-D nodes (0 without a table)
+
+
+@dataclass(frozen=True)
+class _Field:
+    """One time-dependent variable of a dataset, as ``prepare`` sees it."""
+
+    name: str
+    layout: str                     # "levelwise" | "nodes3d" | "2d"
+    hdim: str
+    size: int                       # entries along hdim
+    zdim: Optional[str]             # level-wise only
+    where: str                      # " (first file ...)" or ""
+
+
+def _mesh_facts(mesh: Mesh) -> _MeshFacts:
+    """The facts of a mesh from :meth:`Fesom14Reader.load_mesh`."""
+    md = getattr(mesh, "metadata", None) or {}
+    keys = ["fesom14_source", "fesom14_levels", "fesom14_wet", "fesom14_lon",
+            "fesom14_lat"]
+    if md.get("fesom14_source") == "ascii":
+        keys.append("fesom14_idx")
+    missing = [k for k in keys if k not in md]
+    if missing:
+        raise ValueError(
+            f"fesom14: the mesh has no {missing[0]!r} in mesh.metadata; the "
+            "data are checked against a mesh built by the fesom14 reader's "
+            "load_mesh (mesh.type: fesom14). Build the mesh with that reader")
+    if md["fesom14_source"] == "ascii":
+        idx = np.asarray(md["fesom14_idx"])
+        wet = (idx >= 0).T
+        return _MeshFacts(
+            levels=np.asarray(md["fesom14_levels"], np.float64),
+            lon=np.asarray(md["fesom14_lon"], np.float64),
+            lat=np.asarray(md["fesom14_lat"], np.float64), wet=wet,
+            mask_text="the mesh's 3-D node index table (the ASCII mesh)",
+            idx=idx, n3d=int(np.count_nonzero(wet)))
+    mask_file = md.get("fesom14_mask_file")
+    return _MeshFacts(
+        levels=np.asarray(md["fesom14_levels"], np.float64),
+        lon=np.asarray(md["fesom14_lon"], np.float64),
+        lat=np.asarray(md["fesom14_lat"], np.float64),
+        wet=np.asarray(md["fesom14_wet"], dtype=bool),
+        mask_text=("the mesh's static wet mask (record 0 of the u variable in "
+                   f"{mask_file}, the file the mesh was built from)"),
+        idx=None, n3d=0)
+
+
+def _where(da: xr.DataArray) -> str:
+    """`` (first file <path>)`` when the variable's encoding names it."""
+    src = da.encoding.get("source")
+    return f" (first file {src})" if src else ""
+
+
+def _fields(ds: xr.Dataset) -> List[_Field]:
+    """The variables with a leading ``time`` dimension and their layouts.
+
+    A ``(time, nodes_3d)`` variable is a vector over the 3-D nodes, unless
+    the dataset is level-wise: there it is a 2-D field over a horizontal
+    dimension named ``nodes_3d`` (the level-wise writer's name).
+    """
+    names = [n for n in ds.data_vars if tuple(ds[n].dims[:1]) == (TIME_DIM,)]
+    if not names:
+        raise ValueError(
+            f"fesom14: the dataset holds no variable with a {TIME_DIM!r} "
+            "dimension; the data are checked against the mesh as opened by "
+            "the fesom14 reader's open_dataset")
+    levelwise = any(ds[n].ndim == 3 for n in names)
+    out: List[_Field] = []
+    for name in names:
+        da = ds[name]
+        dims = tuple(da.dims)
+        where = _where(da)
+        if len(dims) == 3 and dims[1] in DEPTH_DIMS and dims[2] in HORIZONTAL_DIMS:
+            out.append(_Field(name, "levelwise", dims[2], da.sizes[dims[2]],
+                              dims[1], where))
+        elif dims == (TIME_DIM, "nodes_3d") and not levelwise:
+            out.append(_Field(name, "nodes3d", dims[1], da.sizes[dims[1]],
+                              None, where))
+        elif len(dims) == 2 and dims[1] in HORIZONTAL_DIMS:
+            out.append(_Field(name, "2d", dims[1], da.sizes[dims[1]], None,
+                              where))
+        else:
+            raise ValueError(
+                f"fesom14: variable {name!r}{where} has dimensions {dims}, which "
+                f"is not a FESOM 1.4 layout: ('{TIME_DIM}', <depth>, "
+                f"<horizontal>) level-wise, ('{TIME_DIM}', 'nodes_3d') over the "
+                f"3-D nodes, or ('{TIME_DIM}', <horizontal>) for a 2-D field, "
+                f"with <depth> one of {DEPTH_DIMS} and <horizontal> one of "
+                f"{HORIZONTAL_DIMS}. Open the data with the fesom14 reader's "
+                "open_dataset")
+    return out
+
+
+def _check_sizes(fields: List[_Field], facts: _MeshFacts) -> None:
+    """Vectors over the 3-D nodes need the ASCII mesh's table and have one
+    entry per 3-D node; other fields have one value per 2-D node."""
+    for f in fields:
+        if f.layout == "nodes3d" and facts.idx is None:
+            raise ValueError(
+                f"fesom14: variable {f.name!r}{f.where} is one vector over the "
+                "3-D nodes (dimensions (time, nodes_3d)), but the mesh was built "
+                "from cell polygons, which give no 3-D node table to place its "
+                "entries on the levels. Set mesh.meshpath to the FESOM 1.4 ASCII "
+                f"mesh directory of the run (holding {', '.join(MESH_FILES)})")
+    n_nodes = facts.lon.size
+    for f in fields:
+        if f.layout == "nodes3d":
+            if f.size != facts.n3d:
+                also = (f" ({f.size} is the number of 2-D nodes: a field of one "
+                        "value per 2-D node is not a vector over the 3-D nodes)"
+                        if f.size == n_nodes else "")
+                raise ValueError(
+                    f"fesom14: variable {f.name!r}{f.where} is one vector over "
+                    f"the 3-D nodes with {f.size} entries, but the ASCII mesh has "
+                    f"{facts.n3d} 3-D nodes{also}. {_SAME_RUN}")
+        elif f.size != n_nodes:
+            raise ValueError(
+                f"fesom14: variable {f.name!r}{f.where} has {f.size} nodes along "
+                f"{f.hdim!r}, but the mesh has {n_nodes}. {_SAME_RUN}")
+
+
+def _level_span(z: np.ndarray) -> str:
+    return f"{float(z[0]):g} to {float(z[-1]):g} m" if z.size else "none"
+
+
+def _check_level_axes(ds: xr.Dataset, fields: List[_Field],
+                      facts: _MeshFacts) -> None:
+    """The level axis of every level-wise variable is the mesh's FULL level
+    table, within ``_LEVEL_TOL``."""
+    lev = facts.levels
+    seen = set()
+    for f in fields:
+        if f.layout != "levelwise" or f.zdim in seen:
+            continue
+        seen.add(f.zdim)
+        if f.zdim not in ds.variables:
+            raise ValueError(
+                f"fesom14: the level dimension {f.zdim!r} of variable "
+                f"{f.name!r}{f.where} has no coordinate in the dataset; the "
+                "level depths of the data (m, positive down) are compared with "
+                "the mesh's. Open the data with the fesom14 reader's "
+                "open_dataset")
+        z = np.asarray(ds[f.zdim].values, dtype=np.float64).ravel()
+        if z.shape != lev.shape:
+            raise ValueError(
+                f"fesom14: variable {f.name!r}{f.where} has {z.size} levels along "
+                f"{f.zdim!r} ({_level_span(z)}), but the mesh has {lev.size} "
+                f"({_level_span(lev)}); the data must hold every level of the "
+                "mesh's table, whatever mode.max_levels keeps. " + _SAME_RUN)
+        off = np.flatnonzero(~(np.abs(z - lev) <= _LEVEL_TOL))
+        if off.size:
+            k = int(off[0])
+            raise ValueError(
+                f"fesom14: the levels of variable {f.name!r}{f.where} differ "
+                f"from the mesh's at level {k}: {float(z[k]):g} m against "
+                f"{float(lev[k]):g} m ({off.size} level(s) differ by more than "
+                f"{_LEVEL_TOL:g} m). " + _SAME_RUN)
+
+
+def _owners(idx: np.ndarray, n3d: int) -> Tuple[np.ndarray, np.ndarray]:
+    """The 2-D node and the level of every 3-D node of an index table."""
+    nodes, levels = np.nonzero(idx >= 0)
+    node_of = np.empty(n3d, dtype=np.int64)
+    level_of = np.empty(n3d, dtype=np.int64)
+    node_of[idx[nodes, levels]] = nodes
+    level_of[idx[nodes, levels]] = levels
+    return node_of, level_of
+
+
+def _check_mesh_coords(ds: xr.Dataset, fields: List[_Field],
+                       facts: _MeshFacts) -> None:
+    """Node coordinates ``lon``/``lat`` over a horizontal dimension of the
+    data equal the mesh's within ``_COORD_TOL`` (either longitude
+    convention); over ``nodes_3d`` (vectors over the 3-D nodes) each entry
+    has the coordinates of its 2-D node."""
+    seen = set()
+    for f in fields:
+        if f.hdim in seen:
+            continue
+        seen.add(f.hdim)
+        if not all(c in ds.variables and tuple(ds[c].dims) == (f.hdim,)
+                   for c in ("lon", "lat")):
+            continue
+        lon = np.asarray(ds["lon"].values, dtype=np.float64)
+        lat = np.asarray(ds["lat"].values, dtype=np.float64)
+        node_of = level_of = None
+        if f.layout == "nodes3d":
+            node_of, level_of = _owners(facts.idx, facts.n3d)
+            ref_lon, ref_lat = facts.lon[node_of], facts.lat[node_of]
+        else:
+            ref_lon, ref_lat = facts.lon, facts.lat
+        off = ~((_lon_diff(lon, ref_lon) <= _COORD_TOL)
+                & (np.abs(lat - ref_lat) <= _COORD_TOL))
+        if not off.any():
+            continue
+        i = int(np.argmax(off))
+        at = (f"3-D node {i} (node {int(node_of[i])}, level {int(level_of[i])})"
+              if node_of is not None else f"node {i}")
+        raise ValueError(
+            f"fesom14: the node coordinates of the data (lon, lat over "
+            f"{f.hdim!r}; variable {f.name!r}{f.where}) differ from the mesh's "
+            f"at {at}: ({float(lon[i]):.7f}, {float(lat[i]):.7f}) against "
+            f"({float(ref_lon[i]):.7f}, {float(ref_lat[i]):.7f}) "
+            f"({int(off.sum())} node(s) differ by more than {_COORD_TOL:g} deg, "
+            "the longitude convention aside). The data must list the mesh's "
+            "nodes in the mesh's order; data of this mesh with the nodes in "
+            "another order pass every other check. " + _SAME_RUN)
+
+
+def _record_label(ds: xr.Dataset) -> str:
+    """Record 0 of a dataset, named by its instant."""
+    if TIME_DIM not in ds.variables:
+        return "0 (the first of the dataset)"
+    t = ds[TIME_DIM].values[0]
+    text = t.isoformat() if hasattr(t, "isoformat") else str(t)
+    return f"{text} (the first of the dataset)"
+
+
+def _check_first_records(ds: xr.Dataset, fields: List[_Field],
+                         facts: _MeshFacts) -> None:
+    """Record 0 of every variable has the mesh's static wet mask: one record
+    per variable is read."""
+    if ds.sizes.get(TIME_DIM, 0) == 0:
+        raise ValueError(
+            f"fesom14: the dataset has no record (its {TIME_DIM!r} dimension is "
+            "empty); record 0 of every variable is read to compare its wet mask "
+            "with the mesh's. Give the run data with records")
+    rec = _record_label(ds)
+    for f in fields:
+        first = np.asarray(ds[f.name].isel({TIME_DIM: 0}).values)
+        data = is_data(first)
+        head = f"fesom14: variable {f.name!r}, record {rec}{f.where}"
+        if f.layout == "levelwise":
+            _check_mask_kn(head, first, data, facts)
+            continue
+        missing = ~data
+        if not missing.any():
+            continue
+        i = int(np.argmax(missing))
+        fix = ("Check the file; leave the data of another mesh or run out of "
+               "data.ncinput")
+        if f.layout == "nodes3d":
+            node_of, level_of = _owners(facts.idx, facts.n3d)
+            raise ValueError(
+                f"{head}: no value ({_MISSING_TEXT}) at 3-D node {i} (node "
+                f"{int(node_of[i])}, level {int(level_of[i])}); "
+                f"{int(missing.sum())} 3-D node(s) without one. Every 3-D node "
+                "of the mesh is wet, so a vector over the 3-D nodes holds a value "
+                f"in every entry. {fix}")
+        raise ValueError(
+            f"{head}: no value ({_MISSING_TEXT}) at node {i}; "
+            f"{int(missing.sum())} node(s) without one. A 2-D field holds a "
+            "value at every node of the mesh, which is wet at the surface "
+            f"everywhere. {fix}")
+
+
+def _check_mask_kn(head: str, first: np.ndarray, data: np.ndarray,
+                   facts: _MeshFacts) -> None:
+    """The wet mask of a level-wise record equals the mesh's."""
+    wet = facts.wet
+    if np.array_equal(data, wet):
+        return
+    missing = wet & ~data
+    extra = data & ~wet
+    n, k = _first_node_level(missing | extra)
+    mesh_state = "wet" if wet[k, n] else "dry (below the bed)"
+    data_state = (f"the value {float(first[k, n]):g}" if data[k, n]
+                  else f"no value ({_MISSING_TEXT})")
+    if extra.any() and np.all(first[extra] == 0):
+        why = ("The data are written as 0 below the bed (not as a fill value "
+               "such as NaN or 1e30): such a record looks wet at every level, "
+               "and a missing value cannot be told from the bed; FESOM 1.4 "
+               "level-wise output holds a fill value below the bed. Check how "
+               "the files were written. " + _SAME_RUN)
+    else:
+        why = ("Every variable and record holds data in exactly the wet slots "
+               "of the mesh's static mask. " + _SAME_RUN)
+    raise ValueError(
+        f"{head}: its wet mask differs from {facts.mask_text} at node {n}, "
+        f"level {k} (0-based): the mesh: {mesh_state}, the data: {data_state} "
+        f"({int(missing.sum())} wet slot(s) without data, {int(extra.sum())} "
+        f"dry slot(s) with data). {why}")
