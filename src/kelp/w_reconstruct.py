@@ -191,10 +191,50 @@ def _divergence_layer_approx(
         )
 
 
+def require_layer_data(mesh, uv_vertical: str = "layer") -> None:
+    """Refuse u/v that lie on the levels instead of the layers.
+
+    The reconstruction integrates the divergence of layer-centred u/v
+    (``K-1`` layers between ``K`` interfaces, FESOM2).  A FESOM 1.4 mesh
+    (``mesh.type: fesom14``) carries u/v on the levels, and its output has
+    the vertical velocity itself.
+
+    Parameters
+    ----------
+    mesh : Mesh
+        A mesh from a reader; one built by the FESOM 1.4 reader
+        (``mesh.metadata["fesom14_source"]``) is refused.
+    uv_vertical : str
+        Where u/v lie (``VelocityField.uv_vertical``): ``"level"`` is
+        refused; ``"layer"`` (the default) and ``"layer_linear"`` pass.
+
+    Raises
+    ------
+    ValueError
+        For a FESOM 1.4 mesh or u/v on the levels.
+    """
+    md = getattr(mesh, "metadata", None) or {}
+    if "fesom14_source" in md:
+        what = ("the mesh is a FESOM 1.4 mesh (mesh.type: fesom14), whose "
+                "u/v lie on the levels")
+    elif str(uv_vertical) == "level":
+        what = "u/v lie on the levels (uv_vertical 'level')"
+    else:
+        return
+    raise ValueError(
+        f"W reconstruction: {what}. The reconstruction integrates layer "
+        "u/v (K-1 layers between the K interfaces, FESOM2) only. FESOM 1.4 "
+        "output carries the vertical velocity ('wo'): give its files to the "
+        "run (mode.var_w names another variable) instead of reconstructing "
+        "it")
+
+
 def compute_divergence_approx(
     u: np.ndarray,
     v: np.ndarray,
     mesh,
+    *,
+    uv_vertical: str = "layer",
 ) -> np.ndarray:
     """Compute horizontal divergence for all depth layers (Tier 1).
 
@@ -207,12 +247,16 @@ def compute_divergence_approx(
     mesh : Mesh
         Must have ``elem_nodes``, ``nodes_lon``, ``nodes_lat``,
         ``node_to_elems``, ``node_to_elems_count``.
+    uv_vertical : str
+        Where u/v lie; ``"level"`` (and a FESOM 1.4 mesh) is refused by
+        :func:`require_layer_data`.
 
     Returns
     -------
     np.ndarray, shape (K-1, N)
         Horizontal divergence at each node for each layer (1/s).
     """
+    require_layer_data(mesh, uv_vertical)
     n_layers = u.shape[0]
     N = mesh.n_nodes
     div_h = np.zeros((n_layers, N), dtype=np.float64)
@@ -318,6 +362,8 @@ def compute_divergence_with_area(
     nod_area: np.ndarray,
     nlevels_elem: Optional[np.ndarray] = None,
     ulevels_elem: Optional[np.ndarray] = None,
+    *,
+    uv_vertical: str = "layer",
 ) -> np.ndarray:
     """Compute horizontal divergence with depth-dependent area (Tier 2).
 
@@ -334,12 +380,16 @@ def compute_divergence_with_area(
         Number of active levels per element.  If None, all layers active.
     ulevels_elem : np.ndarray, shape (E,), optional
         Upper active level per element (1-based).  If None, defaults to 1.
+    uv_vertical : str
+        Where u/v lie; ``"level"`` (and a FESOM 1.4 mesh) is refused by
+        :func:`require_layer_data`.
 
     Returns
     -------
     np.ndarray, shape (K-1, N)
         Horizontal divergence at each node for each layer (1/s).
     """
+    require_layer_data(mesh, uv_vertical)
     n_layers = u.shape[0]
     N = mesh.n_nodes
     E = mesh.n_elements
@@ -557,10 +607,14 @@ def reconstruct_w(
     mesh_extras: Optional[Dict[str, np.ndarray]] = None,
     method: str = "auto",
     correct_bottom: bool = True,
+    *,
+    uv_vertical: str = "layer",
 ) -> np.ndarray:
     """Reconstruct Cartesian vertical velocity from horizontal fields.
 
     This function is z-level-only and assumes ``mesh.vertical_coord == "zlevel"``.
+    u/v must lie on the layers: a FESOM 1.4 mesh, or ``uv_vertical="level"``,
+    is refused (FESOM 1.4 output carries w).
 
     Parameters
     ----------
@@ -589,13 +643,23 @@ def reconstruct_w(
         diagnostics (Variant C).
     correct_bottom : bool
         Apply linear bottom correction (Variant A only).
+    uv_vertical : str
+        Where u/v lie (``VelocityField.uv_vertical``): ``"layer"`` (the
+        default); ``"level"`` is refused by :func:`require_layer_data`.
 
     Returns
     -------
     np.ndarray, shape (K, N)
         Cartesian vertical velocity at z-level interfaces.
         Positive-down convention (w > 0 = downwelling).
+
+    Raises
+    ------
+    ValueError
+        An unknown ``method``; ``method="ale"`` without ``w_ale``; a FESOM
+        1.4 mesh or u/v on the levels.
     """
+    require_layer_data(mesh, uv_vertical)
     if method not in ("divergence", "ale", "auto"):
         raise ValueError(f"method must be 'divergence', 'ale', or 'auto', got '{method}'")
 
@@ -655,6 +719,7 @@ def reconstruct_w(
 
 
 __all__ = [
+    "require_layer_data",
     "compute_ssh_tendency",
     "compute_divergence_approx",
     "compute_divergence_with_area",

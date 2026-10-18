@@ -505,7 +505,7 @@ class MeshConfig:
     #            (element-layout u/v => the fused leastsq kernels;
     #            v1 is 2-D only, no sampling / spatial Kh).
     healpix_geometry: str = "dual"
-    # --- fesom14-only key (ignored by the other readers) ----------------
+    # --- fesom14-only key (refused for the other mesh types) ------------
     # Euler angles [alpha, beta, gamma] (degrees, as in the run's namelist)
     # of the rotated frame a FESOM 1.4 ASCII mesh is stored in; the reader
     # rotates the coordinates back to geographic on load.  None = the mesh
@@ -602,6 +602,15 @@ class MeshConfig:
                         f"mesh.rotation must be 'fesom2' or a 3-list of "
                         f"finite Euler angles (deg), got {self.rotation!r}")
                 self.rotation = vals
+        if self.input_rotation is not None and self.type != "fesom14":
+            # the other readers would ignore it: a mesh stored in a rotated
+            # frame would then be read as geographic without a word
+            raise ValueError(
+                "mesh.input_rotation is set, but mesh.type is "
+                f"{self.type!r}: the angles of the frame a mesh is stored in "
+                "apply to FESOM 1.4 ASCII meshes only (mesh.type: fesom14). "
+                "Remove mesh.input_rotation (mesh.rotation sets the frame "
+                "KELP tracks in)")
         if self.input_rotation is not None:
             vals = None
             if not isinstance(self.input_rotation, (str, bytes)):
@@ -632,7 +641,11 @@ class DataConfig:
     averaging window, so the effective time must be shifted to the
     *midpoint* of each window.  This field should always be set
     explicitly; if omitted a warning is printed with a suggestion based
-    on the mesh type.
+    on the mesh type.  ``mesh.type: fesom14`` is the exception: its reader
+    resolves what time each record represents, ``time_averaging`` is
+    refused there, and ``time_stamp`` / ``time_window`` / ``time_offset``
+    say what the stamps mean when the files cannot (refused with any other
+    mesh type when the run starts).
     """
     ncinput: str = ""              # velocity NetCDF file or directory
     ncinput_v: str = ""            # separate v file (empty = u+v in same ncinput)
@@ -645,8 +658,27 @@ class DataConfig:
     # of a sharded run); None = the seed file's '# kelp particle_offset N'
     # header (utils/split_seeds.py) or 0.  Keys every random draw.
     particle_offset: Optional[int] = None
+    # --- fesom14 only: what each record's time stamp means --------------
+    # Passed to the reader's open_dataset only when set; any other mesh type
+    # refuses them when the run starts.  time_stamp: start | centre | end |
+    # instant (where the stamp sits in its averaging window; instant =
+    # snapshots); time_window: calendar_month | calendar_year | calendar_day
+    # | '<number> <s|min|h|d>' (the averaging window, or the snapshot
+    # cadence); the two are given together or not at all, and then decide
+    # over the files' time bounds and output schedule.  time_offset:
+    # '<+-number> <s|min|h|d>' added to the raw stamps before anything else
+    # (e.g. a raw job that started mid-day).
+    time_stamp: Optional[str] = None
+    time_window: Optional[str] = None
+    time_offset: Optional[str] = None
 
     def __post_init__(self) -> None:
+        if (self.time_stamp is not None or self.time_window is not None
+                or self.time_offset is not None):
+            # the reader's own check, imported only when a key is set
+            from ..readers.fesom14._timeaxis import TimeOptions
+            TimeOptions(stamp=self.time_stamp, window=self.time_window,
+                        offset=self.time_offset).validate()
         if self.particle_offset is not None:
             from .release import check_particle_offset
             try:

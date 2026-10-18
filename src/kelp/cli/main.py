@@ -70,6 +70,13 @@ def _cmd_info(args: argparse.Namespace) -> int:
         print(f"error: unknown mesh type {config.mesh.type!r}: {exc}",
               file=sys.stderr)
         return 1
+    from ..tracking import _describe_record_times, _time_option_kwargs
+    try:
+        # the stamp options reach open_dataset as in a run (fesom14 only)
+        time_kw = _time_option_kwargs(config)
+    except (TypeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     print(f"Config: {config_path}")
     print(f"  Mesh type: {config.mesh.type}")
@@ -112,13 +119,26 @@ def _cmd_info(args: argparse.Namespace) -> int:
         print(f"    grid hash: (not evaluated: {exc})")
 
     try:
-        ds = reader.open_dataset(config.data.ncinput, mode_cfg=config.mode)
+        # the separate v/w paths, as a run passes them
+        ds = reader.open_dataset(config.data.ncinput,
+                                 v_path=config.data.ncinput_v or None,
+                                 w_path=config.data.ncinput_w or None,
+                                 mode_cfg=config.mode, **time_kw)
     except Exception as exc:
         print(f"error: could not open dataset {config.data.ncinput!r}: {exc}",
               file=sys.stderr)
         return 1
 
     try:
+        # the reader's mesh-relative checks, as a run makes them
+        prepare = getattr(reader, "prepare", None)
+        if prepare is not None:
+            try:
+                prepare(mesh, ds)
+            except Exception as exc:
+                print(f"error: the dataset {config.data.ncinput!r} does not "
+                      f"fit the mesh: {exc}", file=sys.stderr)
+                return 1
         if "time" in ds.dims:
             n_time = ds.sizes["time"]
             print(f"  Time range: {n_time} steps")
@@ -126,6 +146,10 @@ def _cmd_info(args: argparse.Namespace) -> int:
                 t0 = ds["time"].values[0]
                 t1 = ds["time"].values[-1]
                 print(f"    {t0}  →  {t1}")
+            record_times = _describe_record_times(
+                ds, getattr(config.data, "time_offset", None))
+            if record_times is not None:
+                print(f"    record times {record_times}")
     finally:
         ds.close()
     return 0

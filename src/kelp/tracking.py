@@ -2945,6 +2945,109 @@ def _resolve_particle_offset(config) -> int:
     return offset
 
 
+#: ``data.*`` keys that say what each record's time stamp means; only the
+#: mesh types listed in ``_READER_RESOLVES_TIME`` read them
+_TIME_OPTION_KEYS = ("time_stamp", "time_window", "time_offset")
+
+#: mesh types whose reader resolves what time each record represents (the
+#: centre of its averaging window for means, the stamp for snapshots): no
+#: midpoint shift, no ``data.time_averaging``, the stamp options above
+_READER_RESOLVES_TIME = ("fesom14",)
+
+#: the output's ``time_averaging`` attribute for those readers
+RESOLVED_BY_READER = "resolved_by_reader"
+
+#: what resolved the record times, by ``ds.attrs["fesom14_time_source"]``
+_TIME_SOURCE_TEXT = {
+    "bounds": "the files' time bounds",
+    "schedule": "the files' output_schedule",
+    "options": "data.time_stamp and data.time_window",
+}
+
+
+def _time_option_kwargs(config) -> Dict[str, str]:
+    """The stamp options set in ``config.data``, as ``open_dataset`` kwargs.
+
+    Only a reader that resolves its record times takes them (``mesh.type:
+    fesom14``); it also takes the place of ``data.time_averaging``.  Called
+    before the mesh or any data is read.
+
+    Parameters
+    ----------
+    config : AppConfig
+
+    Returns
+    -------
+    dict
+        ``{key: value}`` for each of ``time_stamp``, ``time_window`` and
+        ``time_offset`` that is set (empty when none is).
+
+    Raises
+    ------
+    TypeError
+        A key is set for another mesh type; the message names every key
+        set and the mesh type.
+    ValueError
+        ``data.time_averaging`` is set for a reader that resolves its record
+        times; the message points to the stamp options.
+    """
+    data = config.data
+    kw = {k: getattr(data, k) for k in _TIME_OPTION_KEYS
+          if getattr(data, k, None) is not None}
+    mesh_type = config.mesh.type
+    if mesh_type not in _READER_RESOLVES_TIME:
+        if kw:
+            keys = ", ".join(f"data.{k}" for k in kw)
+            raise TypeError(
+                f"{keys} {'is' if len(kw) == 1 else 'are'} set, but mesh.type "
+                f"is {mesh_type!r}: the stamp options are read by the FESOM "
+                "1.4 reader only (mesh.type: fesom14). Remove "
+                f"{keys}; for this reader data.time_averaging ('mean' or "
+                "'instant') says what the time stamps are")
+        return kw
+    if getattr(data, "time_averaging", None) is not None:
+        raise ValueError(
+            f"data.time_averaging = {data.time_averaging!r} is set, but the "
+            f"{mesh_type} reader resolves what time each record represents "
+            "itself (the centre of its averaging window for means, from the "
+            "files' time bounds or output schedule), and nothing shifts its "
+            "time axis again. Remove data.time_averaging; when the files do "
+            "not say what their stamps are, set data.time_stamp (start | "
+            "centre | end | instant) and data.time_window (the averaging "
+            "window or the snapshot cadence), and data.time_offset for "
+            "stamps that sit early or late")
+    return kw
+
+
+def _describe_record_times(ds, offset: Optional[str] = None) -> Optional[str]:
+    """One summary line on record times resolved by the reader, or None.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        A dataset whose reader resolved its record times (it carries
+        ``attrs["fesom14_time_source"]``); any other gives None.
+    offset : str, optional
+        ``data.time_offset``, named when set.
+
+    Returns
+    -------
+    str or None
+        What resolved the times and the first and last instants.
+    """
+    source = getattr(ds, "attrs", {}).get("fesom14_time_source")
+    if source is None:
+        return None
+    text = (f"resolved by the reader from "
+            f"{_TIME_SOURCE_TEXT.get(source, str(source))}")
+    if offset is not None:
+        text += f", data.time_offset {offset} applied"
+    t = ds["time"].values
+    if len(t):
+        text += f"; first {t[0]}, last {t[-1]}"
+    return text
+
+
 def run_tracking(
     config: AppConfig,
     verbose: bool = False,
@@ -2995,6 +3098,9 @@ def run_tracking(
         )
 
     reader = get_reader(config.mesh.type)
+    # the stamp options (and the time_averaging rule of a reader that
+    # resolves its record times), refused before anything is read
+    time_kw = _time_option_kwargs(config)
 
     # Load mesh
     if verbose:
@@ -3064,6 +3170,8 @@ def run_tracking(
             and getattr(_d0, "az_enabled", False)
             and getattr(_d0, "var_az", None)):
         _extra["diffusion"] = _d0
+    # the stamp options, only when set (only the fesom14 reader takes them)
+    _extra.update(time_kw)
     ds = reader.open_dataset(config.data.ncinput, v_path=v_path, w_path=w_path,
                              mode_cfg=config.mode, **_extra)
     # the reader's optional mesh-relative dataset hook, before anything
@@ -3091,8 +3199,17 @@ def run_tracking(
     file_times, file_dt_detected = extract_time_info(ds)
 
     # -- time_averaging: warn if not set, apply midpoint shift --
+    # A reader that resolves its record times (fesom14) already placed each
+    # record at the centre of its window: no warning, no shift (a set
+    # data.time_averaging was refused by _time_option_kwargs).
     time_avg = config.data.time_averaging
-    if time_avg is None:
+    if config.mesh.type in _READER_RESOLVES_TIME:
+        time_avg = RESOLVED_BY_READER
+        record_times = _describe_record_times(
+            ds, getattr(config.data, "time_offset", None))
+        if record_times is not None:
+            print(f"  Record times:      {record_times}")
+    elif time_avg is None:
         mesh_type = config.mesh.type.lower()
         if "fesom2" in mesh_type:
             suggestion = "mean"
@@ -3355,6 +3472,17 @@ def run_tracking(
             "healpix pixel geometry v1 does not support spatial Kh "
             "fields (em/m1 diffusion) — use the dual geometry or "
             "uniform Kh.")
+    if (config.mesh.type == "fesom14"
+            and config.numerics.diffusion.enabled
+            and config.numerics.diffusion.scheme in ("em", "m1")):
+        # Same pre-writer rule: the reader never reads diffusivity fields,
+        # so the step would fail on the missing Kh after the output exists.
+        raise ValueError(
+            f"mesh.type 'fesom14': diffusion scheme "
+            f"{config.numerics.diffusion.scheme!r} reads spatial Kh fields "
+            "(diffusion.var_kh_zonal / var_kh_meridional), which FESOM 1.4 "
+            "output does not carry. Use diffusion.scheme: uniform with "
+            "kh_zonal / kh_meridional.")
     if config.numerics.uv_interp == "edge_leastsq":
         # Pre-warm the lazy edge-adjacency table so step 0 doesn't pay
         # the one-time build inside the tracking loop.
@@ -3498,6 +3626,17 @@ def run_tracking(
         cfg_eta = getattr(config.mode, "var_eta", None)
         if cfg_eta:
             eta_names.append(cfg_eta)
+        if (beach_cfg.use_eta and "fesom14_has_eta" in ds.attrs
+                and not int(ds.attrs["fesom14_has_eta"])):
+            # the FESOM 1.4 reader opened no sea-surface height: eta = 0
+            name = cfg_eta or "zos"
+            raise ValueError(
+                "beaching.use_eta: true needs the sea-surface height, but no "
+                f"file under data.ncinput holds {name!r} (FESOM 1.4 data "
+                "without it has eta = 0 everywhere, so eta never dries a "
+                f"node). Add the {name!r} files to data.ncinput (or set "
+                "mode.var_eta to the name the files use), or set "
+                "beaching.use_eta: false")
         if beach_cfg.use_eta and not any(k in ds for k in eta_names):
             raise ValueError(
                 "beaching.use_eta=true requires an ssh/eta/zos (or the "
