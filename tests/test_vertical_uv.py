@@ -1,9 +1,10 @@
 """Tests for ``kelp.numerics.vertical_uv``: the depth-linear u/v data-point
-table, the per-node last usable point, the bracket/read helpers and the
-record check.
+table, the per-column last usable point and bed (nodes and elements), the
+wet test, the bracket/read helpers and the record check.
 
 All synthetic: a 4-node z-level mesh (levels ``[0, 10, 20, 30]`` m) and
-hand-built node-layout fields.
+hand-built node-layout fields; a 3-element mesh with a hand-set element
+declaration and bed for the element table.
 """
 from __future__ import annotations
 
@@ -160,7 +161,7 @@ def test_declaration_snapshot_at_first_use():
     assert snap is not decl and snap.base is None
     assert snap.dtype == decl.dtype and snap.tolist() == [0, 2, 1, 1]
     assert not snap.flags.writeable and decl.flags.writeable
-    assert mesh._uv_depth_points["level"].decl is snap
+    assert mesh._uv_depth_points[("level", "node")].decl is snap
     # the reader's own array is no longer the declaration
     decl[:] = 3
     assert vu.depth_points(mesh, "level") is dp
@@ -171,7 +172,7 @@ def test_declaration_snapshot_at_first_use():
     # the other placement reuses the snapshot, it does not copy it again
     vu.depth_points(mesh, "layer_linear")
     assert mesh.metadata["uv_data_last"] is snap
-    assert mesh._uv_depth_points["layer_linear"].decl is snap
+    assert mesh._uv_depth_points[("layer_linear", "node")].decl is snap
     # a new array is a new declaration
     mesh.metadata["uv_data_last"] = np.array([3, 2, 1, 0], dtype=np.int32)
     assert vu.depth_points(mesh, "level").last.tolist() == [3, 2, 1, 0]
@@ -702,7 +703,7 @@ def test_cache_survives_id_reuse():
     vu = _vu()
     mesh = _mesh()
     dp1 = vu.depth_points(mesh, "level")
-    entry = mesh._uv_depth_points["level"]
+    entry = mesh._uv_depth_points[("level", "node")]
     assert entry.sigma is mesh.sigma and entry.depth is mesh.depth
     assert entry.decl is None and entry.points is dp1
     del entry
@@ -712,7 +713,7 @@ def test_cache_survives_id_reuse():
         dp = vu.depth_points(mesh, "level")
         assert all(dp is not old for old in seen)
         assert_bitwise(dp.last, dp1.last, "last")
-        entry = mesh._uv_depth_points["level"]
+        entry = mesh._uv_depth_points[("level", "node")]
         assert entry.depth is mesh.depth and entry.sigma is mesh.sigma
         assert entry.points is dp
         del entry
@@ -793,7 +794,7 @@ def test_mesh_field_declared_and_copies_do_not_share():
         dpc = vu.depth_points(clone, "level")
         assert dpc is not dp
         assert vu.depth_points(mesh, "level") is dp
-        assert mesh._uv_depth_points["level"].depth is mesh.depth
+        assert mesh._uv_depth_points[("level", "node")].depth is mesh.depth
 
     # pickling and deep copies carry consistent tables but a field checked
     # on the original is unchecked on the copy (another DepthPoints object)
@@ -805,6 +806,332 @@ def test_mesh_field_declared_and_copies_do_not_share():
         assert_bitwise(dpc.last, dp.last, "last")
         assert not vu.is_checked(vel, clone)
         assert vu.is_checked(vel, mesh)
+
+
+# ---------------------------------------------------------------------------
+# The bed of every column; the element table, its record check; uv_wet
+# ---------------------------------------------------------------------------
+
+#: levels of the element-table mesh; layer centres [5, 20, 45]
+LEVELS_E = [0.0, 10.0, 30.0, 60.0]
+
+
+def _elem_mesh(levels=LEVELS_E, *, decl=(2, 0, 1), bed=(60.0, 25.0, 30.0),
+               depths=(60.0, 60.0, 60.0, 60.0, 60.0)):
+    """5 nodes, 3 triangles; the element declaration
+    ``metadata["uv_data_last_elem"]`` and bed ``metadata["elem_bed"]`` set
+    by hand, as a reader declares them (``None`` leaves one out)."""
+    elem = np.array([[0, 1, 2], [1, 3, 2], [2, 3, 4]], dtype=np.int32)
+    lon = np.array([0.0, 1.0, 0.5, 1.5, 1.0])
+    lat = np.array([0.0, 0.0, 1.0, 1.0, 2.0])
+    n = lon.size
+    mesh = Mesh(
+        name="t",
+        nodes_lon=lon,
+        nodes_lat=lat,
+        depth=np.asarray(depths, dtype=np.float64),
+        elem_nodes=elem,
+        elem_center_lon=lon[elem].mean(axis=1),
+        elem_center_lat=lat[elem].mean(axis=1),
+        node_to_elems=np.zeros((n, 1), dtype=np.int32),
+        node_to_elems_count=np.ones(n, dtype=np.int32),
+        sigma=np.asarray(levels, dtype=np.float64),
+        vertical_coord="zlevel",
+    )
+    if decl is not None:
+        mesh.metadata["uv_data_last_elem"] = np.asarray(decl, dtype=np.int32)
+    if bed is not None:
+        mesh.metadata["elem_bed"] = np.asarray(bed, dtype=np.float64)
+    return mesh
+
+
+def _efield(u, v=None, *, w=None):
+    """An element-layout ``"layer_linear"`` field on ``_elem_mesh``."""
+    u = np.asarray(u, dtype=np.float64)
+    v = np.zeros_like(u) if v is None else np.asarray(v, dtype=np.float64)
+    return VelocityField(u=u, v=v, eta=np.zeros(5), w=w,
+                         uv_layout="element", uv_vertical="layer_linear")
+
+
+def _etable(vu, mesh):
+    return vu.depth_points(mesh, "layer_linear", layout="element")
+
+
+def test_bed_nodes_is_depth():
+    """A node's bed is its physical bed, ``mesh.depth``: a read-only
+    float64 copy, the same for both placements, next to ``last``."""
+    vu = _vu()
+    mesh = _mesh(levels=[0.0, 10.0, 30.0, 60.0], depths=(60.0, 25.0, 10.0))
+    dp = vu.depth_points(mesh, "layer_linear")
+    assert_bitwise(dp.last, np.array([2, 0, 0], dtype=np.int32), "last")
+    assert_bitwise(dp.bed, np.array([60.0, 25.0, 10.0]), "bed")
+    assert dp.bed.dtype == np.float64
+    assert not np.shares_memory(dp.bed, mesh.depth)
+    with pytest.raises(ValueError, match="read-only"):
+        dp.bed[0] = 0.0
+    assert mesh.depth[0] == 60.0
+    dpl = vu.depth_points(mesh, "level")
+    assert_bitwise(dpl.bed, np.array([60.0, 25.0, 10.0]), "bed (level)")
+    # the explicit node layout is the default one
+    assert vu.depth_points(mesh, "layer_linear", layout="node") is dp
+
+
+def test_elem_table_from_declaration():
+    """The element table: ``p`` the layer centres, ``last`` the reader's
+    declaration clipped to ``0 .. M-1`` (no bathymetry rule on top: the
+    declaration is geometric already), ``bed`` a read-only copy of
+    ``metadata["elem_bed"]``; ``"level"`` data are node data."""
+    vu = _vu()
+    mesh = _elem_mesh()
+    dp = _etable(vu, mesh)
+    assert_bitwise(dp.p, np.array([5.0, 20.0, 45.0]), "p")
+    assert_bitwise(dp.last, np.array([2, 0, 1], dtype=np.int32), "last")
+    assert_bitwise(dp.bed, np.array([60.0, 25.0, 30.0]), "bed")
+    assert not np.shares_memory(dp.bed, mesh.metadata["elem_bed"])
+    for name in ("p", "last", "bed"):
+        with pytest.raises(ValueError, match="read-only"):
+            getattr(dp, name)[0] = 0
+    assert _etable(vu, mesh) is dp
+    # the bed does not cap last (wet is decided by the bed, the read by
+    # last): a shallower bed array is a new table with the same last
+    mesh.metadata["elem_bed"] = np.array([5.0, 5.0, 5.0])
+    dp2 = _etable(vu, mesh)
+    assert dp2 is not dp
+    assert dp2.last.tolist() == [2, 0, 1]
+    assert dp2.bed.tolist() == [5.0, 5.0, 5.0]
+    # -1 (surface only) -> point 0; past the table -> M-1
+    mesh.metadata["uv_data_last_elem"] = np.array([-1, 7, 1], dtype=np.int32)
+    assert _etable(vu, mesh).last.tolist() == [0, 2, 1]
+    with pytest.raises(ValueError, match="layer_linear"):
+        vu.depth_points(mesh, "level", layout="element")
+    with pytest.raises(ValueError, match="layout"):
+        vu.depth_points(mesh, "layer_linear", layout="nodes")
+
+
+def test_elem_table_missing_declaration_refused():
+    vu = _vu()
+    mesh = _elem_mesh(decl=None)
+    with pytest.raises(ValueError, match="uv_data_last_elem") as ei:
+        _etable(vu, mesh)
+    assert "nlevels" in str(ei.value)
+    assert mesh._uv_depth_points is None
+    # the node table needs neither
+    vu.depth_points(mesh, "layer_linear")
+
+
+def test_elem_table_missing_bed_refused():
+    vu = _vu()
+    mesh = _elem_mesh(bed=None)
+    with pytest.raises(ValueError, match="uv_data_last_elem") as ei:
+        _etable(vu, mesh)
+    assert "nlevels" in str(ei.value) and "elem_bed" in str(ei.value)
+    # the declaration is not snapshotted by a refused build
+    assert mesh.metadata["uv_data_last_elem"].flags.writeable
+
+
+def test_elem_table_malformed_refused():
+    vu = _vu()
+    for decl, bad in (([2, 0], "uv_data_last_elem"),
+                      ([2.0, 0.0, 1.0], "uv_data_last_elem"),
+                      ([2, -2, 1], "uv_data_last_elem")):
+        mesh = _elem_mesh(decl=None)
+        mesh.metadata["uv_data_last_elem"] = np.asarray(decl)
+        with pytest.raises(ValueError, match=bad):
+            _etable(vu, mesh)
+    mesh = _elem_mesh(bed=(60.0, 25.0))
+    with pytest.raises(ValueError, match="elem_bed"):
+        _etable(vu, mesh)
+
+
+def test_bed_independent_of_cut():
+    """A ``max_levels`` cut lowers ``last``, never ``bed``: a column stays
+    wet down to its physical bed and reads its last kept point below it —
+    nodes and elements alike."""
+    vu = _vu()
+    mesh = _elem_mesh(decl=(2, 2, 0), bed=(60.0, 60.0, 10.0),
+                      depths=(60.0, 25.0, 10.0, 60.0, 60.0))
+    dpe = _etable(vu, mesh)
+    dpn = vu.depth_points(mesh, "layer_linear")
+    assert dpe.last.tolist() == [2, 2, 0]
+    assert dpn.last.tolist() == [2, 0, 0, 2, 2]
+    mesh.sigma = mesh.sigma[:3]          # [0, 10, 30], as max_levels cuts
+    dpe2 = _etable(vu, mesh)
+    dpn2 = vu.depth_points(mesh, "layer_linear")
+    assert dpe2 is not dpe and dpn2 is not dpn
+    assert_bitwise(dpe2.last, np.array([1, 1, 0], dtype=np.int32), "last")
+    assert_bitwise(dpe2.bed, np.array([60.0, 60.0, 10.0]), "elem bed")
+    assert_bitwise(dpn2.last, np.array([1, 0, 0, 1, 1], dtype=np.int32),
+                   "node last")
+    assert_bitwise(dpn2.bed, np.array([60.0, 25.0, 10.0, 60.0, 60.0]),
+                   "node bed")
+    # below its last kept point (the centre 20 m) the column is still
+    # water, down to its bed at 60 m
+    assert dpe2.p[dpe2.last[0]] == 20.0 and dpe2.bed[0] == 60.0
+    assert dpn2.p[dpn2.last[0]] == 20.0 and dpn2.bed[0] == 60.0
+
+
+def test_elem_declaration_snapshot():
+    """The element declaration follows the node declaration's rules: an
+    owned, read-only snapshot installed in its place at first use (writes
+    into the reader's array change nothing, a write into the snapshot
+    raises), reused by a rebuild and by a shallow copy, renewed for a new
+    array and for a deep-copied or unpickled mesh."""
+    vu = _vu()
+    decl = np.array([2, 0, 1], dtype=np.int32)
+    mesh = _elem_mesh(decl=None)
+    mesh.metadata["uv_data_last_elem"] = decl
+    dp = _etable(vu, mesh)
+    snap = mesh.metadata["uv_data_last_elem"]
+    assert snap is not decl and snap.base is None
+    assert snap.dtype == decl.dtype and snap.tolist() == [2, 0, 1]
+    assert not snap.flags.writeable and decl.flags.writeable
+    assert vu._SNAPSHOTS.get(id(snap)) is snap
+    assert mesh._uv_depth_points[("layer_linear", "element")].decl is snap
+    assert "uv_data_last" not in mesh.metadata     # the node key untouched
+    decl[:] = 0
+    assert _etable(vu, mesh) is dp
+    assert mesh.metadata["uv_data_last_elem"] is snap
+    with pytest.raises(ValueError, match="read-only"):
+        snap[0] = 0
+    # a shallow copy sharing the metadata reuses the snapshot
+    other = copy.copy(mesh)
+    other._uv_depth_points = None
+    assert _etable(vu, other).last.tolist() == [2, 0, 1]
+    assert other.metadata["uv_data_last_elem"] is snap
+    # a max_levels cut rebuilds from the same snapshot
+    mesh.sigma = mesh.sigma[:3]
+    dp2 = _etable(vu, mesh)
+    assert dp2 is not dp and dp2.last.tolist() == [1, 0, 1]
+    assert mesh.metadata["uv_data_last_elem"] is snap
+    # a new array is a new declaration
+    mesh.metadata["uv_data_last_elem"] = np.array([0, 0, 1], dtype=np.int32)
+    assert _etable(vu, mesh).last.tolist() == [0, 0, 1]
+    snap = mesh.metadata["uv_data_last_elem"]
+    # a deep copy or an unpickled mesh gets a writeable array: revalidated
+    for clone in (copy.deepcopy(mesh), pickle.loads(pickle.dumps(mesh))):
+        d = clone.metadata["uv_data_last_elem"]
+        assert d.flags.writeable
+        d[0] = 1
+        assert _etable(vu, clone).last.tolist() == [1, 0, 1]
+        new = clone.metadata["uv_data_last_elem"]
+        assert new is not d and not new.flags.writeable
+    assert _etable(vu, mesh).last.tolist() == [0, 0, 1]
+    assert mesh.metadata["uv_data_last_elem"] is snap
+
+
+@pytest.mark.parametrize("comp", ["u", "v"])
+def test_elem_record_check_names_element(comp):
+    vu = _vu()
+    mesh = _elem_mesh()                              # last = [2, 0, 1]
+    u = np.ones((3, 3))
+    v = np.ones((3, 3))
+    (u if comp == "u" else v)[1, 2] = np.nan         # element 2, point 1
+    vel = _efield(u, v)
+    with pytest.raises(ValueError) as ei:
+        vu.check_depth_linear_record(vel, mesh, record="t=4")
+    msg = str(ei.value)
+    assert "element 2, point 1 " in msg
+    assert f" {comp} " in msg and "t=4" in msg
+    assert "of this element" in msg
+    assert "node" not in msg
+    assert vel._dl_token is None
+    assert not vu.is_checked(vel, mesh)
+    # the column count and the rows, per element
+    with pytest.raises(ValueError, match=r"has 4 elements, the mesh has 3 "
+                                         r"\(element layout expected\)"):
+        vu.check_depth_linear_record(_efield(np.ones((3, 4))), mesh)
+    with pytest.raises(ValueError, match=r"has 2 rows"):
+        vu.check_depth_linear_record(_efield(np.ones((2, 3))), mesh)
+
+
+def test_elem_record_check_ignores_below_last():
+    vu = _vu()
+    mesh = _elem_mesh()                              # last = [2, 0, 1]
+    u = np.ones((3, 3))
+    v = np.ones((3, 3))
+    u[1:, 1] = np.nan                                # below element 1's last
+    v[2, 2] = np.inf                                 # below element 2's last
+    u[2, 2] = 1.0e30
+    vel = _efield(u, v, w=np.full((4, 5), np.nan))   # w is never checked
+    assert not vu.is_checked(vel, mesh)
+    vu.check_depth_linear_record(vel, mesh)
+    assert vu.is_checked(vel, mesh)
+    assert vel._dl_token is _etable(vu, mesh)
+    assert vel._dl_token is not vu.depth_points(mesh, "layer_linear")
+    # a lazy element field: checked through its parents, no blend
+    lazy = LazyLerpField(_efield(np.ones((3, 3)), w=np.zeros((4, 5))), vel,
+                         0.5)
+    vu.check_depth_linear_record(lazy, mesh)
+    assert lazy._dl_token is _etable(vu, mesh) and lazy._cache == {}
+    # a deeper declaration makes a NaN usable: a new table, unchecked
+    mesh.metadata["uv_data_last_elem"] = np.array([2, 1, 1], dtype=np.int32)
+    assert not vu.is_checked(vel, mesh)
+    with pytest.raises(ValueError, match=r"element 1, point 1 "):
+        vu.check_depth_linear_record(vel, mesh)
+
+
+def test_node_and_elem_tables_cached_separately():
+    """One mesh holds a node and an element table side by side; each field
+    is checked against its own layout's table, and each table is rebuilt
+    only when its own inputs are replaced."""
+    vu = _vu()
+    mesh = _elem_mesh()
+    dpn = vu.depth_points(mesh, "layer_linear")
+    dpe = _etable(vu, mesh)
+    assert dpn is not dpe
+    assert dpn.last.size == mesh.n_nodes and dpe.last.size == mesh.n_elements
+    assert set(mesh._uv_depth_points) == {("layer_linear", "node"),
+                                          ("layer_linear", "element")}
+    assert vu.depth_points(mesh, "layer_linear") is dpn
+    assert _etable(vu, mesh) is dpe
+    node_vel = _field(np.ones((3, 5)), placement="layer_linear")
+    elem_vel = _efield(np.ones((3, 3)))
+    vu.check_depth_linear_record(node_vel, mesh)
+    vu.check_depth_linear_record(elem_vel, mesh)
+    assert node_vel._dl_token is dpn and elem_vel._dl_token is dpe
+    assert vu.is_checked(node_vel, mesh) and vu.is_checked(elem_vel, mesh)
+    # a new element bed: the element table only
+    mesh.metadata["elem_bed"] = np.array([60.0, 25.0, 45.0])
+    assert vu.depth_points(mesh, "layer_linear") is dpn
+    dpe2 = _etable(vu, mesh)
+    assert dpe2 is not dpe and dpe2.bed.tolist() == [60.0, 25.0, 45.0]
+    assert vu.is_checked(node_vel, mesh)
+    assert not vu.is_checked(elem_vel, mesh)
+    # a new mesh.depth or node declaration: the node table only
+    vu.check_depth_linear_record(elem_vel, mesh)
+    mesh.depth = mesh.depth.copy()
+    assert _etable(vu, mesh) is dpe2
+    dpn2 = vu.depth_points(mesh, "layer_linear")
+    assert dpn2 is not dpn
+    mesh.metadata["uv_data_last"] = np.full(5, 1, dtype=np.int32)
+    assert _etable(vu, mesh) is dpe2
+    assert vu.depth_points(mesh, "layer_linear").last.tolist() == [1] * 5
+    assert vu.is_checked(elem_vel, mesh)
+    # a cut: both
+    mesh.sigma = mesh.sigma[:3]
+    assert _etable(vu, mesh) is not dpe2
+    assert not vu.is_checked(elem_vel, mesh)
+
+
+def test_uv_wet():
+    """``z <= bed[col]``: at the bed wet, below dry, a NaN depth or bed
+    dry, an infinite bed wet down to ``z = inf``; jitted == ``py_func``."""
+    vu = _vu()
+    bed = np.array([30.0, np.inf, np.nan, 0.0])
+    below = float(np.nextafter(30.0, np.inf))
+    cases = [(0, 30.0, True), (0, 29.0, True), (0, -5.0, True),
+             (0, below, False), (0, np.nan, False), (0, np.inf, False),
+             (1, np.inf, True), (1, 1.0e9, True), (1, np.nan, False),
+             (2, 0.0, False), (2, np.nan, False),
+             (3, 0.0, True), (3, 1.0e-12, False)]
+    fns = [vu.uv_wet]
+    if hasattr(vu.uv_wet, "py_func"):
+        fns.append(vu.uv_wet.py_func)
+    for fn in fns:
+        for col, z, want in cases:
+            got = fn(bed, col, z)
+            assert isinstance(got, (bool, np.bool_)), type(got)
+            assert bool(got) is want, (fn, col, z)
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
-"""Depth-linear horizontal velocity: data points, last usable point, bracket.
+"""Depth-linear horizontal velocity: data points, last usable point, bed,
+bracket.
 
 A depth-linear u/v field (``VelocityField.uv_vertical`` ``"level"`` or
 ``"layer_linear"``) is evaluated linearly in depth between data points
@@ -7,6 +8,15 @@ A depth-linear u/v field (``VelocityField.uv_vertical`` ``"level"`` or
 - ``"level"``: ``p`` = the kept levels, ``|mesh.sigma|`` (``M = K``);
 - ``"layer_linear"``: ``p`` = the layer centres ``(z_k + z_{k+1}) / 2`` of
   the kept levels (``M = K - 1``).
+
+The table (:class:`DepthPoints`) has one column per u/v carrier: per node
+for node-layout fields, per element for element-layout fields
+(``"layer_linear"`` only; ``"level"`` data sit on nodes).  Each column has
+a last usable point ``last`` (the deepest point it may be read at) and a
+``bed``, its physical bed depth: a column is WET at depth ``z`` while
+``z <= bed`` (:func:`uv_wet`), and a wet column below ``p[last]`` (a
+partial bottom layer, a ``max_levels`` cut, a declared prefix that ends
+above the bed) reads its last usable point.
 
 Per node ``i`` the last usable point is
 
@@ -23,32 +33,45 @@ node, or must carry a finite surface value.  Infinite bed depths follow
 the formula as written: ``+inf`` keeps every point (``last_i = M-1``, then
 capped by ``D_i``), ``-inf`` the surface point only.  A NaN ``depth_i``
 compares false with every ``lower_k``, so ``last_i = 0`` (set explicitly:
-a sorted search would place the NaN after the last point).
+a sorted search would place the NaN after the last point).  A node's bed
+is ``mesh.depth[i]``, the bed the end-of-step depth clamp uses.
+
+Per element ``e`` there is no bathymetry rule: the reader DECLARES the
+element's last wet layer, ``mesh.metadata["uv_data_last_elem"][e]`` (int
+``(E,)``, ``>= -1``; geometric already: a layer counts when its lower
+level is at or above the element's bed), and its bed,
+``mesh.metadata["elem_bed"][e]`` (float ``(E,)``, positive down);
+``last_e = max(0, min(M-1, D_e))``.  Without either of the two an element
+table is refused (the FESOM2 reader sets both from the mesh diagnostic's
+``nlevels`` or ``zbar_e_bottom``).
 
 Above ``p[0]`` and below ``p[last_i]`` the value of that point is used (no
 extrapolation); in between, the two bracketing points are blended.  The
 read never touches a point below ``last_i``, so dry or fill values there
 are never used, not even multiplied by zero.
 
-The table is built lazily per mesh and placement (:func:`depth_points`) and
-cached in ``mesh._uv_depth_points``; an entry is valid while
-``mesh.sigma``, ``mesh.depth`` and ``mesh.metadata["uv_data_last"]`` are
-the very objects it was built from (identity, never ``id()``), so a
-``max_levels`` cut or a new depth or declaration rebuilds it.  Replace
+The table is built lazily per mesh, placement and layout
+(:func:`depth_points`) and cached in ``mesh._uv_depth_points``; an entry
+is valid while ``mesh.sigma``, the bed array (``mesh.depth`` for nodes,
+``mesh.metadata["elem_bed"]`` for elements) and the declaration
+(``mesh.metadata["uv_data_last"]`` / ``["uv_data_last_elem"]``) are the
+very objects it was built from (identity, never ``id()``), so a
+``max_levels`` cut or a new bed or declaration rebuilds it.  Replace
 those arrays to change them; an in-place write is not detected.  The
 engine therefore takes a SNAPSHOT of the declaration at first use: the
 table is built from an owned, read-only copy, which replaces the reader's
-array in ``mesh.metadata["uv_data_last"]`` — the declaration in effect is
-exactly what the table was built from, and no array or view the reader
-still holds can change it (writing into the snapshot raises; assign a new
-array to declare another prefix).  A copied or unpickled mesh (whose
-snapshot numpy returns writeable) gets a new snapshot, validated again, on
-first use.
+array in the metadata — the declaration in effect is exactly what the
+table was built from, and no array or view the reader still holds can
+change it (writing into the snapshot raises; assign a new array to
+declare another prefix).  A copied or unpickled mesh (whose snapshot
+numpy returns writeable) gets a new snapshot, validated again, on first
+use.  The table keeps its own read-only copy of the bed.
 
 The record check (:func:`check_depth_linear_record`) refuses a field whose
-u or v is non-finite at a point ``<= last_i`` and stamps a passing field
-with the table object (``vel._dl_token``); :func:`is_checked` compares by
-identity, so a field checked on another mesh or before a rebuild counts as
+u or v is non-finite at a point ``<= last`` of a column (a node or an
+element, by the field's ``uv_layout``) and stamps a passing field with the
+table object (``vel._dl_token``); :func:`is_checked` compares by identity,
+so a field checked on another mesh or before a rebuild counts as
 unchecked.
 """
 from __future__ import annotations
@@ -78,6 +101,15 @@ from ..core.mesh import Mesh
 #: placements this module serves ("layer" is the piecewise-constant path)
 _DL_PLACEMENTS = ("level", "layer_linear")
 
+#: u/v layouts a table serves: one column per node or per element
+_DL_LAYOUTS = ("node", "element")
+
+#: the reader's declaration of the last usable point, per layout
+_DECL_KEYS = {"node": "uv_data_last", "element": "uv_data_last_elem"}
+
+#: the element bed depths (float (E,), positive down), set by the reader
+_ELEM_BED_KEY = "elem_bed"
+
 #: columns per block of the record scan (one block = one prange task; the
 #: inner loop walks a contiguous row segment of the block)
 _SCAN_BLOCK = 64
@@ -85,7 +117,9 @@ _SCAN_BLOCK = 64
 
 @dataclass(frozen=True, eq=False)
 class DepthPoints:
-    """Depth-linear data points of one mesh and placement.
+    """Depth-linear data points of one mesh, placement and layout.
+
+    A column is a node (node layout) or an element (element layout).
 
     Attributes
     ----------
@@ -93,8 +127,14 @@ class DepthPoints:
         Data-point depths, float64 ``(M,)``, positive down, non-decreasing.
         Read-only.
     last : np.ndarray
-        Index of the last usable data point per node, int32 ``(N,)``, in
+        Index of the last usable data point per column, int32 ``(C,)``, in
         ``0 .. M-1``.  Read-only.
+    bed : np.ndarray
+        Physical bed depth per column, float64 ``(C,)``, positive down: a
+        copy of ``mesh.depth`` (nodes) or of ``mesh.metadata["elem_bed"]``
+        (elements), never changed by a ``max_levels`` cut.  A column is
+        wet at depth ``z`` while ``z <= bed`` (:func:`uv_wet`).
+        Read-only.
 
     Notes
     -----
@@ -103,11 +143,16 @@ class DepthPoints:
     """
     p: np.ndarray
     last: np.ndarray
+    bed: np.ndarray
 
 
 @dataclass(frozen=True, eq=False)
 class _DepthPointsEntry:
-    """Cache entry: strong references to the inputs and the table."""
+    """Cache entry: strong references to the inputs and the table.
+
+    ``depth`` is the bed array the table was built from: ``mesh.depth``
+    (nodes) or ``mesh.metadata["elem_bed"]`` (elements).
+    """
     sigma: object
     depth: object
     decl: object
@@ -148,14 +193,16 @@ def _snapshot_declaration(decl):
     return snap
 
 
-def _build_depth_points(sigma, depth, decl, placement: str,
-                        n_nodes: int) -> DepthPoints:
-    """Build and validate the table of one placement.
+def _build_depth_points(sigma, depth, decl, placement: str, n_cols: int,
+                        layout: str = "node") -> DepthPoints:
+    """Build and validate the table of one placement and layout.
 
+    ``depth`` is the bed array of the columns (``mesh.depth`` for nodes,
+    ``mesh.metadata["elem_bed"]`` for elements), ``n_cols`` their number.
     ``decl`` is the engine's snapshot of the declaration
-    (:func:`_snapshot_declaration`) or ``None``; it is validated here and
-    nothing of it is kept but its values in ``last``.  Raises the
-    ``ValueError`` documented in :func:`depth_points`.
+    (:func:`_snapshot_declaration`) or ``None`` (nodes only); it is
+    validated here and nothing of it is kept but its values in ``last``.
+    Raises the ``ValueError`` documented in :func:`depth_points`.
     """
     z = np.abs(np.asarray(sigma, dtype=np.float64))   # == mesh.z_levels
     need = 1 if placement == "level" else 2
@@ -187,34 +234,64 @@ def _build_depth_points(sigma, depth, decl, placement: str,
         lower = z[1:]
     m = p.size
     d = np.asarray(depth, dtype=np.float64)
-    if d.shape != (n_nodes,):
-        raise ValueError(
-            f"depth-linear u/v: mesh.depth has shape {d.shape}, expected "
-            f"({n_nodes},)")
-    # number of lower_k <= depth_i (lower is non-decreasing), minus one;
-    # NaN sorts last in searchsorted, the rule wants it unmatched
-    geo = np.searchsorted(lower, d, side="right").astype(np.int64) - 1
-    geo[np.isnan(d)] = 0
-    last = np.minimum(geo, m - 1)
+    if layout == "node":
+        if d.shape != (n_cols,):
+            raise ValueError(
+                f"depth-linear u/v: mesh.depth has shape {d.shape}, expected "
+                f"({n_cols},)")
+        # number of lower_k <= depth_i (lower is non-decreasing), minus
+        # one; NaN sorts last in searchsorted, the rule wants it unmatched
+        geo = np.searchsorted(lower, d, side="right").astype(np.int64) - 1
+        geo[np.isnan(d)] = 0
+        last = np.minimum(geo, m - 1)
+    else:
+        if d.shape != (n_cols,):
+            raise ValueError(
+                f"depth-linear u/v: mesh.metadata['{_ELEM_BED_KEY}'] has "
+                f"shape {d.shape}, expected ({n_cols},) (one bed depth per "
+                "element, positive down)")
+        # the declaration alone caps an element (it is geometric already)
+        last = np.full(n_cols, m - 1, dtype=np.int64)
+    key = _DECL_KEYS[layout]
     if decl is not None:
         dl = np.asarray(decl)
-        if dl.shape != (n_nodes,) or not np.issubdtype(dl.dtype, np.integer):
+        if dl.shape != (n_cols,) or not np.issubdtype(dl.dtype, np.integer):
             raise ValueError(
-                "mesh.metadata['uv_data_last'] must be an integer array of "
-                f"shape ({n_nodes},), got dtype {dl.dtype} shape {dl.shape}")
+                f"mesh.metadata['{key}'] must be an integer array of "
+                f"shape ({n_cols},), got dtype {dl.dtype} shape {dl.shape}")
         if dl.size and int(dl.min()) < -1:
             raise ValueError(
-                "mesh.metadata['uv_data_last'] must be >= -1 (-1 = surface "
+                f"mesh.metadata['{key}'] must be >= -1 (-1 = surface "
                 "only: point 0 is read and must be finite), got minimum "
                 f"{int(dl.min())}")
         last = np.minimum(last, dl.astype(np.int64))
     last = np.maximum(last, 0).astype(np.int32)
+    bed = np.array(d, dtype=np.float64, copy=True)
     p.setflags(write=False)
     last.setflags(write=False)
-    return DepthPoints(p=p, last=last)
+    bed.setflags(write=False)
+    return DepthPoints(p=p, last=last, bed=bed)
 
 
-def depth_points(mesh: Mesh, placement: str) -> DepthPoints:
+def _missing_elem_bottoms(mesh: Mesh, no_decl: bool,
+                          no_bed: bool) -> ValueError:
+    """The refusal of an element table without the reader's bottoms."""
+    missing = [repr(k) for k, gone in ((_DECL_KEYS["element"], no_decl),
+                                       (_ELEM_BED_KEY, no_bed)) if gone]
+    meshpath = (mesh.metadata or {}).get("meshpath")
+    where = f"mesh {meshpath!r}" if meshpath else "this mesh"
+    return ValueError(
+        "depth-linear u/v on element layout needs the element bottoms "
+        f"mesh.metadata['{_DECL_KEYS['element']}'] (each element's last "
+        f"wet layer, int (E,)) and mesh.metadata['{_ELEM_BED_KEY}'] (its "
+        "bed depth, float (E,), positive down), which the FESOM2 reader "
+        "declares from the mesh diagnostic's nlevels or zbar_e_bottom "
+        f"(the run's full fesom.mesh.diag.nc); {where} has no "
+        + " and no ".join(missing))
+
+
+def depth_points(mesh: Mesh, placement: str,
+                 layout: str = "node") -> DepthPoints:
     """The depth-linear data-point table of ``mesh`` for ``placement``.
 
     Parameters
@@ -222,55 +299,93 @@ def depth_points(mesh: Mesh, placement: str) -> DepthPoints:
     mesh : Mesh
         A z-level mesh (``vertical_coord == "zlevel"``) with its level
         depths in ``mesh.sigma`` (the engine reads ``|mesh.sigma|``, i.e.
-        ``mesh.z_levels``) and bed depths in ``mesh.depth``; optional
-        reader declaration ``mesh.metadata["uv_data_last"]`` (int ``(N,)``;
-        ``-1`` = surface only, whose value must be finite).
+        ``mesh.z_levels``).  Node layout: bed depths in ``mesh.depth``;
+        optional reader declaration ``mesh.metadata["uv_data_last"]`` (int
+        ``(N,)``; ``-1`` = surface only, whose value must be finite).
+        Element layout: the reader's declaration
+        ``mesh.metadata["uv_data_last_elem"]`` (int ``(E,)``, ``>= -1``,
+        the element's last wet layer) and bed depths
+        ``mesh.metadata["elem_bed"]`` (float ``(E,)``, positive down), both
+        required.
     placement : str
-        ``"level"`` or ``"layer_linear"``.
+        ``"level"`` or ``"layer_linear"`` (element layout:
+        ``"layer_linear"`` only).
+    layout : str, optional
+        ``"node"`` (default: one column per node) or ``"element"`` (one
+        column per element) — the ``uv_layout`` of the fields the table
+        serves.
 
     Returns
     -------
     DepthPoints
-        Cached in ``mesh._uv_depth_points``: the same object while
-        ``mesh.sigma``, ``mesh.depth`` and the declaration are the same
-        objects; rebuilt (a new object) when any of them is replaced.
+        Cached in ``mesh._uv_depth_points`` per ``(placement, layout)``:
+        the same object while ``mesh.sigma``, the bed array
+        (``mesh.depth`` / ``mesh.metadata["elem_bed"]``) and the
+        declaration are the same objects; rebuilt (a new object) when any
+        of them is replaced.  The node and the element table of a mesh
+        are independent: a new ``mesh.depth`` rebuilds only the node
+        table, a new ``elem_bed`` only the element table.
 
     Notes
     -----
     A build takes the declaration's snapshot (an owned, read-only copy;
     one that already is an engine snapshot, still read-only, is reused —
-    the other placement's or a shallow copy's of the mesh), validates
-    it, builds from it, and installs it in
-    ``mesh.metadata["uv_data_last"]`` in place of the reader's array: the
+    the other placement's, an earlier build's before a ``max_levels`` cut,
+    or a shallow copy's of the mesh), validates it, builds from it, and
+    installs it in ``mesh.metadata["uv_data_last"]`` (element layout:
+    ``["uv_data_last_elem"]``) in place of the reader's array: the
     declaration in effect is exactly what the table was built from, and a
     write into the reader's array, its base or any view of it after that
     changes nothing (assign a new array to declare another prefix).  A
     cache entry counts only while that snapshot is still read-only, so a
     deep-copied or unpickled mesh (numpy returns the copy writeable) gets
-    a new snapshot, validated again, on first use.
+    a new snapshot, validated again, on first use.  The bed is copied into
+    the table (``DepthPoints.bed``), never snapshotted in the metadata.
 
     Raises
     ------
     ValueError
-        ``placement`` is ``"layer"`` or unknown, the mesh is not z-level,
-        the level table is too short, non-finite or not increasing, or the
-        depth or the declaration has the wrong shape or type.
+        ``placement`` is ``"layer"`` or unknown, ``layout`` is unknown,
+        ``"level"`` on element layout, the mesh is not z-level, the level
+        table is too short, non-finite or not increasing, the depth, the
+        element bed or the declaration has the wrong shape or type, or an
+        element table lacks the declaration or the element bed (the
+        message names both keys and ``nlevels``).
     """
     if placement not in _DL_PLACEMENTS:
         raise ValueError(
             f"depth_points: placement must be one of {_DL_PLACEMENTS}, got "
             f"{placement!r} (a 'layer' field is piecewise constant in depth "
             "and has no depth-linear table)")
+    if layout not in _DL_LAYOUTS:
+        raise ValueError(
+            f"depth_points: layout must be one of {_DL_LAYOUTS}, got "
+            f"{layout!r}")
+    if layout == "element" and placement != "layer_linear":
+        raise ValueError(
+            "depth-linear u/v on element layout is 'layer_linear' only "
+            f"(layer-centred data), got {placement!r}; 'level' data sit on "
+            "the nodes' levels")
     if mesh.vertical_coord != "zlevel":
         raise ValueError(
             f"depth-linear u/v ({placement!r}) needs a z-level mesh "
             f"(vertical_coord 'zlevel'), got {mesh.vertical_coord!r}")
     sigma = mesh.sigma
-    depth = mesh.depth
-    decl = (mesh.metadata or {}).get("uv_data_last")
+    meta = mesh.metadata or {}
+    decl_key = _DECL_KEYS[layout]
+    decl = meta.get(decl_key)
+    if layout == "node":
+        depth = mesh.depth
+        n_cols = mesh.n_nodes
+    else:
+        depth = meta.get(_ELEM_BED_KEY)
+        if decl is None or depth is None:
+            raise _missing_elem_bottoms(mesh, decl is None, depth is None)
+        n_cols = mesh.n_elements
+    key = (placement, layout)
     cache = mesh._uv_depth_points
     if cache:
-        entry = cache.get(placement)
+        entry = cache.get(key)
         # a WRITEABLE declaration is not the frozen snapshot the entry was
         # built from, even when identical: a deep copy or an unpickled mesh
         # gets a new, writeable array (numpy drops the flag) that still
@@ -281,17 +396,18 @@ def depth_points(mesh: Mesh, placement: str) -> DepthPoints:
                          and decl.flags.writeable)):
             return entry.points
     snap = _snapshot_declaration(decl)
-    points = _build_depth_points(sigma, depth, snap, placement, mesh.n_nodes)
+    points = _build_depth_points(sigma, depth, snap, placement, n_cols,
+                                 layout)
     if snap is not decl:
         # the declaration in effect is what the table was built from.  A
         # shallow copy of the mesh shares this dict and then sees the
         # snapshot too: equal values, so its next lookup rebuilds its own
         # table (its entry names the replaced object) with the same prefix
-        mesh.metadata["uv_data_last"] = snap
+        mesh.metadata[decl_key] = snap
     # copy-on-write: a shallow copy of the mesh (dataclasses.replace,
     # copy.copy) shares the dict object; never mutate it in place
     new_cache = dict(cache or {})
-    new_cache[placement] = _DepthPointsEntry(sigma, depth, snap, points)
+    new_cache[key] = _DepthPointsEntry(sigma, depth, snap, points)
     mesh._uv_depth_points = new_cache
     return points
 
@@ -382,6 +498,20 @@ def uv_at(f: np.ndarray, node: int, k: int, alpha: float) -> float:
     return (1.0 - alpha) * a + alpha * float(f[k + 1, node])
 
 
+@njit(cache=True)
+def uv_wet(bed: np.ndarray, col: int, z: float) -> bool:
+    """True when column ``col`` holds water at depth ``z``: ``z <= bed[col]``.
+
+    ``bed`` is :attr:`DepthPoints.bed` (positive down).  A column is wet
+    down to and including its bed; a wet column below ``p[last]`` reads
+    its last usable point (:func:`uv_bracket`).  A NaN ``z`` or a NaN bed
+    compares false: dry.  An infinite bed is wet at every depth, ``+inf``
+    included (the interpolation kernels map a NaN particle depth to
+    ``+inf`` before this test: dry wherever the bed is finite).
+    """
+    return z <= bed[col]
+
+
 # ---------------------------------------------------------------------------
 # The record check
 # ---------------------------------------------------------------------------
@@ -389,8 +519,9 @@ def uv_at(f: np.ndarray, node: int, k: int, alpha: float) -> float:
 @njit(parallel=True, cache=True)
 def _first_nonfinite_per_node(f, last, out):
     """``out[i]`` = the first point ``k <= last[i]`` where ``f[k, i]`` is
-    non-finite, else ``-1``.  Blocks of columns run in parallel; each block
-    walks contiguous row segments."""
+    non-finite, else ``-1`` (``i`` a column: a node or an element).  Blocks
+    of columns run in parallel; each block walks contiguous row
+    segments."""
     n = f.shape[1]
     nb = (n + _SCAN_BLOCK - 1) // _SCAN_BLOCK
     for b in prange(nb):
@@ -408,11 +539,18 @@ def _first_nonfinite_per_node(f, last, out):
                         out[i] = k
 
 
-def _check_components(vel, dp: DepthPoints, placement: str,
-                      record: str) -> None:
-    """Shape and finiteness of ``vel.u`` / ``vel.v`` at points ``<= last``."""
+def _check_components(vel, dp: DepthPoints, placement: str, record: str,
+                      layout: str = "node") -> None:
+    """Shape and finiteness of ``vel.u`` / ``vel.v`` at points ``<= last``.
+
+    ``layout`` names the columns in the messages: ``"node"`` or
+    ``"element"``.
+    """
     m = dp.p.size
     n = dp.last.size
+    col = "element" if layout == "element" else "node"
+    why = ("declared last wet layer and kept levels" if col == "element"
+           else "bed, kept levels and declared data prefix")
     rec = f" in record {record}" if record else ""
     for comp in ("u", "v"):
         f = getattr(vel, comp)
@@ -420,11 +558,11 @@ def _check_components(vel, dp: DepthPoints, placement: str,
         if shape is None or len(shape) != 2:
             raise ValueError(
                 f"check_depth_linear_record: {comp} of a {placement!r} field "
-                f"must be 2-D (points, nodes), got shape {shape}")
+                f"must be 2-D (points, {col}s), got shape {shape}")
         if shape[1] != n:
             raise ValueError(
-                f"check_depth_linear_record: {comp} has {shape[1]} nodes, the "
-                f"mesh has {n} (node layout expected)")
+                f"check_depth_linear_record: {comp} has {shape[1]} {col}s, "
+                f"the mesh has {n} ({col} layout expected)")
         if shape[0] != m:
             raise ValueError(
                 f"check_depth_linear_record: {comp} has {shape[0]} rows, the "
@@ -438,22 +576,29 @@ def _check_components(vel, dp: DepthPoints, placement: str,
             k = int(out[i])
             raise ValueError(
                 f"check_depth_linear_record: {comp} = {float(f[k, i])!r} is "
-                f"non-finite at node {i}, point {k} (depth {dp.p[k]:g} m)"
+                f"non-finite at {col} {i}, point {k} (depth {dp.p[k]:g} m)"
                 f"{rec}; a {placement!r} field must be finite at points "
-                f"0..{int(dp.last[i])} of this node (down to its last usable "
-                f"point: bed, kept levels and declared data prefix; "
-                f"{bad.size} node(s) affected)")
+                f"0..{int(dp.last[i])} of this {col} (down to its last "
+                f"usable point: {why}; {bad.size} {col}(s) affected)")
+
+
+def _layout_of(vel) -> str:
+    """The table layout of ``vel``: its ``uv_layout``; a field-like object
+    without one counts as node layout (a reader's raw-record check)."""
+    return getattr(vel, "uv_layout", "node")
 
 
 def check_depth_linear_record(vel, mesh: Mesh, *, record: str = "") -> None:
     """Validate a depth-linear field for ``mesh`` and stamp it as checked.
 
-    Refuses (``ValueError`` naming node, point, component and ``record``) a
-    u or v value that is non-finite at a point ``<= last[i]``; points below
-    ``last[i]`` may hold anything (NaN, fill values).  ``w`` is never
-    checked, and a finite fill value inside the prefix is the reader's
-    business (readers mask their fill values).  On success sets
-    ``vel._dl_token = depth_points(mesh, vel.uv_vertical)``.
+    Refuses (``ValueError`` naming node or element, point, component and
+    ``record``) a u or v value that is non-finite at a point ``<= last``
+    of its column; points below ``last`` may hold anything (NaN, fill
+    values).  ``w`` is never checked, and a finite fill value inside the
+    prefix is the reader's business (readers mask their fill values).  On
+    success sets ``vel._dl_token = depth_points(mesh, vel.uv_vertical,
+    vel.uv_layout)``: a node-layout field is checked against the node
+    table, an element-layout field against the element table.
 
     A :class:`~kelp.core.io.LazyLerpField` is checked through its parents
     ``vel_a`` / ``vel_b`` (each skipped when already checked) without
@@ -464,7 +609,9 @@ def check_depth_linear_record(vel, mesh: Mesh, *, record: str = "") -> None:
     ----------
     vel : VelocityField or LazyLerpField
         A ``"level"`` or ``"layer_linear"`` field with u/v of shape
-        ``(M, N)`` (``M`` = the table's points, ``N`` = mesh nodes).
+        ``(M, C)`` (``M`` = the table's points, ``C`` = mesh nodes for
+        ``uv_layout="node"``, mesh elements for ``"element"``).  A
+        field-like object without ``uv_layout`` counts as node layout.
     mesh : Mesh
         The z-level mesh the field is evaluated on.
     record : str, optional
@@ -473,10 +620,12 @@ def check_depth_linear_record(vel, mesh: Mesh, *, record: str = "") -> None:
     Raises
     ------
     ValueError
-        A ``"layer"`` field, a non-z-level mesh, a shape mismatch, or a
+        A ``"layer"`` field, a non-z-level mesh, a mesh without the
+        element bottoms (element layout), a shape mismatch, or a
         non-finite value at a usable point.
     """
-    dp = depth_points(mesh, vel.uv_vertical)
+    layout = _layout_of(vel)
+    dp = depth_points(mesh, vel.uv_vertical, layout)
     if isinstance(vel, LazyLerpField):
         for parent in (vel.vel_a, vel.vel_b):
             if not is_checked(parent, mesh):
@@ -484,21 +633,21 @@ def check_depth_linear_record(vel, mesh: Mesh, *, record: str = "") -> None:
         if vel.vel_a._dl_token is dp and vel.vel_b._dl_token is dp:
             vel._dl_token = dp
         return
-    _check_components(vel, dp, vel.uv_vertical, record)
+    _check_components(vel, dp, vel.uv_vertical, record, layout)
     vel._dl_token = dp
 
 
 def is_checked(vel, mesh: Mesh) -> bool:
     """True when ``vel`` passed the record check for ``mesh``'s current table.
 
-    ``vel._dl_token is depth_points(mesh, vel.uv_vertical)``; a field that
-    was never stamped (every ``"layer"`` field) answers ``False`` without
-    building a table.  Never blends a lazy field.
+    ``vel._dl_token is depth_points(mesh, vel.uv_vertical, vel.uv_layout)``;
+    a field that was never stamped (every ``"layer"`` field) answers
+    ``False`` without building a table.  Never blends a lazy field.
     """
     tok = getattr(vel, "_dl_token", None)
     if tok is None:
         return False
-    return tok is depth_points(mesh, vel.uv_vertical)
+    return tok is depth_points(mesh, vel.uv_vertical, _layout_of(vel))
 
 
 __all__ = [
@@ -506,6 +655,7 @@ __all__ = [
     "depth_points",
     "uv_bracket",
     "uv_at",
+    "uv_wet",
     "check_depth_linear_record",
     "is_checked",
 ]

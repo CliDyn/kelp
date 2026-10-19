@@ -2,8 +2,9 @@
 
 The carrier says where the 3-D u/v data points sit in the vertical:
 ``"layer"`` (layer centres, piecewise constant in depth — today's meaning
-and the default), ``"level"`` (on the levels, FESOM 1.4) or
-``"layer_linear"`` (layer-centred data evaluated linearly in depth).  The
+and the default), ``"level"`` (on the levels, FESOM 1.4; node layout) or
+``"layer_linear"`` (layer-centred data evaluated linearly in depth, on
+nodes or on elements).  The
 constructor checks the 3-D shapes against it, so a dropped or wrong flag
 raises instead of mis-placing the data, and every site that rebuilds a
 field (lerp, the lazy lerp, PCHIP reconstruction, the shared cache, the
@@ -97,25 +98,62 @@ def test_3d_shape_level_requires_k_and_node():
     assert _field("level").u.shape == (K, N)
 
 
-def test_layer_linear_requires_node_and_k_minus_1():
-    with pytest.raises(ValueError, match="uv_vertical='layer_linear'"):
-        _field("layer_linear", u_rows=K)
-    with pytest.raises(ValueError, match="node"):
-        _field("layer_linear", layout="element")
-    assert _field("layer_linear").u.shape == (K - 1, N)
+def test_layer_linear_requires_k_minus_1():
+    # one row per layer, on nodes and on elements
+    for layout, n_uv in (("node", N), ("element", E)):
+        with pytest.raises(ValueError, match="uv_vertical='layer_linear'"):
+            _field("layer_linear", layout=layout, u_rows=K)
+        assert _field("layer_linear", layout=layout).u.shape == (K - 1, n_uv)
 
 
-def test_depth_linear_needs_node_layout_without_w():
-    # node layout belongs to the placement, with or without w
-    for placement in ("level", "layer_linear"):
+def test_level_needs_node_layout_without_w():
+    # "level" data sit on the nodes' levels, with or without w
+    for rows in (K, K - 1):
         with pytest.raises(ValueError, match="node"):
-            VelocityField(u=np.zeros((K - 1, E)), v=np.zeros((K - 1, E)),
+            VelocityField(u=np.zeros((rows, E)), v=np.zeros((rows, E)),
                           eta=np.zeros(N), w=None, uv_layout="element",
-                          uv_vertical=placement)
-    # the layer default stays free of it (FESOM2 3-D reads without w)
+                          uv_vertical="level")
+    # "layer_linear" on elements constructs without w too, as the layer
+    # default does (FESOM2 3-D reads without w)
+    for placement in ("layer", "layer_linear"):
+        vel = VelocityField(u=np.zeros((K - 1, E)), v=np.zeros((K - 1, E)),
+                            eta=np.zeros(N), w=None, uv_layout="element",
+                            uv_vertical=placement)
+        assert vel.uv_vertical == placement
     vel = VelocityField(u=np.zeros((K - 1, E)), v=np.zeros((K - 1, E)),
                         eta=np.zeros(N), w=None, uv_layout="element")
     assert vel.uv_vertical == "layer"
+
+
+def test_layer_linear_element_accepted():
+    """An element-layout ``"layer_linear"`` field ``(K-1, E)`` constructs
+    and keeps its placement and layout through every rebuild: lerp, the
+    lazy lerp, PCHIP reconstruction and the shared cache."""
+    tok = object()
+    a = _field("layer_linear", layout="element", seed=1, t=0.0, token=tok)
+    b = _field("layer_linear", layout="element", seed=2, t=10.0, token=tok)
+    assert (a.uv_layout, a.uv_vertical) == ("element", "layer_linear")
+    assert a.u.shape == a.v.shape == (K - 1, E)
+    out = a.lerp(b, 0.25)
+    assert (out.uv_layout, out.uv_vertical) == ("element", "layer_linear")
+    assert out._dl_token is tok
+    lazy = LazyLerpField(a, b, 0.25)
+    assert (lazy.uv_layout, lazy.uv_vertical) == ("element", "layer_linear")
+    m = lazy.materialize()
+    assert (m.uv_layout, m.uv_vertical) == ("element", "layer_linear")
+    assert_bitwise(m.u, out.u, "lazy u")
+    snaps = [_field("layer_linear", layout="element", seed=10 + i, t=t)
+             for i, t in enumerate(_TIMES)]
+    rec = reconstruct_pchip(snaps, _TIMES, 13.0)
+    assert (rec.uv_layout, rec.uv_vertical) == ("element", "layer_linear")
+    arrays, meta = _flatten_vel(a)
+    back = _assemble_vel(arrays, meta)
+    assert (back.uv_layout, back.uv_vertical) == ("element", "layer_linear")
+    assert back._dl_token is None
+    assert_bitwise(back.u, a.u, "shared cache u")
+    # mixing it with an element layer field still raises
+    with pytest.raises(ValueError, match="uv_vertical mismatch"):
+        a.lerp(_field("layer", layout="element", seed=3), 0.5)
 
 
 def test_2d_field_must_be_layer():

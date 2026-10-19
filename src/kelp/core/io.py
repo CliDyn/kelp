@@ -120,12 +120,13 @@ def _blend(a: np.ndarray, b: np.ndarray, alpha: float) -> np.ndarray:
 def _check_uv_vertical(u, w, uv_layout: str, uv_vertical: str) -> None:
     """The placement value and its shape contract (``VelocityField``).
 
-    A 2-D field (``u`` 1-D) is always ``"layer"``.  ``"level"`` and
-    ``"layer_linear"`` need node layout, with or without ``w``.  The rows
-    are checked against ``w`` only for 3-D fields (``u`` 2-D and ``w``
-    present): ``"layer"`` and ``"layer_linear"`` need
-    ``u.shape[0] == w.shape[0] - 1`` (one row per layer), ``"level"`` needs
-    ``u.shape[0] == w.shape[0]`` (one row per level).
+    A 2-D field (``u`` 1-D) is always ``"layer"``.  ``"level"`` needs node
+    layout, with or without ``w`` (level data sit on the nodes' levels);
+    ``"layer_linear"`` takes node or element layout.  The rows are checked
+    against ``w`` only for 3-D fields (``u`` 2-D and ``w`` present):
+    ``"layer"`` and ``"layer_linear"`` need ``u.shape[0] == w.shape[0] - 1``
+    (one row per layer), ``"level"`` needs ``u.shape[0] == w.shape[0]``
+    (one row per level).
     """
     if uv_vertical not in _VALID_UV_VERTICAL:
         raise ValueError(
@@ -140,7 +141,7 @@ def _check_uv_vertical(u, w, uv_layout: str, uv_vertical: str) -> None:
                 f"uv_vertical='layer', got {uv_vertical!r}"
             )
         return
-    if uv_vertical != "layer" and uv_layout != "node":
+    if uv_vertical == "level" and uv_layout != "node":
         raise ValueError(
             f"VelocityField: uv_vertical={uv_vertical!r} needs "
             f"uv_layout='node', got {uv_layout!r}"
@@ -233,7 +234,8 @@ class VelocityField:
         default — layer centres, ``(K-1, ·)``, piecewise constant in
         depth), ``"level"`` (on the levels, ``(K, N)``, node layout,
         linear in depth) or ``"layer_linear"`` (layer centres
-        ``(K-1, N)``, node layout, evaluated linearly in depth).  The
+        ``(K-1, ·)``, node or element layout, evaluated linearly in
+        depth).  The
         constructor checks a 3-D field's u rows against ``w`` (only when
         ``u`` is 2-D and ``w`` is present), so a dropped or wrong flag
         raises instead of mis-placing the data; a 2-D field (``u`` 1-D)
