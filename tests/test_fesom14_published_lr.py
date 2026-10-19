@@ -7,7 +7,10 @@ layout of the CMIP6 archive: ``Omon/<var>/gn/<version>/*.nc`` for ``uo``,
 each with its own epoch) and ``Ofx/deptho/gn/<version>/*.nc``.  Set
 ``KELP_TEST_FESOM14_DATA`` to the member directory (the one holding ``Omon``
 and ``Ofx``); without it the module is skipped.  The tests only read the
-files; everything they write goes to pytest's temporary directory.
+files; everything they write goes to pytest's temporary directory: about
+0.7 GB of temporary files at the peak (the converted mesh and data of the
+form comparison, removed again after it), and the module takes about 5 min on
+a 16-core node — use ``--basetemp`` on a scratch file system.
 
 What is pinned, and how each pin can fail:
 
@@ -57,6 +60,59 @@ What is pinned, and how each pin can fail:
 
 Measured values (the pins below hold a margin) are quoted in the docstrings
 with the commit they were measured on.
+
+Mutation pass (2026-10-19, on this module as first committed, 9cf16f8, with
+the reader at d1d7eb5).  Each defect below was put into a copy of the
+package, one at a time, and this module was run against it; every defect
+failed the pins named (mechanism and size from the assertion messages):
+
+- ``kelp/numerics/vertical_uv.py:_build_depth_points`` — the level points
+  moved half a layer down: ``test_lr_time_axis_absolute`` (3-month run, u
+  off at 24/24 probes, up to 0.119 m/s) and ``test_lr_pchip_run`` (u off at
+  24/24 probes, up to 0.122 m/s).
+- ``kelp/readers/fesom14/reader.py:Fesom14Reader.read_velocities`` — the
+  test on the w sign inverted (w handed on positive up):
+  ``test_lr_time_axis_absolute``, ``test_lr_w_sign_equator`` and
+  ``test_lr_pchip_run`` (w = +wo instead of -wo at 24/24 probes each, up to
+  8e-5 m/s).
+- ``kelp/readers/fesom14/reader.py:Fesom14Reader.open_dataset`` — the
+  resolved axis moved by +1 day: ``test_lr_time_axis_absolute`` (the
+  reader's instants differ from the bounds centres), ``test_lr_pchip_run``
+  (u off up to 0.018 m/s), ``test_lr_form_equivalence`` (the raw records'
+  instants differ from the bounds centres); the 10-day run is refused (its
+  start lies before the first record).
+- ``kelp/tracking.py:run_tracking`` — the record times the engine uses moved
+  by +1 day: ``test_lr_time_axis_absolute`` (3-month run, u off at 24/24
+  probes, up to 0.014 m/s), ``test_lr_w_sign_equator`` (the 10-day run
+  writes no record), ``test_lr_pchip_run``.
+- ``kelp/tracking.py:run_tracking`` — the midpoint shift of other readers'
+  time means applied to this reader's resolved axis:
+  ``test_lr_time_axis_absolute`` (u off up to 0.21 m/s),
+  ``test_lr_w_sign_equator`` (w off at 24/24 probes), ``test_lr_pchip_run``.
+- ``kelp/readers/fesom14/_ascii_mesh.py:read_ascii_mesh`` — after its
+  checks, the rows of the 3-D node table rolled by one node among columns of
+  equal length: ``test_lr_form_equivalence`` only (lat not bit-identical at
+  any record; the wet masks still agree, so no other check sees it).
+- ``kelp/readers/fesom14/reader.py:Fesom14Reader.read_velocities`` — the
+  ``uv_vertical="level"`` flag dropped: the field constructor refuses u of
+  shape (46, N) as layer data, so every run fails
+  (``test_lr_time_axis_absolute`` and all tests that use a run).
+- ``kelp/numerics/interpolate.py:_interp_barycentric_core_pchip4_dl`` — the
+  depth lerp per snapshot first, then PCHIP (the reversed order):
+  ``test_lr_pchip_run`` only (u off at 24/24 probes, up to 0.0085 m/s).
+
+Re-checked the same day after the upper bound on the PCHIP separation was
+added (``test_lr_pchip_run`` only): the reversed order still fails on its
+first step; the two central snapshots swapped once the stencil has moved
+past its first interval (``kelp/tracking.py:run_single_realization``) leave
+the first step intact and fail only the upper bound (separation 7.74 km,
+0.127 of the displacement); PCHIP silently replaced by the lerp once the
+stencil has moved (``kelp/tracking.py:_resolve_recon_stencil``) is NOT caught
+(separation 0.93 km, above the 0.85 km floor).
+
+The pass is a scripted edit-and-rerun, not a test: most of these defects sit
+in compiled kernels and in the engine, where no monkeypatch reaches, and a
+test that rewrites the package's source does not belong in the suite.
 """
 from __future__ import annotations
 
@@ -64,15 +120,28 @@ import contextlib
 import glob
 import io
 import os
+import re
+import shutil
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pytest
 
 _DATA = os.environ.get("KELP_TEST_FESOM14_DATA", "")
+
+#: the warning every geographic load of this mesh gives (its northernmost
+#: node lies at 89.958 N): pinned once in ``test_lr_mesh_recovery``, filtered
+#: by exactly this message everywhere else
+POLE_WARNING = ("mesh reaches |lat| = 89.96 deg - lon/lat tracking "
+                "degenerates near the pole; set mesh.rotation: fesom2 to track "
+                "in the model's rotated frame.")
+# a filter is "action:message:category"; the message's own colon is written
+# as \x3a in the regular expression
+_POLE_FILTER = ("ignore:" + re.escape(POLE_WARNING).replace(":", r"\x3a")
+                + r"\Z:RuntimeWarning")
 
 pytestmark = [
     pytest.mark.slow,
@@ -80,7 +149,10 @@ pytestmark = [
         not _DATA,
         reason="KELP_TEST_FESOM14_DATA is not set (the member directory of "
                "the published CMIP6 AWI-CM-1-1-LR hist-1950 output, holding "
-               "Omon/ and Ofx/)"),
+               "Omon/ and Ofx/; with it the module needs about 0.7 GB of "
+               "temporary files and about 5 min on 16 cores: use --basetemp "
+               "on a scratch file system)"),
+    pytest.mark.filterwarnings(_POLE_FILTER),
 ]
 
 netCDF4 = pytest.importorskip("netCDF4")
@@ -639,8 +711,18 @@ def test_lr_mesh_recovery(lr):
     depth of the last wet level EXACTLY at every node (the reader allows
     0.01 m), the mask is a prefix of each column, every column has at least
     three wet levels.  Geographic coordinates: the nodes reach 89.9 N and
-    every longitude, ocean points lie in a triangle and land points in none.
+    every longitude, ocean points lie in a triangle and land points in none;
+    loading the mesh warns once that it reaches the pole region
+    (``POLE_WARNING``, filtered by that exact message in the other tests).
     """
+    # the near-pole warning: exactly once per load, with this exact message
+    with pytest.warns(RuntimeWarning,
+                      match="^" + re.escape(POLE_WARNING) + r"\Z") as caught:
+        again = _quiet(Fesom14Reader.load_mesh,
+                       MeshConfig(type="fesom14", meshpath=str(lr.farm)))
+    assert sum(str(w.message) == POLE_WARNING for w in caught) == 1
+    assert_bitwise(again.elem_nodes, lr.mesh.elem_nodes, "elem_nodes, reloaded")
+
     mesh = lr.mesh
     tri = np.asarray(mesh.elem_nodes, dtype=np.int64)
     assert mesh.n_nodes == N_NODES
@@ -857,6 +939,10 @@ def test_lr_3d_run_three_months(lr, seeds, lerp_run):
 #: median separation (km) of the PCHIP run from the lerp run after 30 days:
 #: measured 1.705 km (reader at d1d7eb5); pinned at half
 PCHIP_SEP_KM_MIN = 0.85
+#: the same separation relative to the lerp run's median 30-day displacement
+#: (61.0 km): measured 0.028; pinned below 0.1, so that a broken PCHIP cannot
+#: pass as a "large" separation
+PCHIP_SEP_FRAC_MAX = 0.1
 
 
 def test_lr_pchip_run(lr, seeds, lerp_run, pchip_run):
@@ -866,8 +952,10 @@ def test_lr_pchip_run(lr, seeds, lerp_run, pchip_run):
     probes equal PCHIP in time at each of the two levels (records 0-3),
     then the lerp in depth, and differ from the reversed order by at least
     ``ORDER_GAP`` for u or v.  The median separation from the lerp run after
-    30 days stays above ``PCHIP_SEP_KM_MIN`` (measured value in the
-    constant's comment).
+    30 days stays above ``PCHIP_SEP_KM_MIN`` and below ``PCHIP_SEP_FRAC_MAX``
+    of the lerp run's median 30-day displacement (measured values with the
+    constants): after the first step only these two bounds watch the
+    stencil as it moves across the records.
     """
     run = pchip_run
     _assert_sane_run(lr, run)
@@ -886,10 +974,13 @@ def test_lr_pchip_run(lr, seeds, lerp_run, pchip_run):
                                                time_first=False)))
     assert (gap >= ORDER_GAP).all(), np.sort(gap)[:3]
 
-    sep = np.median(_sep_km(run, lerp_run, _rec(30)))
+    sep = float(np.median(_sep_km(run, lerp_run, _rec(30))))
+    disp = float(np.median(_disp_km(lerp_run, _rec(30))))
     print(f"measured: PCHIP vs lerp: median separation after 30 days "
-          f"{sep:.4f} km; smallest depth-first gap {gap.min():.3e} m/s")
+          f"{sep:.4f} km, median displacement {disp:.2f} km (ratio "
+          f"{sep / disp:.4f}); smallest depth-first gap {gap.min():.3e} m/s")
     assert sep >= PCHIP_SEP_KM_MIN, sep
+    assert sep <= PCHIP_SEP_FRAC_MAX * disp, (sep, disp)
 
 
 # ---------------------------------------------------------------------------
@@ -1081,31 +1172,38 @@ class _Forms:
 
 
 @pytest.fixture(scope="module")
-def forms(lr, seeds, tmp_path_factory) -> _Forms:
+def forms(lr, seeds, tmp_path_factory) -> Iterator[_Forms]:
     """The published fields written as an ASCII mesh and raw-writer files
-    over the 3-D nodes, and the same 20-day PCHIP run on both forms."""
+    over the 3-D nodes, and the same 20-day PCHIP run on both forms.
+
+    The converted files and the run outputs (about 0.7 GB, the bulk of the
+    module's temporary files) are removed when the module is done, also when
+    a run fails; the runs' arrays stay in memory."""
     d = tmp_path_factory.mktemp("forms")
-    meshdir = _write_ascii_mesh(d / "mesh", lr.lon, lr.lat,
-                                np.asarray(lr.mesh.elem_nodes, dtype=np.int64),
-                                lr.wet, lr.levels)
-    raw = d / "raw"
-    raw.mkdir()
-    zos = _read_records(_files(VAR_2D)[0], VAR_2D, N_REC)
-    for epoch, ends, recs in SEGMENTS:
-        tag = epoch.replace("-", "")
-        for var in ("uo", "vo", "wo", "thetao"):
-            # level-major: boolean indexing of (K, N) walks level by level
-            vals = np.stack([lr.rec[var][i][lr.wet] for i in recs])
-            assert np.isfinite(vals).all()
-            _write_raw(raw / f"{var}_lr_{tag}.nc", var, epoch, ends, vals,
-                       "nodes_3d")
-        _write_raw(raw / f"{VAR_2D}_lr_{tag}.nc", VAR_2D, epoch, ends,
-                   zos[list(recs)], "nodes_2d")
-    level = _run(_months_cfg(lr, seeds, d, "levelwise", days=N_DAYS_FORMS,
-                             pchip=True))
-    nodes3d = _run(_months_cfg(lr, seeds, d, "nodes3d", days=N_DAYS_FORMS,
-                               data=raw, meshpath=meshdir, pchip=True))
-    return _Forms(meshdir=meshdir, raw=raw, level=level, nodes3d=nodes3d)
+    try:
+        meshdir = _write_ascii_mesh(
+            d / "mesh", lr.lon, lr.lat,
+            np.asarray(lr.mesh.elem_nodes, dtype=np.int64), lr.wet, lr.levels)
+        raw = d / "raw"
+        raw.mkdir()
+        zos = _read_records(_files(VAR_2D)[0], VAR_2D, N_REC)
+        for epoch, ends, recs in SEGMENTS:
+            tag = epoch.replace("-", "")
+            for var in ("uo", "vo", "wo", "thetao"):
+                # level-major: boolean indexing of (K, N) walks level by level
+                vals = np.stack([lr.rec[var][i][lr.wet] for i in recs])
+                assert np.isfinite(vals).all()
+                _write_raw(raw / f"{var}_lr_{tag}.nc", var, epoch, ends, vals,
+                           "nodes_3d")
+            _write_raw(raw / f"{VAR_2D}_lr_{tag}.nc", VAR_2D, epoch, ends,
+                       zos[list(recs)], "nodes_2d")
+        level = _run(_months_cfg(lr, seeds, d, "levelwise",
+                                 days=N_DAYS_FORMS, pchip=True))
+        nodes3d = _run(_months_cfg(lr, seeds, d, "nodes3d", days=N_DAYS_FORMS,
+                                   data=raw, meshpath=meshdir, pchip=True))
+        yield _Forms(meshdir=meshdir, raw=raw, level=level, nodes3d=nodes3d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _stamp(t: cftime.datetime) -> str:
