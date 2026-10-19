@@ -177,6 +177,27 @@ def test_declaration_snapshot_at_first_use():
     assert vu.depth_points(mesh, "level").last.tolist() == [3, 2, 1, 0]
 
 
+def test_declaration_snapshot_shared_by_shallow_copies():
+    """Two shallow copies made before either built a table share one
+    metadata dict: the second reuses the first's snapshot instead of
+    replacing it, so alternating lookups settle after one build each."""
+    import copy
+    vu = _vu()
+    mesh = _mesh()
+    mesh.metadata["uv_data_last"] = np.array([0, 2, 1, 1], dtype=np.int32)
+    a, b = copy.copy(mesh), copy.copy(mesh)
+    assert a.metadata is b.metadata
+    dp_a = vu.depth_points(a, "level")
+    snap = a.metadata["uv_data_last"]
+    dp_b = vu.depth_points(b, "level")
+    assert b.metadata["uv_data_last"] is snap
+    for _ in range(3):
+        assert vu.depth_points(a, "level") is dp_a
+        assert vu.depth_points(b, "level") is dp_b
+    assert a.metadata["uv_data_last"] is snap
+    assert dp_b.last.tolist() == dp_a.last.tolist() == [0, 2, 1, 0]
+
+
 @pytest.mark.parametrize("alias", ["base", "view"])
 def test_declaration_alias_cannot_change_the_table(alias):
     """A write through the reader's base array, or through a writable view

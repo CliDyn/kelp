@@ -53,6 +53,7 @@ unchecked.
 """
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass
 
 import numpy as np
@@ -117,12 +118,20 @@ class _DepthPointsEntry:
 # The table
 # ---------------------------------------------------------------------------
 
-def _snapshot_declaration(decl, cache):
+# every declaration snapshot this process made, by id; a freed snapshot
+# drops out, so a reused id never matches.  Reuse then does not depend on
+# whose cache holds the snapshot: two shallow copies of a mesh (one shared
+# metadata dict) reuse each other's instead of replacing it on every lookup
+_SNAPSHOTS: "weakref.WeakValueDictionary[int, np.ndarray]" = (
+    weakref.WeakValueDictionary())
+
+
+def _snapshot_declaration(decl):
     """The declaration a table is built from: an owned, read-only copy.
 
-    ``decl`` itself when it already is the engine's snapshot — read-only
-    and held by a live entry of ``cache`` (the other placement's, or this
-    placement's before a ``max_levels`` cut); otherwise
+    ``decl`` itself when it already is an engine snapshot that is still
+    read-only (the other placement's, this placement's before a
+    ``max_levels`` cut, or a shallow copy's of the same mesh); otherwise
     ``np.array(decl, copy=True)`` (dtype kept, validated by the caller),
     frozen before anyone else holds it, so no earlier view or base array
     of the reader's can write into it.  ``None`` (no declaration) stays
@@ -131,10 +140,11 @@ def _snapshot_declaration(decl, cache):
     if decl is None:
         return None
     if (isinstance(decl, np.ndarray) and not decl.flags.writeable
-            and any(e.decl is decl for e in (cache or {}).values())):
+            and _SNAPSHOTS.get(id(decl)) is decl):
         return decl
     snap = np.array(decl, copy=True)
     snap.setflags(write=False)
+    _SNAPSHOTS[id(snap)] = snap
     return snap
 
 
@@ -228,7 +238,8 @@ def depth_points(mesh: Mesh, placement: str) -> DepthPoints:
     Notes
     -----
     A build takes the declaration's snapshot (an owned, read-only copy;
-    one that already is the snapshot of a live entry is reused), validates
+    one that already is an engine snapshot, still read-only, is reused —
+    the other placement's or a shallow copy's of the mesh), validates
     it, builds from it, and installs it in
     ``mesh.metadata["uv_data_last"]`` in place of the reader's array: the
     declaration in effect is exactly what the table was built from, and a
@@ -269,7 +280,7 @@ def depth_points(mesh: Mesh, placement: str) -> DepthPoints:
                 and not (isinstance(decl, np.ndarray)
                          and decl.flags.writeable)):
             return entry.points
-    snap = _snapshot_declaration(decl, cache)
+    snap = _snapshot_declaration(decl)
     points = _build_depth_points(sigma, depth, snap, placement, mesh.n_nodes)
     if snap is not decl:
         # the declaration in effect is what the table was built from.  A
