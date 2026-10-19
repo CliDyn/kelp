@@ -1,0 +1,68 @@
+# =========================================================================
+# Example: 3-D tracking on FESOM 1.4 level-wise output, sampling
+# temperature along every trajectory.
+#
+# Written for the published CMIP6 monthly means of AWI-CM-1-1-LR (FESOM 1.4,
+# 126,859 nodes, 46 levels; licence CC BY-SA 4.0): one file per variable and
+# decade, uo/vo/wo/thetao/so as (time, depth, ncells) with a fill value below
+# the bed, zos as (time, ncells), and deptho (table Ofx).  Put the files the
+# run reads -- uo, vo, wo, zos, thetao (sampled below), deptho -- in one
+# directory (links are fine) and point both paths at it.
+#
+# The mesh comes from the data: the files hold the node coordinates and the
+# cell polygons (lon_bnds/lat_bnds), from which the reader recovers the
+# triangles exactly; deptho is checked against the wet mask of the first uo
+# record.  FESOM 1.4 keeps u, v and w ON the levels (a P1 model): the run
+# reads them linearly in depth (docs/vertical.md section 2.1).
+#
+# Time: no data.time_averaging -- the reader resolves what time each record
+# represents from the files' time_bnds (the centre of each month) and
+# refuses the key.  Files without time bounds need data.time_stamp and
+# data.time_window (docs/configuration.md section 5).
+#
+# Check the setup first: kelp info config_fesom14_levelwise.yaml
+# Paths are placeholders -- edit them for your machine.
+# =========================================================================
+mode:
+  Fdrift2D: false
+  Fdrift3D: true              # 3-D: u/v/w (K, N) on the 46 levels, linear in depth between them
+  time_dir: 1.0
+  # var_u / var_v / var_w / var_eta default to uo / vo / wo / zos
+  sample_vars: [thetao]       # a 3-D scalar on the levels, sampled at every record
+
+numerics:
+  dt: 21600.0                 # 6 h
+  integrator: rk2
+  uv_interp: barycentric      # REQUIRED: FESOM 1.4 velocities sit on the nodes (node layout)
+  w_interp: barycentric       # nearest/barycentric take the fused 3-D RK2 kernel
+  sample_interp: barycentric
+  output_freq: 4              # one record a day
+  temporal_interp: true       # REQUIRED for monthly means: calendar months are irregular, and discrete
+                              #   mode refuses irregular records; it also lets a run start between
+                              #   records (daily means sit at 12:00: a discrete run starts at 12:00)
+  beaching:
+    enabled: true
+    criteria: [on_failure]    # a particle that would leave the mesh stops at the coast
+
+mesh:
+  type: fesom14
+  meshpath: path/to/fesom14_lr    # the directory of the files (or one uo file); an ASCII mesh
+                                  #   directory (nod2d.out, elem2d.out, nod3d.out, aux3d.out) works too
+  # input_rotation: [50.0, 15.0, -90.0]   # ASCII meshes stored in the rotated model frame only:
+                                          #   the Euler angles of the run's namelist
+  # rotation: fesom2              # the mesh reaches the North Pole (a warning says so): track in a
+                                  #   rotated frame for Arctic work (output stays geographic)
+
+data:
+  ncinput: path/to/fesom14_lr     # a directory of *.nc files or a glob; files are grouped by the
+                                  #   variable they hold, whatever their names
+  inicloud: seeds_3d.dat          # "lon lat depth" per line (metres, positive down)
+  output_path: tracks_fesom14_3d.zarr
+  # time_stamp: end               # files without time bounds: where each stamp sits in its window
+  # time_window: calendar_month   #   (start / centre / end / instant) and the window or cadence
+  # time_offset: "+12 h"          # raw output of a job that started at 12:00 (stamps 12 h early)
+
+time:
+  start_date: "1951-03-01T00:00"  # between two monthly records: fine with temporal_interp
+  duration_days: 90
+  on_exhausted: stop

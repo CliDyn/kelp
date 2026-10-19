@@ -7,16 +7,17 @@ This file describes the `kelp` package internals so an LLM can continue developm
 A Python Lagrangian particle tracker for unstructured ocean meshes, reimplementing Fortran tracer models. Status:
 
 - **2D surface tracking** — complete; validated against the Fortran reference (forward + backward, < 1 mm) while both used 111 300 m per degree — since the switch to 111 120 the comparison test is skipped (~11.6 m systematic offset after 2 h at 1 m/s, see the Fortran section).
-- **3D vertical tracking** — FESOM2 z-levels (direct W input) and FESOM-C sigma coordinates.
+- **3D vertical tracking** — FESOM2 z-levels (direct W input), FESOM 1.4 z-levels (u/v/w on the levels) and FESOM-C sigma coordinates.
 - **Stochastic diffusion** — uniform Kh / Euler-Maruyama / Milstein, wired into Euler/RK2/RK4 via three composition modes (split / combined / split_rk), counter-based RNG; **vertical Az** (TODO 2.2b, 3-D only) — split kick with mandatory Itô drift (Visser 1997) + reflective boundaries, `az_const` everywhere / `var_az` field FESOM2 z-level, `COMP_VERTICAL=1`.
 - **Time-aware RK2/RK4** — stages lerp velocity to substep times on non-autonomous flows; opt-in 4-snapshot PCHIP in time (`numerics.temporal_reconstruction`); adaptive **RK45** (Dormand–Prince, 2-D element leastsq).
-- **u/v interpolation** — `leastsq` (default), `barycentric` (node layout: HEALPix, NEMO, FESOM2 `unod`/`vnod`), `edge_leastsq` (FESOM-style).
+- **u/v interpolation** — `leastsq` (default), `barycentric` (node layout: HEALPix, NEMO, FESOM2 `unod`/`vnod`, FESOM 1.4), `edge_leastsq` (FESOM-style).
 - **HEALPix** reader (2-D + 3-D, dual or pixel geometry, regional extracts) and **NEMO** (2-D, E/N-aligned grids) besides FESOM2 and FESOM-C.
+- **FESOM 1.4** reader (`mesh.type: fesom14`, `readers/fesom14/`) — mesh from an ASCII mesh directory or recovered exactly from the cell polygons of level-wise data; level-wise and raw 3-D-node files; u/v/w on the levels (`native_uv_vertical = "level"`, always linear in depth — a prism-wise approximation of FESOM 1.4's interpolation on tetrahedra); the reader resolves what time each record represents (time bounds, the raw `output_schedule`, or `data.time_stamp` + `time_window`; `data.time_offset`), so no midpoint shift and `data.time_averaging` is refused; a check-only `prepare(mesh, ds)` hook. The raw form is validated against the format description and a real-geometry round trip, not against real raw output.
 - **Offline W reconstruction** (`w_reconstruct.py`) from u, v, ssh.
 - **Per-particle FailureReason diagnostics** — why each particle died.
 - **Beaching model** (TODO 2.2) — 4 combinable criteria (depth/coastal_element/on_failure/stochastic), tidal resuspension (never/auto/stochastic/auto_or_stochastic), Fortran fix_* freeze via the alive-mask.
 - **Field sampling along trajectories** (TODO 2.4) — T/S/any node-based scalar sampled at record points, written to trajectory output; standalone `sample_field` API.
-- **Rotated-frame tracking** (FESOM2 + HEALPix, opt-in `mesh.rotation`) — Euler-rotated sphere (default `None` byte-identical; `"fesom2"` = (50,15,−90)); transpolar-capable, geographic output, frame-validated restart.
+- **Rotated-frame tracking** (FESOM2 + HEALPix + FESOM 1.4, opt-in `mesh.rotation`) — Euler-rotated sphere (default `None` byte-identical; `"fesom2"` = (50,15,−90)); transpolar-capable, geographic output, frame-validated restart.
 - **FESOM-style elemental interpolation + element tracking** (reviewer items, 2026-07) — `uv_interp: edge_leastsq` (LSQ over the containing element + its edge neighbors; boundary ghosts per `edge_leastsq_bc: freeslip|noslip`); `elem_search: walk` (containing element searched ONCE at release, then tracked across edges; verdict-identical to the per-step scan, unfused paths, ~3.6× faster containment); quad vertex weights = guard-free product-form Wachspress (convex quads are a mesh contract).
 - Streaming trajectory output (NetCDF **and Zarr**, both readable mid-run — Zarr is lock-free, NetCDF via `numerics.output_flush_every`; **output format 2**: CF trajectory layout with a calendar `time`, release positions/times, velocities NaN outside ALIVE steps) with restart checkpoints, temporal velocity interpolation, installable package (`pip install -e .`), `kelp` CLI (`run` / `info`).
 - Performance: measured rows live in `benchmarks/` and `docs/performance.md` (the old "15–19× faster than Fortran" figure has no measurement in this repository).
@@ -50,8 +51,9 @@ capabilities from the source — the mechanics are already written down:
   `config_global_2d_10yr.yaml` (2D, multi-year, node velocities, pulsed release,
   rotated frame), `config_global_2d_1yr.yaml` (simpler), `config_weddell_3d.yaml`
   (3D, W + T/S sampling), `config_nemo.yaml` (structured C-grid),
-  `config_healpix_2d.yaml` / `config_healpix_3d.yaml` (HEALPix stores). Copy and
-  set the paths.
+  `config_healpix_2d.yaml` / `config_healpix_3d.yaml` (HEALPix stores),
+  `config_fesom14_levelwise.yaml` (3-D on FESOM 1.4 level-wise output, the mesh
+  from the files' cell polygons). Copy and set the paths.
 - **Tools** — `utils/extract_fesom_region.py` (crop a region/years → Zarr; the
   memory lever for big meshes so 3D / 4-snapshot reconstruction fits in RAM);
   `utils/reconstruct_w.py` (offline W when a dataset lacks vertical velocity);
@@ -68,6 +70,13 @@ capabilities from the source — the mechanics are already written down:
   *HEALPix twins* (validation-grade): combined one-year stores with daily node
   `uo/vo/wo/ssh/temp/salt`, self-contained incl. the vertical table; the tests that
   use them read the directory from `KELP_TEST_DATA` (see `tests/test_healpix_real_core2.py`).
+  *FESOM 1.4*: level-wise files, one per variable and period, `(time, depth, ncells)`
+  with time bounds and cell polygons (e.g. the published CMIP6 output, monthly means
+  per decade, each file with its own epoch; `deptho` in a separate file), or the raw
+  writer's `<var>_<runid>_<YYYYMMDD>.nc` per job segment, `(time, nodes_3d)` with an
+  `output_schedule` attribute, next to an ASCII mesh directory; the data-gated tests
+  read the published LR member directory from `KELP_TEST_FESOM14_DATA`
+  (`tests/test_fesom14_published_lr.py`).
 
 ## Repository layout
 
@@ -121,9 +130,12 @@ kelp/                     ← repo root
 │   │   ├── vertical.py       ← z-level layer/W helpers
 │   │   ├── vertical_uv.py    ← depth-linear u/v (mode.uv_vertical): data points, bracket, record check
 │   │   └── vertical_sigma.py ← sigma layer/W helpers (FESOM-C)
-│   ├── readers/              ← registry: get_reader("fesomc" | "fesom2" | "nemo" | "healpix"); NetCDF + Zarr + kerchunk
+│   ├── readers/              ← registry: get_reader("fesomc" | "fesom2" | "fesom14" | "nemo" | "healpix"); NetCDF + Zarr + kerchunk;
+│   │                            the reader hook prepare + the stamp options shared by tracking and `kelp info`
 │   │                            (structured.py = curvilinear→quad-Mesh foundation; nemo.py = NEMO adapter, 2-D;
-│   │                             healpix.py = HEALPix dual/pixel mesh builder + native reader, 2-D and 3-D — docs/healpix.md)
+│   │                             healpix.py = HEALPix dual/pixel mesh builder + native reader, 2-D and 3-D — docs/healpix.md;
+│   │                             fesom14/ = FESOM 1.4 package: reader.py + _ascii_mesh, _polygons (triangles from cell
+│   │                             polygons), _layout (the two data forms, the validity predicate), _timeaxis (record times))
 │   ├── visualization/        ← matplotlib 2D/3D plots, animation, stats
 │   ├── tracking.py           ← orchestration: run_tracking, run_single_realization, track_particles
 │   ├── writers.py            ← trajectory writer (NetCDF4 / Zarr v3) + checkpoints + restart files
@@ -132,7 +144,7 @@ kelp/                     ← repo root
 ├── examples/                 ← runnable YAML configs only (genericized real runs):
 │      config_global_2d_10yr.yaml, config_global_2d_1yr.yaml,
 │      config_weddell_3d.yaml, config_nemo.yaml, config_healpix_2d.yaml,
-│      config_healpix_3d.yaml
+│      config_healpix_3d.yaml, config_fesom14_levelwise.yaml
 ├── utils/                    ← README.md (what each tool is for),
 │                               extract_fesom_region.py (region → Zarr subset),
 │                               extract_healpix_region.py (HEALPix pixel subset → self-describing Zarr),
@@ -154,7 +166,7 @@ kelp/                     ← repo root
         test_integrators_time_aware.py, test_temporal_interp.py, test_failure_reason.py,
         test_regression.py, test_real_mesh.py, test_visualization.py, test_cli.py,
         test_parcels_comparison.py, test_parcels_diffusion_parity.py,
-        test_parcels_diffusion_comparison.py, test_healpix_*.py, ...)
+        test_parcels_diffusion_comparison.py, test_healpix_*.py, test_fesom14_*.py, ...)
 ```
 
 ## Module notes (`docs/dev/`)
@@ -196,7 +208,7 @@ python -m pytest tests/          # default: 2687 collected (2652 pass, 35 data/p
 python -m pytest tests/ -m slow  # Parcels comparison + data-gated HEALPix-twin / W-sign suites
 ```
 
-`@slow` tests live in four files: `test_parcels_comparison.py` (kinematic benchmarks vs v4 reference CSVs) and `test_parcels_diffusion_comparison.py` (cross-system moment comparison vs v4 reference) need a sibling Parcels repo (its benchmark outputs directory, see the test docstrings; own venv); `test_healpix_native_twin.py` and `test_w_sign_contract.py` need the HEALPix twin / native data (`KELP_TEST_DATA`, `KELP_TEST_NATIVE_DATA`). `test_parcels_diffusion_parity.py` (Parcels' two diffusion benchmarks re-run natively: Brownian moments, spatially-varying Kh skewness) is NOT slow and runs in the default suite.
+`@slow` tests: `test_parcels_comparison.py` (kinematic benchmarks vs v4 reference CSVs) and `test_parcels_diffusion_comparison.py` (cross-system moment comparison vs v4 reference) need a sibling Parcels repo (its benchmark outputs directory, see the test docstrings; own venv); `test_healpix_native_twin.py` and `test_w_sign_contract.py` need the HEALPix twin / native data (`KELP_TEST_DATA`, `KELP_TEST_NATIVE_DATA`); `test_fesom14_published_lr.py` needs the published FESOM 1.4 LR output (`KELP_TEST_FESOM14_DATA`; ~0.7 GB of temporary files — use `--basetemp` on a scratch file system); `test_golden_3d_runs.py::test_golden_bitwise_numba_off` re-runs the golden cases with the Numba JIT off. `test_parcels_diffusion_parity.py` (Parcels' two diffusion benchmarks re-run natively: Brownian moments, spatially-varying Kh skewness) is NOT slow and runs in the default suite.
 
 
 **Validation suites get a mutation/honesty pass** (HEALPix Phase 5, 2026-08): after pinning measured tolerances, perturb the code or data in ~10 deliberate ways — including a UNIFORM time-axis offset, which statistics-only pins cannot see — and check that each pin fails; pin the ORDERING too (finer resolution → closer to the reference), the claim a broken remap would violate.

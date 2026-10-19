@@ -289,9 +289,11 @@ by the `_dl` twins of these cores.
 
 With `mode.uv_vertical: linear` the layer-centred u/v are linear in depth
 between the layer centres (a reader with level data, `uv_vertical =
-"level"`, between the levels); the rule — the data points, each node's last
-usable point, constant ends, never a point below the bed — is in
-`vertical.md` §2.1. `interp_barycentric` hands such a field to
+"level"` — the FESOM 1.4 reader — between the levels); the rule — the data
+points, each node's last usable point, constant ends, never a point below the
+bed — is in `vertical.md` §2.1, with the note that for FESOM 1.4 this
+barycentric-times-linear-in-depth reading is a prism-wise approximation of the
+model's own interpolation on tetrahedra. `interp_barycentric` hands such a field to
 `_interp_barycentric_dl` → `_loop_interp_bary_dl` →
 `_interp_barycentric_core_dl`, which reads each particle at its own depth
 `state.z` (the `layer` argument is ignored). The geometry — containment,

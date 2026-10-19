@@ -10,7 +10,7 @@ the sphere, but it breaks down close to the geographic poles. KELP can side-
 step that breakdown by doing the whole computation in a **rotated coordinate
 frame**: it spins the sphere so that the awkward point — the pole — sits over
 land, far from any water a particle could reach, and then tracks in those
-rotated coordinates. The feature is **opt-in**, **FESOM2 + HEALPix (fesomc/nemo reject)**, and completely
+rotated coordinates. The feature is **opt-in**, **FESOM2 + HEALPix + FESOM 1.4 (fesomc/nemo reject)**, and completely
 invisible from the outside: you still hand in geographic seed positions and you
 still get geographic trajectories back. This document explains why the rotation
 helps, the exact mathematics of the rotation, which quantities are transformed
@@ -57,7 +57,8 @@ angles the computational pole sits on Greenland. This is not an arbitrary
 choice: it is FESOM2's *own* rotated frame, the one the model's grid is defined
 in, and using it lets the rotated mesh reproduce the model's stored element
 areas to machine precision. For an Arctic or trans-polar run, rotating into this
-frame is what makes the tracking well-behaved. The feature is FESOM2 + HEALPix (fesomc/nemo reject); the
+frame is what makes the tracking well-behaved. The feature is FESOM2 + HEALPix + FESOM 1.4 (the FESOM 1.4
+reader uses the FESOM2 reader's rotation helpers; fesomc/nemo reject); the
 FESOM-C reader rejects `mesh.rotation` outright, because it has no path for
 rotating its velocity vectors.
 

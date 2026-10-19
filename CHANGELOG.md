@@ -44,7 +44,8 @@ the tracker was developed privately from 2026-06.
   the shared snapshot cache; the new module `numerics/vertical_uv.py` holds the
   data-point table, the bracket and the record check. Readers may set
   `native_uv_vertical = "level"` (u/v on the levels, always linear in depth) and
-  provide a hook `prepare(mesh, ds)`; no reader of this version uses either.
+  provide a hook `prepare(mesh, ds)`; the FESOM 1.4 reader (next section) uses
+  both.
   `prepare` runs at every entry: right after `open_dataset` (before any output
   file exists) and again at the entry of each realization, after the
   `max_levels` cut — 1 + R calls for R realizations, one per direct
@@ -60,8 +61,65 @@ the tracker was developed privately from 2026-06.
   step with a linear time blend, +8 % with PCHIP (128 threads, 1e5
   particles).
 
+### Added — FESOM 1.4 reader (`mesh.type: fesom14`)
+
+- A reader for FESOM 1.4 output. The mesh comes from a FESOM 1.4 ASCII mesh
+  directory (`nod2d.out`, `elem2d.out`, `nod3d.out`, `aux3d.out`, cross-checked
+  on load) or from level-wise data files that hold the node cell polygons
+  (`lon_bnds`/`lat_bnds`): the triangles are recovered exactly from the
+  polygons, and a `deptho` variable is checked against the wet mask. A mesh
+  stored in the model's rotated frame is rotated back with
+  `mesh.input_rotation` (the Euler angles of the run; refused for other mesh
+  types); a global ASCII mesh without a node north of 85° N draws a warning
+  when the angles are missing.
+- Data in either form FESOM 1.4 writes: level-wise `(time, depth, node)` files
+  (e.g. the published CMIP6 output) and the raw writer's vectors over the 3-D
+  nodes `(time, nodes_3d)`, mapped through the ASCII mesh's index table. Files
+  are grouped by the variables they hold, not by their names; only the
+  variables a run consumes are opened. u, v and w come back on the levels and
+  are always read linearly in depth (`uv_vertical = "level"`): a prism-wise
+  approximation (barycentric on the triangle, linear in depth per vertex) of
+  FESOM 1.4's own interpolation on tetrahedra. Every record of every variable
+  is checked against the mesh's static wet mask on every level before anything
+  is changed; values below the bed are then 0 (u, v, w) or the column's last
+  value (sampled scalars). 2-D tracking takes one level (`mode.sigma_layer`),
+  the depth mean (`mode.sigma_mean`) or the surface.
+- Time: each file is decoded with its own epoch and calendar, and the reader
+  resolves what each record represents — the centre of its averaging window
+  for a mean, the stamp for a snapshot — from the files' time bounds, the raw
+  writer's `output_schedule` (checked against the stamps) or the new keys
+  `data.time_stamp` + `data.time_window`; `data.time_offset` shifts the raw
+  stamps first (a raw job that started mid-day). A window is never estimated
+  and a gap in the records refuses the run. For this reader `run_tracking`
+  applies no midpoint shift, refuses `data.time_averaging`, and writes
+  `time_averaging = "resolved_by_reader"`; the three new keys are refused for
+  every other mesh type.
+- Refused before the output file exists: em/m1 diffusion (FESOM 1.4 output
+  has no Kh fields) and `beaching.use_eta: true` without a sea-surface
+  height in the files. The offline W reconstruction (`w_reconstruct.py`,
+  `utils/reconstruct_w.py`) refuses FESOM 1.4 meshes and data on the levels:
+  FESOM 1.4 output holds `wo` itself.
+- Validation: the level-wise form against the published CMIP6 AWI-CM-1-1-LR
+  output (data-gated `tests/test_fesom14_published_lr.py`, directory from
+  `KELP_TEST_FESOM14_DATA`): mesh recovery, the absolute time axis, first-step
+  velocities against hand values, the w sign, PCHIP in time. The raw form and
+  the ASCII mesh are checked against FESOM 1.4's description of its formats
+  and by a round trip on real geometry (the published mesh and fields written
+  in those forms give bit-identical trajectories), not against real raw
+  output. Example: `examples/config_fesom14_levelwise.yaml`; I/O cost on that
+  mesh: `benchmarks/single_node/fesom14_lr_cost.md`.
+- `cftime` is a declared runtime dependency (it was installed with `netCDF4`
+  already).
+
 ### Changed
 
+- `kelp info` opens the data as a run does, for every reader: `data.ncinput`
+  together with `data.ncinput_v` / `data.ncinput_w` (before, `ncinput` only),
+  the stamp options, and the reader's `prepare` checks against the mesh. It no
+  longer imports the tracking loop: the helpers it shares with a run
+  (`_prepare_dataset`, `_time_option_kwargs`, `_describe_record_times`) moved
+  from `tracking.py` to `readers/__init__.py`, and `tracking` imports them
+  under the same names.
 - `VelocityField` checks the rows of a 3-D `u`/`v` against `w`: layer data must
   carry `K-1` rows (one per layer). A FESOM2 dataset whose u/v carry `K` rows
   (on the levels) now raises in the constructor instead of running on the first

@@ -33,7 +33,9 @@ into its own small dataclass. (Every key is documented in
 
 1. **Pick the reader.** `get_reader(config.mesh.type)` returns the reader for
    the model family named in the config — currently `"fesom2"` (z-level
-   coordinates), `"fesomc"` (sigma coordinates), `"healpix"` (HEALPix products,
+   coordinates), `"fesom14"` (FESOM 1.4: z-levels, u/v/w on the levels, the mesh
+   from ASCII files or from the data's cell polygons; the reader resolves each
+   record's time), `"fesomc"` (sigma coordinates), `"healpix"` (HEALPix products,
    the mesh built from the data store; 2-D and 3-D — `healpix.md`), or `"nemo"`
    (structured C-grid mapped onto a quad mesh; 2-D, E/N-aligned). The reader is a small set of
    static functions that know how to turn that model's files into the generic
@@ -60,7 +62,7 @@ into its own small dataclass. (Every key is documented in
    the velocity file (or directory of files) as an xarray dataset, without yet
    reading any velocity data — individual time snapshots are read on demand
    during the loop. A reader with the optional hook `prepare(mesh, ds)` gets it
-   called right after (`tracking._prepare_dataset`), before anything reads the
+   called right after (`readers._prepare_dataset`), before anything reads the
    dataset on the mesh and before any output file exists; each realization
    calls it again at its entry (`run_single_realization`, after the
    `max_levels` cut), so a run with R realizations prepares 1 + R times. The
@@ -80,8 +82,11 @@ into its own small dataclass. (Every key is documented in
    For time-averaged model output (`data.time_averaging: mean`) the file
    timestamps mark the *end* of each averaging window, so they are shifted to
    the window midpoints (`_shift_to_midpoints`) — the velocity is effectively
-   valid at the middle of the window it averages. A `start_date` /
-   `duration_days` request is converted to a start index and step count here.
+   valid at the middle of the window it averages. A reader that resolves each
+   record's time itself (`fesom14`) already returns the window centres: no
+   shift, and `data.time_averaging` is refused (`io_and_time.md` §3). A
+   `start_date` / `duration_days` request is converted to a start index and
+   step count here.
 
 6. **Run the realizations.** The simulation may consist of several independent
    realizations (`time.num_runs`), each starting `time.run_interval` snapshots
@@ -99,7 +104,7 @@ held in memory, so long runs on large meshes stay bounded in memory.
 ```mermaid
 flowchart TD
     cfg[config.yaml] -->|load_config| AC[AppConfig]
-    AC -->|get_reader(mesh.type)| R[Reader: fesom2 / fesomc / healpix / nemo]
+    AC -->|get_reader(mesh.type)| R[Reader: fesom2 / fesom14 / fesomc / healpix / nemo]
     R -->|load_mesh| M[Mesh + build_search]
     R -->|open_dataset| DS[xarray Dataset]
     AC -->|build_release_state| PS[ParticleState]
@@ -246,7 +251,7 @@ particle is in.
 | `sigma` | `(K,)` | vertical interfaces — physical depths for z-level meshes, sigma values for sigma meshes; empty for 2D |
 | `vertical_coord` | `"zlevel"` / `"sigma"` | selects the vertical-geometry backend |
 | `rotation_angles` | `(α,β,γ)` or `None` | the Euler frame the coordinates live in; `None` = geographic |
-| `metadata` | `dict` | reader and run facts: e.g. the HEALPix u/v data prefix `uv_data_last` (int `(N,)`), the uncut level table `sigma_full`; shared by shallow copies of the mesh |
+| `metadata` | `dict` | reader and run facts: e.g. the u/v data prefix `uv_data_last` (int `(N,)`; HEALPix, and FESOM 1.4's last wet level per column), the uncut level table `sigma_full`; shared by shallow copies of the mesh |
 
 The spatial search index (grid hash with its `(N, 3)` node coordinate table
 `_node_xyz`, plus a lazily built KD-tree) is attached to the mesh by

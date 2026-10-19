@@ -75,6 +75,10 @@ Models like FESOM2 write time-averaged output (e.g. monthly means) timestamped a
 the **end** of the averaging window. Set `time_averaging: mean` to shift each
 timestamp to the window midpoint; `instant` for snapshots. If unset, KELP
 warns and suggests a default by mesh type (FESOM2 and HEALPix → `mean`, FESOM-C and NEMO → `instant`).
+FESOM 1.4 (`mesh.type: fesom14`) is the exception: its reader resolves what time each record
+represents (the window centre of a mean, from the files' time bounds or the raw output schedule, or
+from `data.time_stamp` + `data.time_window`), so leave `time_averaging` unset — it is refused there
+(`io_and_time.md` §3).
 
 ## Multiple realizations (`time.num_runs`)
 

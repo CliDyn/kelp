@@ -79,7 +79,7 @@ sphere** whose poles sit far from any ocean point:
   precision (validated against `fesom.mesh.diag.nc`).
 - `[α, β, γ]` — a custom 3-list of Euler angles in degrees.
 
-It is supported on FESOM2 and HEALPix (fesomc/nemo reject it). The FESOM-C reader **rejects** `mesh.rotation` with a
+It is supported on FESOM2, HEALPix and FESOM 1.4 (fesomc/nemo reject it). The FESOM-C reader **rejects** `mesh.rotation` with a
 `ValueError` (FESOM-C is a coastal model with no near-pole use case and no
 vector-rotation path). **Both** readers emit a one-time `RuntimeWarning` when the
 mesh reaches `max|lat| > 88°` while rotation is OFF; the FESOM2 message recommends

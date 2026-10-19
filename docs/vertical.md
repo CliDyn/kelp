@@ -114,7 +114,7 @@ choice is a property of the field, `VelocityField.uv_vertical`:
 |---|---|---|---|
 | `"layer"` (default) | `K-1` | — (one value per layer) | every reader; the option off |
 | `"layer_linear"` | `K-1` | the layer centres `(z_k + z_{k+1}) / 2` | `mode.uv_vertical: linear`: the tracking layer marks the fields it reads |
-| `"level"` | `K` | the levels `\|mesh.sigma\|` | a reader whose u/v sit on the levels (`native_uv_vertical = "level"`); always linear in depth, the option is refused there |
+| `"level"` | `K` | the levels `\|mesh.sigma\|` | a reader whose u/v sit on the levels (`native_uv_vertical = "level"`: the FESOM 1.4 reader, `mesh.type: fesom14`); always linear in depth, the option is refused there |
 
 `depth_points(mesh, placement)` (`src/kelp/numerics/vertical_uv.py`) builds
 the table once per mesh and placement: the points `p[0..M-1]` and, per node,
@@ -126,7 +126,8 @@ with `lower_k = p_k` for level data and `lower_k = z_{k+1}` — the layer's
 LOWER level — for layer data. That is `find_layer`'s rule (§2): a partial
 bottom layer, whose lower level lies below the bed, is never read. `D_i` is a
 reader's declaration of the last finite point of its own data column
-(`mesh.metadata["uv_data_last"]`, the HEALPix reader, `healpix.md`); `-1`
+(`mesh.metadata["uv_data_last"]`: the HEALPix reader, `healpix.md`; the FESOM
+1.4 reader declares each column's last wet level); `-1`
 there means "the surface only", and the surface value must then be finite.
 Infinite bed depths follow the formula as written: `+inf` keeps every point
 (`last_i = M-1`, then capped by `D_i`), `-inf` keeps the surface point only. A
@@ -177,10 +178,20 @@ vertex value `(1 − α) c + α c` is within 1 ulp of `c`
 (`tests/test_interp_depth_linear.py`).
 
 Scope: 3-D tracking on z-level meshes, node-layout u/v (FESOM2
-`unod`/`vnod`, the HEALPix dual geometry) and `numerics.uv_interp:
+`unod`/`vnod`, the HEALPix dual geometry, FESOM 1.4) and `numerics.uv_interp:
 barycentric` — the only interpolator that evaluates depth-linear fields — with
 `euler`, `rk2` or `rk4`; the configuration keys and refusals are in
-`configuration.md` §2. A FESOM2 mesh read from ASCII files without
+`configuration.md` §2.
+
+**FESOM 1.4 is approximated prism-wise.** FESOM 1.4 is a P1 finite-element
+model: u, v, w, T and S live on the same 3-D nodes, on the levels, and vary
+linearly over the tetrahedra of its 3-D mesh. KELP does not interpolate on
+those tetrahedra: it combines the barycentric weights of the surface triangle
+with the linear profile in depth of each vertex's own column (the rule above).
+The two agree on the levels and along each node's column; inside the prism
+between two levels they differ: the model's field is linear within each
+tetrahedron, KELP's is barycentric at every depth and linear in depth at every
+position (it holds products of the two). A FESOM2 mesh read from ASCII files without
 `depth.out` has depth 0 everywhere: depth-linear data then collapse to the
 surface point, as `find_layer` puts layer data in layer 0.
 
@@ -197,6 +208,7 @@ converts once, at read time (`src/kelp/readers/__init__.py:resolve_w_sign`):
 |---|---|---|---|
 | FESOM2 (`fesom2`) | `w` on `nz` | positive **up**; zstar: the velocity *through* the moving interfaces (`oce_ale.F90:vert_vel_ale`) | negated |
 | HEALPix CORE2 twins (`healpix`) | `wo` | positive up (remapped FESOM2 `w`) | negated |
+| FESOM 1.4 (`fesom14`) | `wo` on the levels | positive up (published: `standard_name = upward_sea_water_velocity`; raw output: no attribute, the family default) | negated |
 | ng5 IFS-FESOM (`healpix`) | `avg_wo` | positive up ("Time-mean upward sea water velocity"; +2·10⁻⁵ m/s at 50 m in the equatorial Pacific) | negated |
 | FESOM-C (`fesomc`) | `w` (= `Wvel`) on `sigma` | positive **up**; the flux through the **sigma interfaces** per unit area, zero at the surface and the bottom (`fv_3D_vel.F90:vert_vel_sigma`) | negated; the step integrates the sigma fraction with it (below); `w_cart` is refused |
 | `utils/reconstruct_w.py` output | `w` | positive **down** (KELP internal), stamped `positive = "down"` | none |

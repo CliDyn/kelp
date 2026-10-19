@@ -181,8 +181,10 @@ change a sample (pinned in `tests/test_uv_vertical_matrix.py`).
 
 The raw fields come from each reader's `read_scalar_fields` method
 (`src/kelp/readers/fesom2.py`, `src/kelp/readers/fesomc.py`,
-`src/kelp/readers/healpix.py`, `src/kelp/readers/nemo.py`; the HEALPix pixel
-geometry refuses sampling in v1). It reads
+`src/kelp/readers/fesom14/reader.py`, `src/kelp/readers/healpix.py`,
+`src/kelp/readers/nemo.py`; the HEALPix pixel geometry refuses sampling in v1;
+the FESOM 1.4 reader returns 3-D scalars `(K, N)` on the levels, filled below
+each bed with the column's last value). It reads
 the named node-based variables for one timestep and trims the vertical
 dimension so that it lines up with the mesh's vertical grid (`mesh.sigma`):
 

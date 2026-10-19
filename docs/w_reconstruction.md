@@ -15,6 +15,13 @@ layout the tracker consumes (`VelocityField.w`, shape `(K, N)`, positive-down). 
 an offline approximation of what the model computes online; §4 states how far from
 the model's own algorithm it is.
 
+It needs **layer** u/v — `K-1` layers between the `K` interfaces, as FESOM2 writes
+them. FESOM 1.4 output (`mesh.type: fesom14`) keeps u and v on the levels and holds
+the vertical velocity `wo` itself, so both the module (`require_layer_data`: a FESOM
+1.4 mesh, or u/v marked `uv_vertical = "level"`) and `utils/reconstruct_w.py` (a FESOM
+1.4 ASCII mesh directory, or u data over the 3-D nodes or on levels that start at the
+surface) refuse it before anything is computed; track with its `wo` instead.
+
 ## 1. Sign convention
 
 Three conventions meet here and must not be mixed:

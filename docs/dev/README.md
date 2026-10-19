@@ -152,9 +152,14 @@ Paths are below `src/kelp/`.
 
 ### readers/
 
-- **`readers/__init__.py`** — the registry (`get_reader("fesomc" | "fesom2" | "nemo" |
-  "healpix")`) and shared helpers: engine detection, the time axis and its epoch,
-  the sign rule for W in the file. Notes: [readers.md](readers.md); the W sign from
+- **`readers/__init__.py`** — the registry (`get_reader("fesomc" | "fesom2" | "fesom14" |
+  "nemo" | "healpix")`) and shared helpers: engine detection, the time axis and its
+  epoch, the sign rule for W in the file; the reader hook `prepare` (`_prepare_dataset`)
+  and the stamp options of a reader that resolves its record times
+  (`_time_option_kwargs`), which `tracking.py` and `kelp info` share — they live here
+  so that `kelp info` does not import the integrators. Notes:
+  [readers.md](readers.md); how a run uses the hook and the options in
+  [tracking.md](tracking.md); the W sign from
   `mode.w_positive` in [config.md](config.md); the time units the output takes from
   the axis in [tracking.md](tracking.md) and [writers.md](writers.md).
 - **`readers/fesom2.py`** — FESOM2: NetCDF mesh diagnostics in several
@@ -165,6 +170,19 @@ Paths are below `src/kelp/`.
   `positive="down"`). Notes: [readers.md](readers.md); the sign precedence and how
   `mesh.rotation` is resolved in [config.md](config.md) (`ModeConfig.w_positive`,
   `MeshConfig.rotation`).
+- **`readers/fesom14/`** — FESOM 1.4 (a package: `reader.py` with `Fesom14Reader`;
+  `_ascii_mesh.py`, `_polygons.py`, `_layout.py`, `_timeaxis.py`): the mesh from an
+  ASCII mesh directory or recovered from the cell polygons of level-wise data;
+  level-wise or 3-D-node files; u/v/w on the levels (`native_uv_vertical = "level"`,
+  always linear in depth); each record's time resolved by the reader (no midpoint
+  shift, `data.time_averaging` refused, `data.time_stamp` / `time_window` /
+  `time_offset`); a check-only `prepare` hook. Trap: every record is checked against
+  the static wet mask on every level BEFORE values are changed — a missing value in a
+  wet slot is refused, never zeroed. Notes: [readers.md](readers.md) (incl. what is
+  validated against what); the keys `mesh.input_rotation` and `data.time_*` in
+  [config.md](config.md); the time rule and the pre-writer refusals of `run_tracking`
+  in [tracking.md](tracking.md); the W reconstruction's refusal in
+  [numerics.md](numerics.md).
 - **`readers/fesomc.py`** — FESOM-C: one NetCDF on sigma coordinates; 3-D W =
   −`Wvel` by default (the sign through `resolve_w_sign`, as for FESOM2); rejects
   `mesh.rotation`. Notes: [readers.md](readers.md).
@@ -206,7 +224,9 @@ Paths are below `src/kelp/`.
 - **`w_reconstruct.py`** — offline W from u, v and ssh (FESOM2 z-level only),
   positive down. Notes: [numerics.md](numerics.md).
 - **`cli/main.py`** — the `kelp run|info` console script; `--temporal-interp` and
-  `--checkpoint-freq` default to None so the YAML values pass through. Notes:
+  `--checkpoint-freq` default to None so the YAML values pass through; `info` opens the
+  dataset as a run does (`ncinput_v` / `ncinput_w`, the stamp options, the reader's
+  `prepare`) without importing `tracking.py`. Notes:
   [tracking.md](tracking.md); what `kelp info` applies and prints (the grid-hash
   cell) in [config.md](config.md) and [mesh.md](mesh.md).
 
@@ -228,12 +248,12 @@ of them exported):
 
 ## Dependency graph (imports)
 
-Generated from the import statements (2026-10-04; `vertical_uv` added 2026-10-17); "lazy" = imported inside a
+Generated from the import statements (2026-10-04; `vertical_uv` added 2026-10-17, `readers/fesom14/` 2026-10-19); "lazy" = imported inside a
 function. Third-party: numpy everywhere, numba optional in the kernels, xarray
 in the readers, netCDF4/zarr in the writer.
 
 ```
-core/config.py            ← standalone (yaml)
+core/config.py            ← standalone (yaml; lazy: release, readers.fesom14._timeaxis when a data.time_* key is set)
 core/geometry.py          ← standalone
 core/io.py                ← standalone (VelocityField, LazyLerpField)
 core/rotation.py          ← standalone
@@ -243,7 +263,7 @@ core/mesh.py              ← geometry
 core/particles_gen.py     ← geometry, mesh, particles
 core/release.py           ← particles
 writers.py                ← particles (netCDF4 / zarr)
-w_reconstruct.py          ← geometry
+w_reconstruct.py          ← geometry (refuses FESOM 1.4 meshes by their metadata, no import)
 numerics/temporal_reconstruct.py ← io
 numerics/vertical_uv.py   ← io, mesh
 numerics/interpolate.py   ← geometry, io, mesh, particles, temporal_reconstruct, vertical_uv
@@ -256,6 +276,8 @@ numerics/integrators.py   ← geometry, io, mesh, particles, diffusion, interpol
                             vertical_uv (lazy: temporal_reconstruct, vertical_sigma)
 readers/__init__.py       ← standalone (registry + shared helpers)
 readers/fesom2.py, fesomc.py ← config, io, mesh, readers helpers (fesom2 lazy: rotation)
+readers/fesom14/          ← reader.py: io, mesh, rotation, readers helpers, fesom2 (mesh helpers), _ascii_mesh,
+                            _layout, _polygons (geometry; scipy), _timeaxis (cftime)
 readers/healpix.py        ← geometry, mesh, readers helpers (lazy: io, rotation, Kh name helpers,
                             vertical_uv)
 readers/structured.py     ← mesh
@@ -264,7 +286,7 @@ tracking.py               ← config, geometry, io, mesh, particles, release, di
                             integrators, vertical_uv, readers (lazy: writers, shared_fields, beaching,
                             sampling, temporal_reconstruct, rotation, readers.fesom2, __version__)
 visualization/*           ← core.geometry, core.mesh, core.particles (lazy: rotation)
-cli/main.py               ← __version__ (lazy per subcommand: config, mesh, readers, tracking)
+cli/main.py               ← __version__ (lazy per subcommand: run → config, tracking; info → config, mesh, readers)
 ```
 
 `interpolate.py` re-exports `VelocityField` from `core.io` (some tests import it

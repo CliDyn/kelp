@@ -25,6 +25,7 @@ configuration:
   - src/kelp/readers/fesomc.py:FesomCReader
   - src/kelp/cli/main.py:main
   - src/kelp/core/config.py:ModeConfig
+  - src/kelp/readers/fesom14/reader.py:Fesom14Reader
   doc: docs/configuration.md
   verified_at: '5818684'
 coordinate_frame:
@@ -104,6 +105,7 @@ dev_readers:
   - src/kelp/readers/healpix.py:HealpixReader
   - src/kelp/readers/structured.py:build_structured_mesh
   - src/kelp/readers/nemo.py:NemoReader
+  - src/kelp/readers/fesom14/
   doc: docs/dev/readers.md
   verified_at: 3d25b81
 dev_tracking:
@@ -114,6 +116,7 @@ dev_tracking:
   - src/kelp/cli/main.py:main
   - src/kelp/tracking.py:_mark_depth_linear
   - src/kelp/tracking.py:_apply_max_levels
+  - src/kelp/readers/__init__.py:_prepare_dataset
   doc: docs/dev/tracking.md
   verified_at: 49d39ad
 dev_visualization:
@@ -190,6 +193,7 @@ io_and_time:
   - src/kelp/tracking.py:_record_clock_origin
   - src/kelp/tracking.py:_release_arrays
   - src/kelp/core/release.py:mask_inactive_velocity
+  - src/kelp/readers/fesom14/_timeaxis.py:resolve_axis
   doc: docs/io_and_time.md
   verified_at: 49d39ad
 localization:

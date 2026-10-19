@@ -284,10 +284,11 @@ annotated template: [`config.yaml`](config.yaml).
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `type` | `fesomc` | **required**: `fesomc` / `fesom2` / `nemo` / `healpix` |
-| `meshpath` | `""` | **required**: mesh-diag `.nc` / `.zarr` / ASCII dir (FESOM2); single NetCDF (FESOM-C); `mesh_mask.nc`/`domain_cfg.nc` (NEMO); the u/v data store itself (HEALPix — the mesh is derived from the data) |
+| `type` | `fesomc` | **required**: `fesomc` / `fesom2` / `fesom14` / `nemo` / `healpix` |
+| `meshpath` | `""` | **required**: mesh-diag `.nc` / `.zarr` / ASCII dir (FESOM2); single NetCDF (FESOM-C); ASCII mesh dir, or level-wise data with cell polygons (FESOM 1.4 — the triangles are recovered from the polygons); `mesh_mask.nc`/`domain_cfg.nc` (NEMO); the u/v data store itself (HEALPix — the mesh is derived from the data) |
 | `r_earth` | `null` (family default) | Earth radius (m); set only to match a non-default model build |
-| `rotation` | `null` | FESOM2 + HEALPix: pole-safe rotated frame — `null` / `fesom2` / `[α, β, γ]` (deg) |
+| `rotation` | `null` | FESOM2 + HEALPix + FESOM 1.4: pole-safe rotated frame — `null` / `fesom2` / `[α, β, γ]` (deg) |
+| `input_rotation` | `null` | FESOM 1.4 only: `[α, β, γ]` (deg) of the rotated frame an ASCII mesh is stored in (rotated back to geographic on load) |
 | `grid_hash_cell_size` | `null` (rule) | nearest-node hash cell (deg); `null` = chosen by `grid_hash_cell_rule` |
 | `grid_hash_cell_rule` | `occupancy` | `occupancy` (measured choice) / `legacy` (the reader's mean-spacing cell) |
 | `exact_nearest` | `true` | exact nearest-node anchors for any cell |
@@ -307,7 +308,8 @@ annotated template: [`config.yaml`](config.yaml).
 | `inicloud` | `""` | **required**: seeds, one `lon lat [depth] [release_sec]` per line |
 | `particle_offset` | `null` | global index of the file's first particle in a sharded release (default: the shard file's header, else 0) |
 | `output_path` | `""` | `.nc` → NetCDF, `.zarr` → Zarr; empty = in-memory only |
-| `time_averaging` | `null` (warns) | `mean` (time-averaged output; timestamps shifted to window midpoints) / `instant` |
+| `time_averaging` | `null` (warns) | `mean` (time-averaged output; timestamps shifted to window midpoints) / `instant`; FESOM 1.4: leave unset (the reader resolves each record's time; refused) |
+| `time_stamp`, `time_window`, `time_offset` | `null` | FESOM 1.4 only, for files that do not say what their stamps mean: `start`/`centre`/`end`/`instant` + `calendar_month`/`calendar_year`/`calendar_day`/`"<n> <s\|min\|h\|d>"`; a fixed `"<±n> <unit>"` shift of the raw stamps |
 
 ### `time`
 
@@ -359,8 +361,13 @@ the validation campaign and the `-m slow` cross-checks against Parcels.
 ## Features
 
 - **2D and 3D tracking**, forward or backward, on FESOM2 meshes (fixed depth
-  levels), FESOM-C meshes (terrain-following sigma layers) and HEALPix stores
-  (next bullet).
+  levels), FESOM-C meshes (terrain-following sigma layers), FESOM 1.4 output and
+  HEALPix stores (next bullets).
+- **FESOM 1.4 reader** — level-wise files (such as the published CMIP6 output,
+  whose mesh is recovered exactly from the cell polygons in the files) or the
+  raw writer's output next to an ASCII mesh; u, v and w lie on the levels and are
+  read linearly in depth; the reader resolves what time each record represents
+  (time bounds, the raw output schedule, or explicit options) and refuses gaps.
 - **HEALPix reader** — tracks directly on HEALPix-gridded output (e.g. nextGEMS
   dissemination stores; Zarr, NetCDF or kerchunk references), 2D and 3D: the
   mesh is built from the data store itself as the exact corner dual of the

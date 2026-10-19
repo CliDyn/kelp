@@ -62,7 +62,10 @@ The individual `source`/`region`/`output` settings can also be given as CLI flag
 ## `reconstruct_w.py` — vertical-velocity reconstruction
 
 Reconstruct Cartesian W (positive-down) from FESOM2 horizontal velocities and
-SSH when the output has no W (or only `w_ALE`). Two methods:
+SSH when the output has no W (or only `w_ALE`). FESOM 1.4 inputs are refused before
+anything is loaded (an ASCII mesh directory holding `nod3d.out`; u over the 3-D nodes
+or on levels starting at the surface): their u/v lie on the levels, and the output
+holds `wo`. Two methods:
 
 - **`divergence`** — integrate continuity from the surface down (weak-form
   shape-function divergence on the triangular mesh).

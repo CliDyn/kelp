@@ -24,8 +24,8 @@ particle: its position written out once per output step.
 
 Different ocean models store their meshes and velocities differently, so the
 tracker keeps a small **registry** of model-specific readers. `get_reader(name)`
-looks a reader up by model name — currently `"fesom2"`, `"fesomc"`, `"nemo"`,
-and `"healpix"` — and
+looks a reader up by model name — currently `"fesom2"`, `"fesom14"`
+(FESOM 1.4), `"fesomc"`, `"nemo"`, and `"healpix"` — and
 auto-imports the matching module the first time it is asked for. An unknown name
 raises a clear error listing the readers that are available.
 
@@ -40,6 +40,12 @@ needs to know which model it is reading:
   velocity field for that instant.
 - `read_scalar_fields(ds, timestep, mesh, varnames, mode_cfg)` (optional) reads
   named node-based scalar fields for trajectory sampling — see `field_sampling.md`.
+
+A reader may also provide `prepare(mesh, ds)`, a check of the opened dataset
+against the mesh; every entry of a run calls it right after the dataset is
+opened (and `kelp info` once), before any output file exists. The FESOM 1.4
+reader uses it to compare the sizes, the level axis, the node coordinates and
+the wet mask of the first record of every variable with the mesh.
 
 Whether a given path is a NetCDF file or a Zarr store is decided by
 `_detect_engine`: a `.zarr` suffix, or a directory that contains a `.zattrs`
@@ -83,7 +89,15 @@ data in three shapes:
   extra file that does not fit is skipped with a warning, since merging it
   would stretch the time axis with NaN records.
 
-Because the directory case picks files by a **prefix glob** (`u*`, `v*`, …) and
+The FESOM 1.4 reader works differently: `ncinput` is a file, a directory or a
+glob, every file's header is read, and the files are grouped by the variable
+they hold — never by their names — so the u files are the files holding
+`mode.var_u` (default `uo`), wherever they sit and whatever they are called;
+only the variables the run consumes are opened. Each variable's records are
+then placed in time on their own (next section) and must match those of u
+exactly.
+
+Because the FESOM2 directory case picks files by a **prefix glob** (`u*`, `v*`, …) and
 takes the *first sorted match*, it is possible to point it at a directory where
 the first `u*` file is not the one you meant — the classic example being a
 `uice*` (sea-ice velocity) file sorting ahead of the ocean `u*` file. The full
@@ -181,6 +195,9 @@ realization).
 
 ### Time-averaged output and the midpoint shift
 
+(Not for `mesh.type: fesom14`, whose reader resolves each record's time itself —
+next subsection.)
+
 Some models write **time-averaged** output: each record is the mean over an
 averaging window (a day, a month), and the file stamps that record with the time
 at the *end* of the window. But the velocity that average best represents is the
@@ -198,13 +215,57 @@ times stay seconds since the first **raw** record, so the first window centre is
 a negative number (half an interval before that record). The trajectory output
 uses the same origin as its epoch (§5.2), so its dates are the window centres.
 
+### Readers that resolve what each record represents (FESOM 1.4)
+
+The FESOM 1.4 reader does not hand on the stamps as written. For every variable
+it decodes each file with that file's own epoch and calendar (the published
+CMIP6 files start a new epoch every decade; raw output starts one per job
+segment) and resolves, once, the instant each record represents: the **centre of
+its averaging window** for a time mean, the stamp itself for a snapshot. The
+window comes from exactly one source, in this order:
+
+1. **Explicit options**, `data.time_stamp` (where the stamp sits in its window:
+   `start`, `centre`, `end`; or `instant` for snapshots) together with
+   `data.time_window` (`calendar_month`, `calendar_year`, `calendar_day` or a
+   fixed duration). They decide for every file; when a file also has time
+   bounds or an output schedule, a warning names what was overridden and the
+   first record where the two disagree.
+2. The files' **time bounds** (found through `time.attrs["bounds"]`), as in the
+   published CMIP6 files: a January record bounded by 0 and 31 days represents
+   day 15.5, 12:00 on the 16th.
+3. The raw writer's **`output_schedule`** attribute
+   (`unit: <y|m|d|s> first: <n> rate: <n>`): its stamps are the window ends in
+   seconds since the job's start date; the reader enumerates the output events
+   the schedule implies and requires the stamps to be exactly those.
+4. Otherwise the run is refused, naming the options.
+
+An optional `data.time_offset` is added to the raw stamps (and bounds and
+epochs) before any of this — for raw output of a job that started at a time of
+day other than 00:00, whose stamps all sit early by that time of day. A window
+is never estimated from the spacing of neighbouring stamps, and every record the
+source says must exist has to be there: a gap refuses the run. All variables of
+a run must resolve to the same records (instants and windows).
+
+The resolved instants become the dataset's time coordinate, and nothing
+downstream moves them again: `run_tracking` gives no `time_averaging` warning
+and applies no midpoint shift, a set `data.time_averaging` is refused (it would
+shift the axis a second time), and the output's `time_averaging` attribute reads
+`"resolved_by_reader"`. Daily means therefore sit at 12:00 — a discrete run
+starts at a record (12:00), and a `start_date` at 00:00 needs temporal
+interpolation — and monthly means, a calendar month apart, need
+`temporal_interp: true` (discrete mode refuses irregular spacing). The run
+summary and `kelp info` print one line saying what resolved the times and the
+first and last instant.
+
 ### Starting from a calendar date
 
 Instead of a numeric index into the file, a run can name an ISO **`start_date`**
 (for example `2020-01-15T00:00`). `_resolve_start_date` matches that date against
 the **raw** file timestamps — the original on-disk times, *not* the
 midpoint-shifted ones — and returns the corresponding file index. If the
-requested date falls exactly on a snapshot, the run starts there. If it falls
+requested date falls exactly on a snapshot, the run starts there. (For
+`fesom14` the file timestamps are the resolved instants of the previous
+subsection, so a `start_date` is matched against the window centres.) If it falls
 *between* two snapshots, that only works with temporal interpolation enabled
 (so the tracker can construct a velocity at the in-between instant); otherwise it
 raises with an explanatory message. With temporal interpolation the run clock
