@@ -6,8 +6,11 @@ the depth-linear twins (``_interp_barycentric_dl`` ->
 containment, weights and 2-ring fallback as the node-layout
 ``_interp_barycentric_core``, with each vertex value read linearly in depth
 between the bracketing data points of that vertex (clipped to
-``p[0] .. p[last_i]``).  Every other u/v interpolator refuses a depth-linear
-field at entry.
+``p[0] .. p[last_i]``), and a vertex whose bed lies above the particle left
+out as a wall (the other weights renormalised; their equal-weight mean when
+those weights vanish; below every bed of the triangle the deepest vertex at
+its last point).  Every other u/v interpolator refuses a depth-linear field
+at entry.
 
 All synthetic: the 3x3 test mesh of ``test_3d_analytical`` with levels
 ``[0, 10, 20, 30, 40]`` m, three shallow nodes, and ``u = a + b*z`` stored
@@ -30,12 +33,14 @@ from kelp.core.io import VelocityField
 from kelp.core.mesh import _find_containing_element_local, find_nearest_nodes
 from kelp.core.particles import ParticleStatus, make_state
 from kelp.numerics import interpolate as ip
+from kelp.numerics import vertical_uv as vu
 from kelp.numerics.vertical import find_layers
 
 from tests._bitwise import assert_bitwise
 from tests.test_3d_analytical import _make_mesh
 
 LEVELS = [0.0, 10.0, 20.0, 30.0, 40.0]
+PLACEMENTS = ["level", "layer_linear"]
 
 #: data-point depths per placement (levels; layer centres)
 P_PTS = {
@@ -125,6 +130,65 @@ def _rel(a, b):
     return np.abs(np.asarray(a) - np.asarray(b)) / np.abs(np.asarray(b))
 
 
+def _hand_wall(mesh, placement, tri, lam, z, value):
+    """The wall rule by hand at depth ``z`` in triangle ``tri`` with
+    barycentric coordinates ``lam``; ``value(nd, zc)`` is node ``nd``'s
+    stored profile at the clipped depth ``zc`` (linear in depth between
+    the data points, so the clip is the whole vertical rule).
+
+    A vertex is wet when ``z <= mesh.depth[nd]`` (a NaN ``z`` reads as
+    ``+inf``); a wet vertex reads ``clip(z, p[0], p[last])``.  Every
+    vertex wet: the barycentric sum.  Some dry: the dry ones are left out,
+    the weights of the wet ones renormalised (their equal-weight mean when
+    those weights sum below 1e-12).  None wet: the vertex with the largest
+    bed (the first of ``tri`` on ties) at its last point."""
+    dp = vu.depth_points(mesh, placement)
+    p, last = dp.p, dp.last
+    tri = [int(nd) for nd in tri]
+    zq = np.inf if np.isnan(z) else z
+
+    def at(nd, zz):
+        return value(nd, min(max(zz, p[0]), p[last[nd]]))
+    wet = [zq <= mesh.depth[nd] for nd in tri]
+    if all(wet):
+        return sum(l_ * at(nd, zq) for l_, nd in zip(lam, tri))
+    if not any(wet):
+        return at(tri[int(np.argmax(mesh.depth[tri]))], np.inf)
+    ws = sum(l_ for l_, w_ in zip(lam, wet) if w_)
+    if ws < 1e-12:
+        return float(np.mean([at(nd, zq) for nd, w_ in zip(tri, wet) if w_]))
+    return sum(l_ * at(nd, zq)
+               for l_, nd, w_ in zip(lam, tri, wet) if w_) / ws
+
+
+#: per-node offsets of the horizontally varying fixtures (m/s)
+OFF_U = 0.03 * np.arange(1, 10)
+OFF_V = -0.02 * np.arange(1, 10)
+
+
+def _field_varying(mesh, placement, *, column=None):
+    """``u = A_U + B_U * p_k + OFF_U[nd]`` (v likewise) at the points
+    ``k <= last`` of the mesh's table, NaN below: the vertices differ, so
+    the weights matter.  ``column = (nd, c)`` stores the constant ``c`` in
+    node ``nd``'s usable points instead (finite: the record check passes;
+    a large ``c`` shows any weight the node gets)."""
+    dp = vu.depth_points(mesh, placement)
+    n = mesh.n_nodes
+    u = np.full((dp.p.size, n), np.nan)
+    v = np.full((dp.p.size, n), np.nan)
+    for i in range(n):
+        k = dp.last[i] + 1
+        u[:k, i] = A_U + B_U * dp.p[:k] + OFF_U[i]
+        v[:k, i] = A_V + B_V * dp.p[:k] + OFF_V[i]
+    if column is not None:
+        nd, c = column
+        u[:dp.last[nd] + 1, nd] = c
+        v[:dp.last[nd] + 1, nd] = -c
+    return VelocityField(u=u, v=v, eta=np.zeros(n),
+                         w=np.zeros((mesh.sigma.size, n)),
+                         uv_layout="node", uv_vertical=placement)
+
+
 def test_mesh_fixture_matches_table():
     """The hand-written ``LAST`` is the engine's table."""
     from kelp.numerics.vertical_uv import depth_points
@@ -180,9 +244,12 @@ def test_layer_linear_offcentre_exact():
 
 
 @pytest.mark.parametrize("placement", ["level", "layer_linear"])
-def test_shallow_vertex_rule(placement):
-    """Per vertex the depth is clipped to that vertex's last point:
-    ``U = a + b * sum_i lambda_i * min(z, p[last_i])``."""
+def test_shallow_vertex_is_a_wall(placement):
+    """Triangle ``[1, 2, 4]``, node 2's bed at 10 m.  Above it (7 m and on
+    the bed) every vertex is wet and clips the depth to its own last
+    point: ``U = a + b * sum_i lambda_i * clip(z, p[0], p[last_i])``.
+    Below it node 2 is dry and left out: the wet vertices' renormalised
+    blend, ``a + b * clip(z)`` (the field is horizontally uniform)."""
     mesh = _mesh()
     vel = _field(placement)
     p = P_PTS[placement]
@@ -190,15 +257,24 @@ def test_shallow_vertex_rule(placement):
     x, y = SHALLOW_PT
     lam = _lam(mesh, tri, x, y)
     assert np.all(lam > 0.05)
-    for z in [7.0, 12.5, 25.0, 39.0]:
+    for z in [7.0, 10.0, 12.5, 25.0, 39.0]:
         st = _state([SHALLOW_PT], z)
         U, V, ok = _run(mesh, vel, st)
         assert ok.all()
-        zi = np.array([min(max(z, p[0]), p[LAST[placement][nd]])
-                       for nd in tri])
-        assert _rel(U[0], A_U + B_U * float(lam @ zi)) < 1e-13, (z, U)
-        assert _rel(V[0], A_V + B_V * float(lam @ zi)) < 1e-13, (z, V)
-        assert np.isfinite(U[0]) and np.isfinite(V[0])
+        if z <= DEPTHS[2]:
+            zi = np.array([min(max(z, p[0]), p[LAST[placement][nd]])
+                           for nd in tri])
+            want_u = A_U + B_U * float(lam @ zi)
+            want_v = A_V + B_V * float(lam @ zi)
+        else:
+            zc = min(max(z, p[0]), p[LAST[placement][1]])
+            want_u, want_v = A_U + B_U * zc, A_V + B_V * zc
+        assert _rel(U[0], want_u) < 1e-13, (z, U)
+        assert _rel(V[0], want_v) < 1e-13, (z, V)
+        # the shared hand rule (used by the integrator tests) agrees
+        hand_u = _hand_wall(mesh, placement, tri, lam, z,
+                            lambda nd, zc: A_U + B_U * zc)
+        assert _rel(hand_u, want_u) < 1e-13, (z, hand_u)
 
 
 @pytest.mark.parametrize("placement", ["level", "layer_linear"])
@@ -214,24 +290,30 @@ def test_surface_and_bottom_constant(placement):
     assert_bitwise(U, U0, "U surface")
     assert_bitwise(V, V0, "V surface")
     assert np.all(_rel(U, A_U + B_U * p[0]) < 1e-14)
-    # beyond the bed: each vertex reads its own last point
+    # below every bed of the containing triangle: no vertex is wet, the
+    # vertex with the largest bed (the first on ties) reads its last point
     U, V, ok = _run(mesh, vel, _state(pts, 500.0))
     U2, V2, _ = _run(mesh, vel, _state(pts, 1e6))
     assert ok.all()
     assert_bitwise(U, U2, "U bottom")
     assert_bitwise(V, V2, "V bottom")
+    # the deep cell (every vertex 200 m): that fallback gives the old
+    # blend of the vertices' last points only because the field is
+    # horizontally uniform there
     assert np.all(_rel(U[:3], A_U + B_U * p[LAST[placement][0]]) < 1e-14)
-    lam = _lam(mesh, (1, 2, 4), *SHALLOW_PT)
-    zl = np.array([p[LAST[placement][nd]] for nd in (1, 2, 4)])
-    assert _rel(U[3], A_U + B_U * float(lam @ zl)) < 1e-13
+    # triangle [1, 2, 4]: nodes 1 and 4 (200 m) tie, node 1 comes first
+    k1 = LAST[placement][1]
+    assert_bitwise(U[3:], np.array([vel.u[k1, 1]]), "U shallow bottom")
+    assert_bitwise(V[3:], np.array([vel.v[k1, 1]]), "V shallow bottom")
 
 
 @pytest.mark.parametrize("placement", ["level", "layer_linear"])
 def test_nan_depth_reads_like_below_the_bed(placement):
-    """A NaN depth gets the layer path's outcome: ``find_layer`` puts NaN
-    in the deepest valid layer (as for ``+inf``), the barycentric read is
-    finite with ok=True; the depth-linear read treats NaN as below the bed
-    (each vertex at its last point), finite with ok=True."""
+    """A NaN depth reads like ``+inf``, as in the layer path (``find_layer``
+    puts NaN in the deepest valid layer, as ``+inf``): finite with
+    ok=True.  For the depth-linear read every finite bed is then dry, so
+    the containing triangle's deepest vertex (the first on ties) gives its
+    value at its last point."""
     mesh = _mesh()
     pts = DEEP_PTS + [SHALLOW_PT]
     # the layer path's rule, pinned here as the reference
@@ -252,9 +334,176 @@ def test_nan_depth_reads_like_below_the_bed(placement):
     assert_bitwise(V, Vb, "V NaN vs below bed")
     p = P_PTS[placement]
     assert np.all(_rel(U[:3], A_U + B_U * p[LAST[placement][0]]) < 1e-14)
-    lam = _lam(mesh, (1, 2, 4), *SHALLOW_PT)
-    zl = np.array([p[LAST[placement][nd]] for nd in (1, 2, 4)])
-    assert _rel(U[3], A_U + B_U * float(lam @ zl)) < 1e-13
+    # triangle [1, 2, 4]: nodes 1 and 4 (200 m) tie, node 1 comes first
+    k1 = LAST[placement][1]
+    assert_bitwise(U[3:], np.array([vel.u[k1, 1]]), "U shallow NaN")
+    assert_bitwise(V[3:], np.array([vel.v[k1, 1]]), "V shallow NaN")
+
+
+# ---------------------------------------------------------------------------
+# Walls at depth: a vertex dry at the particle depth is left out
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("z", [45.0, 32.0])
+def test_dry_vertex_left_out(z):
+    """Node 2 of triangle ``[1, 2, 4]`` has its bed at 30 m, the other
+    two at 200 m; at ``z`` = 45 m (below every data point) and 32 m
+    (between the 25 and 35 m centres) node 2 is dry and is left out:
+    ``U = (w1 u1(z) + w4 u4(z)) / (w1 + w4)``.  Node 2 stores 1000 m/s at
+    its usable points, so any weight it got would show.  At 30 m (on its
+    bed) it is wet and enters the sum with its last point (25 m)."""
+    depths = np.full(9, 200.0)
+    depths[2] = 30.0
+    mesh = _mesh(depths)
+    placement = "layer_linear"
+    dp = vu.depth_points(mesh, placement)
+    assert dp.last[2] == 2 and dp.last[1] == dp.last[4] == 3   # 25 / 35 m
+    vel = _field_varying(mesh, placement, column=(2, 1000.0))
+    tri = (1, 2, 4)
+    lam = _lam(mesh, tri, *SHALLOW_PT)
+    assert np.all(lam > 0.05)
+    for td in (1.0, -1.0):
+        U, V, ok = _run(mesh, vel, _state([SHALLOW_PT], z), td)
+        assert ok.all()
+        zc = min(z, 35.0)                    # the wet vertices' last point
+        u1, u4 = (A_U + B_U * zc + OFF_U[nd] for nd in (1, 4))
+        v1, v4 = (A_V + B_V * zc + OFF_V[nd] for nd in (1, 4))
+        want_u = (lam[0] * u1 + lam[2] * u4) / (lam[0] + lam[2])
+        want_v = (lam[0] * v1 + lam[2] * v4) / (lam[0] + lam[2])
+        assert _rel(U[0], td * want_u) < 1e-12, (z, U)
+        assert _rel(V[0], td * want_v) < 1e-12, (z, V)
+    # on node 2's bed: wet, the plain sum with node 2's 1000 m/s
+    U, V, ok = _run(mesh, vel, _state([SHALLOW_PT], 30.0))
+    assert ok.all()
+    want = (lam[0] * (A_U + B_U * 30.0 + OFF_U[1]) + lam[1] * 1000.0
+            + lam[2] * (A_U + B_U * 30.0 + OFF_U[4]))
+    assert _rel(U[0], want) < 1e-12, U
+
+
+@pytest.mark.parametrize("placement", PLACEMENTS)
+def test_partial_bottom_blend(placement):
+    """Every bed at 25 m on levels ``[0, 10, 20, 30]``: the layer
+    ``20-30 m`` reaches below the bed and is not read, so the last usable
+    point is the 15 m centre (``"level"``: the 20 m level).  A particle at
+    22 m is above every bed — every vertex is WET (wet is decided by the
+    bed, not by the last point) and reads its last usable point: the
+    barycentric blend of those values, not one vertex's value."""
+    mesh = _make_mesh(5.0, 5.0, z_levels=[0.0, 10.0, 20.0, 30.0],
+                      bottom_depth=25.0)
+    dp = vu.depth_points(mesh, placement)
+    pl = {"layer_linear": 15.0, "level": 20.0}[placement]
+    assert np.all(dp.p[dp.last] == pl)
+    vel = _field_varying(mesh, placement)
+    tri = (1, 2, 4)
+    lam = _lam(mesh, tri, *SHALLOW_PT)
+    for z in (22.0, 25.0):                    # inside, on the bed
+        U, V, ok = _run(mesh, vel, _state([SHALLOW_PT], z))
+        assert ok.all()
+        want_u = float(lam @ (A_U + B_U * pl + OFF_U[list(tri)]))
+        want_v = float(lam @ (A_V + B_V * pl + OFF_V[list(tri)]))
+        assert _rel(U[0], want_u) < 1e-13, (z, U)
+        assert _rel(V[0], want_v) < 1e-13, (z, V)
+        for nd in tri:
+            assert abs(U[0] - (A_U + B_U * pl + OFF_U[nd])) > 1e-3
+
+
+@pytest.mark.parametrize("placement", PLACEMENTS)
+def test_all_vertices_dry_reads_deepest(placement):
+    """Below every bed of the containing triangle ``[1, 2, 4]`` (and for a
+    NaN depth, which reads as ``+inf``): the vertex with the largest bed
+    at its last usable point, the stored value itself; on a tie the first
+    of the element's vertices."""
+    p = P_PTS[placement]
+    cases = [((30.0, 10.0, 35.0), 4),         # node 4 deepest
+             ((35.0, 10.0, 35.0), 1),         # tie 1 / 4: node 1 first
+             ((30.0, 35.0, 35.0), 2)]         # tie 2 / 4: node 2 first
+    for beds, deepest in cases:
+        depths = np.full(9, 200.0)
+        depths[[1, 2, 4]] = beds
+        mesh = _mesh(depths)
+        dp = vu.depth_points(mesh, placement)
+        vel = _field_varying(mesh, placement)
+        k = int(dp.last[deepest])
+        assert p[k] < 40.0                   # a shallow last point
+        st = _state([SHALLOW_PT] * 3, [50.0, 1e6, np.nan])
+        for td in (1.0, -1.0):
+            U, V, ok = _run(mesh, vel, st, td)
+            assert ok.all()
+            assert_bitwise(U, np.full(3, td * vel.u[k, deepest]),
+                           f"U {beds}")
+            assert_bitwise(V, np.full(3, td * vel.v[k, deepest]),
+                           f"V {beds}")
+
+
+@pytest.mark.parametrize("placement", PLACEMENTS)
+def test_dry_vertex_zero_weight_equal_mean(placement):
+    """A particle ON the dry vertex (node 4, the mesh centre, bed 10 m;
+    particle at 20 m): the wet vertices' weights sum to zero, so the
+    value is the equal-weight mean of the two wet vertices of the
+    containing triangle."""
+    depths = np.full(9, 200.0)
+    depths[4] = 10.0
+    mesh = _mesh(depths)
+    vel = _field_varying(mesh, placement)
+    x, y = float(mesh.nodes_lon[4]), float(mesh.nodes_lat[4])
+    st = _state([(x, y)], 20.0)
+    nn = find_nearest_nodes(mesh, st.lon, st.lat)
+    assert nn[0] == 4
+    e, inside = _find_containing_element_local(
+        x, y, 4, mesh.node_to_elems, mesh.node_to_elems_count,
+        mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat)
+    assert inside
+    others = [int(nd) for nd in mesh.elem_nodes[e] if nd != 4]
+    assert len(others) == 2 and (OFF_U[others[0]] != OFF_U[others[1]])
+    U, V, ok = _run(mesh, vel, st)
+    assert ok.all()
+    want_u = np.mean([A_U + B_U * 20.0 + OFF_U[nd] for nd in others])
+    want_v = np.mean([A_V + B_V * 20.0 + OFF_V[nd] for nd in others])
+    assert _rel(U[0], want_u) < 1e-13, U
+    assert _rel(V[0], want_v) < 1e-13, V
+
+
+@pytest.mark.parametrize("placement", PLACEMENTS)
+def test_no_wall_unchanged(placement):
+    """Every vertex of the containing triangle wet (``z <= bed``, on the
+    bed included): the plain barycentric sum of the depth-linear vertex
+    values, bit for bit — checked against the layer kernel
+    ``_interp_barycentric_core`` (the same containment, weights and
+    summation order) fed with those vertex values as a 2-D row."""
+    mesh = _mesh()
+    vel = _field(placement)
+    dp = vu.depth_points(mesh, placement)
+    rng = np.random.default_rng(41)
+    pts = rng.uniform(4.02, 5.98, (90, 2))
+    nn = find_nearest_nodes(mesh, pts[:, 0], pts[:, 1])
+    zs = np.empty(len(pts))
+    for i, (x, y) in enumerate(pts):
+        e, inside = _find_containing_element_local(
+            x, y, int(nn[i]), mesh.node_to_elems, mesh.node_to_elems_count,
+            mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat)
+        assert inside
+        top = float(mesh.depth[mesh.elem_nodes[e]].min())
+        zs[i] = top if i % 5 == 0 else rng.uniform(-2.0, top)
+    st = _state(pts, zs)
+    n = mesh.n_nodes
+    for td in (1.0, -1.0):
+        U, V, ok = _run(mesh, vel, st, td)
+        assert ok.all()
+        Ur, Vr = np.empty(len(pts)), np.empty(len(pts))
+        for i, (x, y) in enumerate(pts):
+            row_u, row_v = np.empty(n), np.empty(n)
+            for nd in range(n):
+                k, a = vu.uv_bracket(dp.p, dp.last[nd], zs[i])
+                row_u[nd] = vu.uv_at(vel.u, nd, k, a)
+                row_v[nd] = vu.uv_at(vel.v, nd, k, a)
+            Ur[i], Vr[i], okr = ip._interp_barycentric_core(
+                x, y, int(nn[i]), -1, td, ip.UV_LAYOUT_NODE,
+                mesh.node_to_elems, mesh.node_to_elems_count,
+                mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat,
+                np.empty(0, dtype=np.float64), row_u, row_v, mesh.r_earth)
+            assert okr
+        assert_bitwise(U, Ur, f"U td={td}")
+        assert_bitwise(V, Vr, f"V td={td}")
 
 
 # ---------------------------------------------------------------------------
@@ -575,14 +824,17 @@ def test_layer_fields_unchanged():
 @pytest.mark.parametrize("placement", ["level", "layer_linear"])
 def test_depth_uniform_field_reproduces_layer_answer(placement):
     """u/v uniform in depth (a value per node, NaN below each node's last
-    point): the depth-linear answer is the layer kernel's answer BIT FOR
-    BIT wherever every vertex reads a data point directly (the depth on a
-    point, or clipped at either end, incl. a NaN depth); between points
-    each vertex value ``(1 - a) c + a c`` is within 1 ulp of ``c``, so the
-    sum stays within 2 ulp of the largest vertex value (cancellation
-    between vertices of opposite sign can make that many ulp of the sum
-    itself)."""
-    from kelp.numerics import vertical_uv as vu
+    point).  Where every vertex of the containing triangle is wet
+    (``depth >= z`` at all three), the depth-linear answer is the layer
+    kernel's answer BIT FOR BIT wherever every vertex reads a data point
+    directly (the depth on a point, or clipped at either end); between
+    points each vertex value ``(1 - a) c + a c`` is within 1 ulp of ``c``,
+    so the sum stays within 2 ulp of the largest vertex value
+    (cancellation between vertices of opposite sign can make that many
+    ulp of the sum itself).  Where a vertex is dry the layer kernel still
+    reads it (layer mode has no walls): the depth-linear answer is the
+    renormalised blend of the wet vertices' constants, or, with no vertex
+    wet (a NaN depth included), the deepest vertex's constant itself."""
     mesh = _mesh()
     dp = vu.depth_points(mesh, placement)
     m, n = dp.p.size, mesh.n_nodes
@@ -600,20 +852,50 @@ def test_depth_uniform_field_reproduces_layer_answer(placement):
                         eta=np.zeros(n), w=np.zeros((len(LEVELS), n)),
                         uv_layout="node")
     pts = rng.uniform(4.02, 5.98, (60, 2))
+    nn = find_nearest_nodes(mesh, pts[:, 0], pts[:, 1])
+    tris = []
+    for i, (x, y) in enumerate(pts):
+        e, inside = _find_containing_element_local(
+            x, y, int(nn[i]), mesh.node_to_elems, mesh.node_to_elems_count,
+            mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat)
+        assert inside
+        tris.append([int(nd) for nd in mesh.elem_nodes[e]])
+    beds = mesh.depth[np.array(tris)]                  # (60, 3)
 
     def both(z):
         st = _state(pts, z)
-        nn = find_nearest_nodes(mesh, st.lon, st.lat)
         layers = find_layers(mesh.z_levels, st.z, nn, mesh.depth,
                              st.alive_mask)
+        wet = beds >= z                                # NaN z: all False
         return (ip.interp_barycentric(st, mesh, dl, nn, 1.0),
-                ip.interp_barycentric(st, mesh, lay, nn, 1.0, layers))
+                ip.interp_barycentric(st, mesh, lay, nn, 1.0, layers),
+                wet.all(axis=1))
+
+    counts = {"wet": 0, "wall": 0}
+
+    def check_walls(z, Ud, Vd, all_wet):
+        """The pairs with a dry vertex, by hand."""
+        for i in np.flatnonzero(~all_wet):
+            tri = tris[i]
+            lam = _lam(mesh, tri, *pts[i])
+            for got, c in ((Ud[i], c_u), (Vd[i], c_v)):
+                want = _hand_wall(mesh, placement, tri, lam, z,
+                                  lambda nd, zc, c=c: c[nd])
+                if not (beds[i] >= z).any():
+                    assert got == want, (z, i, got, want)  # a stored value
+                else:
+                    scale = np.abs(c[tri]).max()
+                    assert abs(got - want) <= 1e-13 * scale, (z, i, got,
+                                                              want)
+        counts["wet"] += int(all_wet.sum())
+        counts["wall"] += int((~all_wet).sum())
     direct = list(dp.p) + [-3.0, 0.0, 41.0, 1e4, np.nan]
     for z in direct:
-        (Ud, Vd, okd), (Ul, Vl, okl) = both(z)
+        (Ud, Vd, okd), (Ul, Vl, okl), all_wet = both(z)
         assert okd.all() and okl.all()
-        assert_bitwise(Ud, Ul, f"U at {z} m")
-        assert_bitwise(Vd, Vl, f"V at {z} m")
+        assert_bitwise(Ud[all_wet], Ul[all_wet], f"U at {z} m")
+        assert_bitwise(Vd[all_wet], Vl[all_wet], f"V at {z} m")
+        check_walls(z, Ud, Vd, all_wet)
     worst = 0.0
     for z in rng.uniform(dp.p[0], dp.p[-1], 40):
         # per vertex: within 1 ulp of the stored value
@@ -622,11 +904,14 @@ def test_depth_uniform_field_reproduces_layer_answer(placement):
             for f, c in ((dl.u, c_u[nd]), (dl.v, c_v[nd])):
                 got = vu.uv_at(f, nd, k, a)
                 assert abs(got - c) <= np.spacing(abs(c)), (z, nd, got, c)
-        (Ud, Vd, _), (Ul, Vl, _) = both(z)
+        (Ud, Vd, _), (Ul, Vl, _), all_wet = both(z)
         for a_, b_, c in ((Ud, Ul, c_u), (Vd, Vl, c_v)):
-            ulp = np.abs(a_ - b_) / np.spacing(np.abs(c).max())
-            worst = max(worst, float(ulp.max()))
+            ulp = (np.abs(a_ - b_)[all_wet]
+                   / np.spacing(np.abs(c).max()))
+            worst = max(worst, float(ulp.max(initial=0.0)))
+        check_walls(z, Ud, Vd, all_wet)
     assert worst <= 2.0, worst
+    assert counts["wet"] > 1000 and counts["wall"] > 500, counts
 
 
 # ---------------------------------------------------------------------------

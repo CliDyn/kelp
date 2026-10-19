@@ -158,23 +158,50 @@ The rule at one vertex `i` and particle depth `z`:
   non-finite `u` or `v` there, naming the component, node, point and record,
   once per field and mesh table.
 
-Each vertex clips to **its own** bottom — the depth-linear counterpart of the
-bottom-aware neighbour clamp of W (§3) — so a shallow vertex contributes its
-deepest usable value while its deep neighbours are read at the particle's
-depth. A NaN particle depth reads like a depth below the bed (each vertex its
-last point), the layer path's outcome (`find_layer` puts a NaN depth in the
-deepest valid layer). In time-interpolated runs each stored value is blended
-in time FIRST, then read in depth, then combined horizontally
-(`velocity_interpolation.md` §7); for the 4-snapshot PCHIP the order matters.
-Every Runge–Kutta stage reads the horizontal velocity at its own stage depth
-(Euler: the step-entry depth; RK2: `z` and `z_mid`; RK4: `z`, `z_2`, `z_3`,
-`z_4`), unclamped (the per-vertex clip above handles a stage that overshoots
-the column).
+**Walls at depth.** A vertex is *wet* at the particle depth when `z <=
+depth_i`, its physical bed (`mesh.depth`, the bed the end-of-step clamp of §4
+uses; `DepthPoints.bed` in the table, unchanged by a `max_levels` cut). A wet
+vertex reads its own column by the rule above: below its last usable point (a
+partial bottom layer, a `max_levels` cut, a declared prefix ending above the
+bed) the value of that point. A vertex whose bed lies above the particle is
+*dry*: it is a wall, like the coast, and is **left out** of the barycentric
+sum, and the weights of the wet vertices are renormalised to sum to one. Not a
+zero velocity, which would brake every particle along the wall, and not the
+dry vertex's bottom value carried down, which could speed it up. With every
+vertex wet the sum is exactly the layer interpolator's arithmetic on the
+depth-linear vertex values. Two fallbacks:
 
-The rule reproduces the layer answer where it should: data uniform in depth
-give the layer result bit for bit wherever every vertex reads a data point
-directly (on a point, or clipped at either end), and between points each
-vertex value `(1 − α) c + α c` is within 1 ulp of `c`
+- the weights of the wet vertices sum below 1e-12 (the particle on a dry
+  vertex): the equal-weight mean of the wet vertex values;
+- no vertex wet (the particle below every bed of its element — possible
+  because the end-of-step clamp uses the nearest node's bed only): the vertex
+  with the largest bed, the first of the element's vertices on ties, at its
+  last usable point.
+
+A NaN particle depth is read as `+inf`, as the layer path reads it
+(`find_layer` puts a NaN depth in the deepest valid layer): dry wherever the
+bed is finite, so the deepest vertex at its last point.
+
+The velocity therefore **jumps where a particle crosses the depth of a
+neighbour's bed** (that vertex leaves or enters the sum), as it jumps at a
+layer interface in layer mode. Near the bed the two modes differ by more than
+the vertical interpolation: layer mode reads every vertex in the row of the
+nearest node's layer, a vertex shallower than that layer included (the values
+stored there are zeros in practice, so a shallow neighbour pulls the velocity
+towards zero); linear mode leaves that vertex out.
+
+In time-interpolated runs each stored value is blended in time FIRST, then
+read in depth, then combined horizontally (`velocity_interpolation.md` §7);
+for the 4-snapshot PCHIP the order matters. Every Runge–Kutta stage reads the
+horizontal velocity at its own stage depth (Euler: the step-entry depth; RK2:
+`z` and `z_mid`; RK4: `z`, `z_2`, `z_3`, `z_4`), unclamped: a stage below a
+vertex's bed meets that wall, a stage below every bed of its element the
+deepest vertex, and a stage above the surface reads `p[0]` everywhere.
+
+The rule reproduces the layer answer where it should: where every vertex is
+wet, data uniform in depth give the layer result bit for bit wherever every
+vertex reads a data point directly (on a point, or clipped at either end), and
+between points each vertex value `(1 − α) c + α c` is within 1 ulp of `c`
 (`tests/test_interp_depth_linear.py`).
 
 Scope: 3-D tracking on z-level meshes, node-layout u/v (FESOM2

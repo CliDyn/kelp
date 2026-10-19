@@ -31,9 +31,10 @@ The rule: ``u = a + b z (+ e t)`` stored at the data points of the 3x3
 mesh of ``tests/test_interp_depth_linear`` (three shallow nodes, NaN below
 each node's last usable point, ``+inf`` in one column), so a stage at
 ``(x, y, z, t)`` reads ``sum_i lam_i (a + b clip(z, p[0], p[last_i])) +
-e t``; ``w`` is uniform, so every W interpolator gives the same stage
-depths.  The run-level rows use the FESOM2 fixture of
-``tests/test_uv_vertical_option``.
+e t`` over the vertices wet at ``z`` (``z <= bed``; a dry vertex is a wall,
+left out, the other weights renormalised); ``w`` is uniform, so every W
+interpolator gives the same stage depths.  The run-level rows use the
+FESOM2 fixture of ``tests/test_uv_vertical_option``.
 
 The ``Numba off`` column runs each family's cells in ONE subprocess with
 ``NUMBA_DISABLE_JIT=1`` and checks them against the same hand values.
@@ -68,7 +69,7 @@ from tests.test_integrators_depth_linear import (
     _hand_euler, _hand_rk2,
 )
 from tests.test_interp_depth_linear import (
-    A_U, A_V, B_U, B_V, LAST, P_PTS, _field, _lam, _mesh,
+    A_U, A_V, B_U, B_V, _field, _hand_wall, _lam, _mesh,
 )
 
 PLACEMENTS = ("level", "layer_linear")
@@ -121,16 +122,17 @@ def _tri_at(mesh, x, y):
 
 
 def _uv_rule(mesh, placement, terms):
-    """Hand u/v at stage ``k``: the per-vertex clipped depth rule plus the
-    stage's time term ``terms[k] = (tu, tv)``."""
-    p = P_PTS[placement]
-    last = LAST[placement]
-
+    """Hand u/v at stage ``k``: the per-vertex clipped depth rule with
+    walls at depth (``_hand_wall``: a vertex whose bed lies above the stage
+    depth is left out, the other weights renormalised — the 10 m node of
+    seed 2 and the 25 m node of seed 3 below their beds) plus the stage's
+    time term ``terms[k] = (tu, tv)``."""
     def uv(k, x, y, z):
         tri, lam = _tri_at(mesh, x, y)
-        zc = np.array([min(max(z, p[0]), p[last[i]]) for i in tri])
-        return (float(lam @ (A_U + B_U * zc)) + terms[k][0],
-                float(lam @ (A_V + B_V * zc)) + terms[k][1])
+        return (_hand_wall(mesh, placement, tri, lam, z,
+                           lambda nd, zc: A_U + B_U * zc) + terms[k][0],
+                _hand_wall(mesh, placement, tri, lam, z,
+                           lambda nd, zc: A_V + B_V * zc) + terms[k][1])
     return uv
 
 

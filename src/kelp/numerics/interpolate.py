@@ -41,6 +41,7 @@ from .vertical_uv import (
     is_checked,
     uv_at,
     uv_bracket,
+    uv_wet,
 )
 
 
@@ -1255,34 +1256,86 @@ def _loop_interp_bary_3d(
 # Depth-linear twins (uv_vertical "level" / "layer_linear", node layout):
 # the geometry of _interp_barycentric_core, each vertex value read linearly
 # in depth between that vertex's bracketing data points
-# (numerics.vertical_uv.uv_bracket / uv_at).
+# (numerics.vertical_uv.uv_bracket / uv_at); a vertex dry at the particle
+# depth is a wall, left out like the coast (_dl_node_wall).
 # ---------------------------------------------------------------------------
+
+@njit(cache=True)
+def _dl_node_wall(w, verts, nv, bed, zq):
+    """The wall rule over the ``nv`` vertices of one element (node layout).
+
+    A vertex ``nd`` is wet at depth ``zq`` when ``uv_wet(bed, nd, zq)``
+    (``zq <= bed[nd]``, ``bed`` the physical bed; the caller has mapped a
+    NaN particle depth to ``+inf``: dry wherever the bed is finite).
+    Returns ``(n_wet, den, k_deep)``:
+
+    - ``n_wet == nv`` — every vertex wet: the caller's plain barycentric
+      sum, unchanged (``den``, ``k_deep`` unused);
+    - ``0 < n_wet < nv`` — the dry vertices are left out and the sum over
+      the wet ones is divided by ``den``: the sum of their weights, or,
+      when that sum is below 1e-12 (the particle on a dry vertex),
+      ``n_wet`` — the weights of the wet vertices are then set to 1.0 IN
+      ``w`` (the equal-weight mean of the wet vertex values);
+    - ``n_wet == 0`` — no vertex wet: ``k_deep`` is the position in
+      ``verts`` of the vertex with the largest bed (the first on ties),
+      which the caller reads at its last usable point.
+    """
+    n_wet = 0
+    wsum = 0.0
+    for k in range(nv):
+        if uv_wet(bed, verts[k], zq):
+            n_wet += 1
+            wsum += w[k]
+    if n_wet == nv:
+        return n_wet, 1.0, -1
+    if n_wet == 0:
+        k_deep = 0
+        for k in range(1, nv):
+            if bed[verts[k]] > bed[verts[k_deep]]:
+                k_deep = k
+        return 0, 1.0, k_deep
+    if wsum < 1e-12:
+        for k in range(nv):
+            if uv_wet(bed, verts[k], zq):
+                w[k] = 1.0
+        return n_wet, float(n_wet), -1
+    return n_wet, wsum, -1
+
 
 @njit(cache=True)
 def _interp_barycentric_core_dl(xp, yp, z, nn_node, elem_hint, time_dir,
                                 node_to_elems, node_to_elems_count,
                                 elem_nodes, nodes_lon, nodes_lat,
-                                p, last, u_f, v_f, r_earth):
+                                p, last, bed, u_f, v_f, r_earth):
     """Depth-linear vertex-barycentric u/v at one point (node layout).
 
     Containment search (1-ring, then the 2-ring fallback of
     ``_find_containing_element_local``), the ``elem_hint`` shortcut, the
     compacted vertex ring, the centroid-anchored metric projection and
     ``_polygon_weights`` are those of :func:`_interp_barycentric_core`
-    (node layout).  Only the per-vertex value differs: at vertex ``nd``,
+    (node layout).  The per-vertex value differs: at vertex ``nd``,
     ``(k, alpha) = uv_bracket(p, last[nd], z)`` and
     ``u = uv_at(u_f, nd, k, alpha)`` — linear in depth between the data
     points ``p[k]``, ``p[k + 1]``, clipped to ``p[0] .. p[last[nd]]``; a
     point below ``last[nd]`` is never read.
 
-    ``z`` is the particle depth (m, positive down, as ``state.z``).  A NaN
-    ``z`` reads like a depth below the bed (each vertex at its last point,
-    ok=True), the layer path's outcome: ``find_layer`` puts a NaN depth in
-    the deepest valid layer.
+    Walls at depth (:func:`_dl_node_wall`): a vertex whose bed lies above
+    ``z`` (``z > bed[nd]``) is dry and left out, as the coast is; the
+    weights of the wet vertices are renormalised (their equal-weight mean
+    when those weights sum below 1e-12).  Every vertex wet: the plain sum,
+    the arithmetic of the layer kernel.  No vertex wet (the particle below
+    every bed of the element): the vertex with the largest bed, first on
+    ties, at its last usable point.  A wet vertex below ``p[last[nd]]``
+    (a partial bottom layer, a ``max_levels`` cut, a declared prefix)
+    reads its last usable point.
 
-    ``p`` (``(M,)``) and ``last`` (``(N,)``) are the
-    :func:`kelp.numerics.vertical_uv.depth_points` table; ``u_f``/``v_f``
-    are ``(M, N)``.  Returns ``(U, V, ok)``.
+    ``z`` is the particle depth (m, positive down, as ``state.z``).  A NaN
+    ``z`` is read as ``+inf``: dry wherever the bed is finite, so the
+    deepest vertex at its last point (ok=True).
+
+    ``p`` (``(M,)``), ``last`` (``(N,)``) and ``bed`` (``(N,)``, positive
+    down) are the :func:`kelp.numerics.vertical_uv.depth_points` table;
+    ``u_f``/``v_f`` are ``(M, N)``.  Returns ``(U, V, ok)``.
     """
     if elem_hint >= 0:
         elem_id = int(elem_hint)
@@ -1328,14 +1381,24 @@ def _interp_barycentric_core_dl(xp, yp, z, nn_node, elem_hint, time_dir,
         return 0.0, 0.0, False
     zq = z
     if np.isnan(zq):
-        zq = np.inf           # below the bed, as find_layer reads NaN
+        zq = np.inf           # dry wherever the bed is finite
+    # may set the wet weights to 1.0 in w (the equal-weight mean)
+    n_wet, den, k_deep = _dl_node_wall(w, verts, nv, bed, zq)
+    if n_wet == 0:
+        nd = verts[k_deep]    # below every bed: the deepest vertex
+        return (time_dir * uv_at(u_f, nd, last[nd], -1.0),
+                time_dir * uv_at(v_f, nd, last[nd], -1.0), True)
     U = 0.0; V = 0.0
     for k in range(nv):
         nd = verts[k]
+        if n_wet < nv and not uv_wet(bed, nd, zq):
+            continue          # a wall at this depth: left out
         kb, ab = uv_bracket(p, last[nd], zq)
         un = uv_at(u_f, nd, kb, ab)
         vn = uv_at(v_f, nd, kb, ab)
         U += w[k] * un; V += w[k] * vn
+    if n_wet < nv:
+        U = U / den; V = V / den
     return time_dir * U, time_dir * V, True
 
 
@@ -1346,7 +1409,8 @@ def _loop_interp_bary_dl(
     time_dir: float,
     node_to_elems: np.ndarray, node_to_elems_count: np.ndarray,
     elem_nodes: np.ndarray, nodes_lon: np.ndarray, nodes_lat: np.ndarray,
-    p: np.ndarray, last: np.ndarray, u_f: np.ndarray, v_f: np.ndarray,
+    p: np.ndarray, last: np.ndarray, bed: np.ndarray,
+    u_f: np.ndarray, v_f: np.ndarray,
     U: np.ndarray, V: np.ndarray, ok: np.ndarray, r_earth: float
 ):
     """Depth-linear vertex-barycentric u/v for every alive particle (each
@@ -1359,7 +1423,7 @@ def _loop_interp_bary_dl(
             time_dir,
             node_to_elems, node_to_elems_count,
             elem_nodes, nodes_lon, nodes_lat,
-            p, last, u_f, v_f, r_earth
+            p, last, bed, u_f, v_f, r_earth
         )
         U[i] = u
         V[i] = v
@@ -1406,7 +1470,7 @@ def _interp_barycentric_core_tinterp_dl(xp, yp, nn_node, z, time_dir,
                                         alpha0, alpha,
                                         node_to_elems, node_to_elems_count,
                                         elem_nodes, nodes_lon, nodes_lat,
-                                        p, last,
+                                        p, last, bed,
                                         u_a, v_a, u_b, v_b, u_t, v_t,
                                         r_earth):
     """Depth-linear twin of :func:`_interp_barycentric_core_tinterp_3d`
@@ -1415,17 +1479,19 @@ def _interp_barycentric_core_tinterp_dl(xp, yp, nn_node, z, time_dir,
     Identical containment, vertex ring, metric projection and weights;
     the ``layer`` argument is replaced by the particle depth ``z`` (m,
     positive down) and the depth-point table ``p`` (``(M,)``), ``last``
-    (``(N,)``); u/v fields are ``(M, N)``.  Per vertex ``nd``, TIME FIRST:
-    each stored value ``(k, nd)`` the vertex reads is blended in time
-    exactly as the layer twin blends ``(layer, nd)`` (same expressions,
-    same endpoint shortcuts — :func:`_tinterp_point_uv`), THEN the
-    vertical rule of ``uv_bracket`` / ``uv_at`` runs on the blended
-    values: ``(k, a) = uv_bracket(p, last[nd], z)``; ``a < 0`` reads point
-    ``k`` only, otherwise ``(1 - a) * f_k + a * f_{k+1}``.  A point below
-    ``last[nd]`` is never read.  This is bit for bit the unfused path
-    (whole-field ``_blend`` materialization, then
-    :func:`_interp_barycentric_core_dl`), including its NaN-depth rule
-    (read like a depth below the bed).  Returns ``(U, V, ok)``."""
+    (``(N,)``), ``bed`` (``(N,)``); u/v fields are ``(M, N)``.  Per vertex
+    ``nd``, TIME FIRST: each stored value ``(k, nd)`` the vertex reads is
+    blended in time exactly as the layer twin blends ``(layer, nd)`` (same
+    expressions, same endpoint shortcuts — :func:`_tinterp_point_uv`),
+    THEN the vertical rule of ``uv_bracket`` / ``uv_at`` runs on the
+    blended values: ``(k, a) = uv_bracket(p, last[nd], z)``; ``a < 0``
+    reads point ``k`` only, otherwise ``(1 - a) * f_k + a * f_{k+1}``.  A
+    point below ``last[nd]`` is never read.  The walls at depth of
+    :func:`_interp_barycentric_core_dl` (:func:`_dl_node_wall`) decide
+    which vertices enter and how they are weighted; a dry vertex is never
+    read.  This is bit for bit the unfused path (whole-field ``_blend``
+    materialization, then :func:`_interp_barycentric_core_dl`), including
+    its NaN-depth rule (read as ``+inf``).  Returns ``(U, V, ok)``."""
     elem_id, in_dom = _find_containing_element_local(
         xp, yp, nn_node, node_to_elems, node_to_elems_count,
         elem_nodes, nodes_lon, nodes_lat)
@@ -1467,10 +1533,19 @@ def _interp_barycentric_core_tinterp_dl(xp, yp, nn_node, z, time_dir,
         return 0.0, 0.0, False
     zq = z
     if np.isnan(zq):
-        zq = np.inf           # below the bed, as find_layer reads NaN
+        zq = np.inf           # dry wherever the bed is finite
+    # may set the wet weights to 1.0 in w (the equal-weight mean)
+    n_wet, den, k_deep = _dl_node_wall(w, verts, nv, bed, zq)
+    if n_wet == 0:
+        nd = verts[k_deep]    # below every bed: the deepest vertex
+        un, vn = _tinterp_point_uv(u_a, v_a, u_b, v_b, u_t, v_t, last[nd],
+                                   nd, alpha0, alpha)
+        return time_dir * un, time_dir * vn, True
     U = 0.0; V = 0.0
     for k in range(nv):
         nd = verts[k]
+        if n_wet < nv and not uv_wet(bed, nd, zq):
+            continue          # a wall at this depth: left out
         kb, ab = uv_bracket(p, last[nd], zq)
         un, vn = _tinterp_point_uv(u_a, v_a, u_b, v_b, u_t, v_t, kb, nd,
                                    alpha0, alpha)
@@ -1480,6 +1555,8 @@ def _interp_barycentric_core_tinterp_dl(xp, yp, nn_node, z, time_dir,
             un = (1.0 - ab) * un + ab * un1
             vn = (1.0 - ab) * vn + ab * vn1
         U += w[k] * un; V += w[k] * vn
+    if n_wet < nv:
+        U = U / den; V = V / den
     return time_dir * U, time_dir * V, True
 
 
@@ -1487,7 +1564,7 @@ def _interp_barycentric_core_tinterp_dl(xp, yp, nn_node, z, time_dir,
 def _interp_barycentric_core_pchip4_dl(xp, yp, nn_node, z, time_dir,
                                        node_to_elems, node_to_elems_count,
                                        elem_nodes, nodes_lon, nodes_lat,
-                                       p, last,
+                                       p, last, bed,
                                        u_0, v_0, u_1, v_1, u_2, v_2,
                                        u_3, v_3, t0, t1, t2, t3, tq,
                                        r_earth):
@@ -1495,13 +1572,15 @@ def _interp_barycentric_core_pchip4_dl(xp, yp, nn_node, z, time_dir,
     (node layout, ``uv_vertical`` ``"level"`` / ``"layer_linear"``).
 
     Identical geometry; ``layer`` is replaced by the particle depth ``z``
-    and the table ``p``, ``last``; u/v snapshots are ``(M, N)``.  Per
-    vertex, TIME FIRST: each stored value ``(k, nd)`` the vertex reads goes
-    through ``_pchip_value_scalar`` (the unfused ``reconstruct_pchip``
+    and the table ``p``, ``last``, ``bed``; u/v snapshots are ``(M, N)``.
+    Per vertex, TIME FIRST: each stored value ``(k, nd)`` the vertex reads
+    goes through ``_pchip_value_scalar`` (the unfused ``reconstruct_pchip``
     arithmetic), THEN the ``uv_bracket`` / ``uv_at`` rule runs on the
     reconstructed values.  PCHIP is not linear, so the order matters (the
     vertical-first result differs).  A point below ``last[nd]`` is never
-    read.  Returns ``(U, V, ok)``."""
+    read; the walls at depth of :func:`_interp_barycentric_core_dl`
+    (:func:`_dl_node_wall`) decide which vertices enter and how they are
+    weighted.  Returns ``(U, V, ok)``."""
     elem_id, in_dom = _find_containing_element_local(
         xp, yp, nn_node, node_to_elems, node_to_elems_count,
         elem_nodes, nodes_lon, nodes_lat)
@@ -1543,10 +1622,24 @@ def _interp_barycentric_core_pchip4_dl(xp, yp, nn_node, z, time_dir,
         return 0.0, 0.0, False
     zq = z
     if np.isnan(zq):
-        zq = np.inf           # below the bed, as find_layer reads NaN
+        zq = np.inf           # dry wherever the bed is finite
+    # may set the wet weights to 1.0 in w (the equal-weight mean)
+    n_wet, den, k_deep = _dl_node_wall(w, verts, nv, bed, zq)
+    if n_wet == 0:
+        nd = verts[k_deep]    # below every bed: the deepest vertex
+        kl = last[nd]
+        un = _pchip_value_scalar(u_0[kl, nd], u_1[kl, nd],
+                                 u_2[kl, nd], u_3[kl, nd],
+                                 t0, t1, t2, t3, tq)
+        vn = _pchip_value_scalar(v_0[kl, nd], v_1[kl, nd],
+                                 v_2[kl, nd], v_3[kl, nd],
+                                 t0, t1, t2, t3, tq)
+        return time_dir * un, time_dir * vn, True
     U = 0.0; V = 0.0
     for k in range(nv):
         nd = verts[k]
+        if n_wet < nv and not uv_wet(bed, nd, zq):
+            continue          # a wall at this depth: left out
         kb, ab = uv_bracket(p, last[nd], zq)
         un = _pchip_value_scalar(u_0[kb, nd], u_1[kb, nd],
                                  u_2[kb, nd], u_3[kb, nd],
@@ -1565,6 +1658,8 @@ def _interp_barycentric_core_pchip4_dl(xp, yp, nn_node, z, time_dir,
             un = (1.0 - ab) * un + ab * un1
             vn = (1.0 - ab) * vn + ab * vn1
         U += w[k] * un; V += w[k] * vn
+    if n_wet < nv:
+        U = U / den; V = V / den
     return time_dir * U, time_dir * V, True
 
 
@@ -1581,7 +1676,9 @@ def _interp_barycentric_dl(
 
     The ``interp_barycentric`` route for ``vel.uv_vertical`` ``"level"`` /
     ``"layer_linear"``: each particle is read at its depth ``state.z`` (m,
-    positive down); there is no layer argument.
+    positive down); there is no layer argument.  A vertex whose bed
+    (``mesh.depth``) lies above the particle is a wall and left out
+    (:func:`_interp_barycentric_core_dl`).
 
     Parameters
     ----------
@@ -1652,7 +1749,7 @@ def _interp_barycentric_dl(
             elems_arr, time_dir,
             mesh.node_to_elems, mesh.node_to_elems_count,
             mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat,
-            dp.p, dp.last, u_f, v_f, U, V, ok, mesh.r_earth
+            dp.p, dp.last, dp.bed, u_f, v_f, U, V, ok, mesh.r_earth
         )
     else:
         for i in range(P):
@@ -1663,7 +1760,7 @@ def _interp_barycentric_dl(
                 int(nn_nodes[i]), int(elems_arr[i]), time_dir,
                 mesh.node_to_elems, mesh.node_to_elems_count,
                 mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat,
-                dp.p, dp.last, u_f, v_f, mesh.r_earth
+                dp.p, dp.last, dp.bed, u_f, v_f, mesh.r_earth
             )
             U[i] = u
             V[i] = v

@@ -33,7 +33,8 @@ from kelp.numerics.vertical_uv import is_checked
 
 from tests._bitwise import assert_bitwise
 from tests.test_interp_depth_linear import (
-    A_U, A_V, B_U, B_V, LAST, LEVELS, P_PTS, SHALLOW_PT, _field, _lam, _mesh,
+    A_U, A_V, B_U, B_V, LEVELS, P_PTS, SHALLOW_PT, _field, _hand_wall, _lam,
+    _mesh,
 )
 
 M = METERS_PER_DEG_LAT
@@ -118,16 +119,17 @@ def _uv_deep(placement, t_k=(0.0, 0.0, 0.0, 0.0)):
 
 def _uv_shallow(mesh, placement, tri=(1, 2, 4)):
     """Hand u/v in the triangle with the 10 m node (the shallow fixture
-    of test_interp_depth_linear):
-    ``sum_i lam_i * (a + b*clip(z, p[0], p[last_i]))`` — per-vertex ends."""
-    p = P_PTS[placement]
-    last = LAST[placement]
-
+    of test_interp_depth_linear), the wall rule of ``_hand_wall``: above
+    the 10 m bed ``sum_i lam_i * (a + b*clip(z, p[0], p[last_i]))`` —
+    per-vertex ends; below it the 10 m node is dry and left out (the
+    other two vertices' renormalised blend)."""
     def uv(k, x, y, z):
         lam = _lam(mesh, tri, x, y)
         assert (lam > 0.0).all(), f"stage {k} left triangle {tri}: {lam}"
-        zc = np.array([_clip(z, p[0], p[last[i]]) for i in tri])
-        return (float(lam @ (A_U + B_U * zc)), float(lam @ (A_V + B_V * zc)))
+        return (_hand_wall(mesh, placement, tri, lam, z,
+                           lambda nd, zc: A_U + B_U * zc),
+                _hand_wall(mesh, placement, tri, lam, z,
+                           lambda nd, zc: A_V + B_V * zc))
     return uv
 
 
@@ -320,11 +322,12 @@ def test_rk4_backward_pchip_stage_depths(placement):
 @pytest.mark.parametrize("integrator", ["rk2", "rk4"])
 @pytest.mark.parametrize("placement", ["level", "layer_linear"])
 def test_stage_overshoot_clamped(placement, integrator, end):
-    """A stage depth below every bed (z0 + 60 m) or above the surface
-    (z0 - 60 m) reads each vertex's own end point (``p[last_i]`` /
-    ``p[0]``): finite, by hand, never the NaN / +inf stored below
-    ``last`` (the shallow fixture of test_interp_depth_linear: node 2 is
-    10 m deep)."""
+    """A stage depth below the data (z0 + 60 m) or above the surface
+    (z0 - 60 m) — the shallow fixture of test_interp_depth_linear, node 2
+    10 m deep, the others 200 m.  Above the surface every vertex reads
+    ``p[0]``; at 68 m node 2 is dry and left out (a wall), the deep
+    vertices read their last point ``p[last_i]``: finite, by hand, never
+    the NaN / +inf stored below ``last``."""
     mesh = _mesh()
     # z0 = 8 m: inside every column of both placements except node 2's
     # layer_linear one (last point 5 m), so the entry stage reads other

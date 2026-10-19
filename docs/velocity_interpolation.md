@@ -291,7 +291,8 @@ With `mode.uv_vertical: linear` the layer-centred u/v are linear in depth
 between the layer centres (a reader with level data, `uv_vertical =
 "level"` — the FESOM 1.4 reader — between the levels); the rule — the data
 points, each node's last usable point, constant ends, never a point below the
-bed — is in `vertical.md` §2.1, with the note that for FESOM 1.4 this
+bed, a vertex dry at the particle depth as a wall — is in `vertical.md` §2.1,
+with the note that for FESOM 1.4 this
 barycentric-times-linear-in-depth reading is a prism-wise approximation of the
 model's own interpolation on tetrahedra. `interp_barycentric` hands such a field to
 `_interp_barycentric_dl` → `_loop_interp_bary_dl` →
@@ -299,9 +300,15 @@ model's own interpolation on tetrahedra. `interp_barycentric` hands such a field
 `state.z` (the `layer` argument is ignored). The geometry — containment,
 the elements hint of the edge walk, the compacted vertex ring, the
 centroid-anchored projection, `_polygon_weights` — is the node-layout
-`_interp_barycentric_core`'s; only the vertex value differs: at vertex `nd`,
+`_interp_barycentric_core`'s; the vertex value differs: at vertex `nd`,
 `(k, α) = uv_bracket(p, last[nd], z)` and `u_nd = uv_at(u, nd, k, α)`
-(`src/kelp/numerics/vertical_uv.py`). The record check
+(`src/kelp/numerics/vertical_uv.py`). A vertex whose bed lies above the
+particle (`z > bed[nd]`, `bed` = `mesh.depth`; `uv_wet`) is a wall, left out
+of the sum like the coast, and the weights of the wet vertices are
+renormalised (`_dl_node_wall`): their equal-weight mean when those weights
+sum below 1e-12; with no vertex wet, the vertex with the largest bed (the
+first on ties) at its last usable point; with every vertex wet, the plain sum
+— the arithmetic of the layer kernel (`vertical.md` §2.1). The record check
 (`check_depth_linear_record`) runs once per field and mesh table before the
 first read — a lazy blend is checked through its two parents, before anything
 is blended.
@@ -312,14 +319,18 @@ Per vertex they blend every stored value they need in **time first** (the
 same expressions and endpoint shortcuts as the layer twins;
 `_tinterp_point_uv` widens each stored value to float64 before the blend),
 **then** apply the vertical rule to the blended values, **then** combine the
-vertices — bit for bit the unfused path, which materializes the time blend
-before `_interp_barycentric_core_dl`. PCHIP is not linear, so the order is
-part of the contract (the vertical-first result differs).
+vertices with the same walls at depth (a dry vertex is never read, not even
+blended in time) — bit for bit the unfused path, which materializes the time
+blend before `_interp_barycentric_core_dl`. PCHIP is not linear, so the order
+is part of the contract (the vertical-first result differs).
 
-Exactness: depth-uniform depth-linear data reproduce the layer answer bit for
-bit wherever every vertex reads a data point directly (the depth on a point,
-or clipped at either end, a NaN depth included); between points each vertex
-value `(1 − α)·c + α·c` is within 1 ulp of `c`, and the combined velocity
-within 2 ulp of the largest vertex value — an absolute bound: when vertex
-values of opposite sign cancel, the relative error of the sum is unbounded
+Exactness: where every vertex is wet, depth-uniform depth-linear data
+reproduce the layer answer bit for bit wherever every vertex reads a data
+point directly (the depth on a point, or clipped at either end); between
+points each vertex value `(1 − α)·c + α·c` is within 1 ulp of `c`, and the
+combined velocity within 2 ulp of the largest vertex value — an absolute
+bound: when vertex values of opposite sign cancel, the relative error of the
+sum is unbounded
 (`tests/test_interp_depth_linear.py::test_depth_uniform_field_reproduces_layer_answer`).
+Where a vertex is dry the layer kernel still reads it and the two answers
+differ by design.

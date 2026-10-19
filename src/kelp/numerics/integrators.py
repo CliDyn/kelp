@@ -3869,7 +3869,7 @@ def _fused_rk2_step_3d_bary_tinterp_dl(
     gh_nx, gh_ny, gh_wrap_lon, gh_far_rows,
     node_to_elems_count, node_to_elems,
     elem_nodes, nodes_lon, nodes_lat, node_xyz, node_depths, z_levels,
-    p, last,
+    p, last, bed,
     u_a, v_a, u_b, v_b, u_t, v_t, w_a, w_b, w_t, alpha0,
     alpha_k1, alpha_k2,
     dt, time_dir, r_earth, w_code,
@@ -3879,12 +3879,13 @@ def _fused_rk2_step_3d_bary_tinterp_dl(
 ):
     """Depth-linear twin of :func:`_fused_rk2_step_3d_bary_tinterp`
     (``uv_vertical`` ``"level"`` / ``"layer_linear"``): the same kernel with
-    the depth-point table ``p`` (``(M,)``), ``last`` (``(N,)``) after
-    ``z_levels`` and u/v fields of shape ``(M, N)``.  No layer is looked up
-    for u/v: stage 1 reads them at the entry depth ``zs[i]``, stage 2 at
-    ``z_mid`` (:func:`_interp_barycentric_core_tinterp_dl` — time blend,
-    then depth, then the barycentric sum).  W, anchors, flags and the
-    clamp are untouched."""
+    the depth-point table ``p`` (``(M,)``), ``last`` (``(N,)``), ``bed``
+    (``(N,)``) after ``z_levels`` and u/v fields of shape ``(M, N)``.  No
+    layer is looked up for u/v: stage 1 reads them at the entry depth
+    ``zs[i]``, stage 2 at ``z_mid``
+    (:func:`_interp_barycentric_core_tinterp_dl` — time blend, then depth,
+    then the barycentric sum, a vertex dry at the stage depth left out).
+    W, anchors, flags and the clamp are untouched."""
     ALIVE = 1
     OUTSIDE = 3
     z_surface = z_levels[0]
@@ -3907,7 +3908,7 @@ def _fused_rk2_step_3d_bary_tinterp_dl(
         U1, V1, ok1 = _interp_barycentric_core_tinterp_dl(
             lons[i], lats[i], node_i, zs[i], time_dir, alpha0, alpha_k1,
             node_to_elems, node_to_elems_count,
-            elem_nodes, nodes_lon, nodes_lat, p, last,
+            elem_nodes, nodes_lon, nodes_lat, p, last, bed,
             u_a, v_a, u_b, v_b, u_t, v_t, r_earth,
         )
         # W1 for EVERY alive particle (the unfused path computes it with
@@ -3989,7 +3990,7 @@ def _fused_rk2_step_3d_bary_tinterp_dl(
         U2, V2, ok2 = _interp_barycentric_core_tinterp_dl(
             lon_mid, lat_mid, nn_mid, z_mid, time_dir, alpha0, alpha_k2,
             node_to_elems, node_to_elems_count,
-            elem_nodes, nodes_lon, nodes_lat, p, last,
+            elem_nodes, nodes_lon, nodes_lat, p, last, bed,
             u_a, v_a, u_b, v_b, u_t, v_t, r_earth,
         )
         if not ok2:
@@ -4087,7 +4088,7 @@ def _fused_rk2_step_3d_bary_pchip_dl(
     gh_nx, gh_ny, gh_wrap_lon, gh_far_rows,
     node_to_elems_count, node_to_elems,
     elem_nodes, nodes_lon, nodes_lat, node_xyz, node_depths, z_levels,
-    p, last,
+    p, last, bed,
     u_0, v_0, u_1, v_1, u_2, v_2, u_3, v_3,
     w_0, w_1, w_2, w_3,
     t0, t1, t2, t3, tq1, tq2,
@@ -4098,10 +4099,11 @@ def _fused_rk2_step_3d_bary_pchip_dl(
 ):
     """Depth-linear twin of :func:`_fused_rk2_step_3d_bary_pchip`
     (``uv_vertical`` ``"level"`` / ``"layer_linear"``): the same kernel with
-    ``p``, ``last`` after ``z_levels`` and ``(M, N)`` u/v snapshots; stage 1
-    reads u/v at ``zs[i]`` and ``tq1``, stage 2 at ``z_mid`` and ``tq2``
-    (:func:`_interp_barycentric_core_pchip4_dl` — the 4-snapshot PCHIP of
-    each stored value first, then depth, then the barycentric sum)."""
+    ``p``, ``last``, ``bed`` after ``z_levels`` and ``(M, N)`` u/v
+    snapshots; stage 1 reads u/v at ``zs[i]`` and ``tq1``, stage 2 at
+    ``z_mid`` and ``tq2`` (:func:`_interp_barycentric_core_pchip4_dl` — the
+    4-snapshot PCHIP of each stored value first, then depth, then the
+    barycentric sum, a vertex dry at the stage depth left out)."""
     ALIVE = 1
     OUTSIDE = 3
     z_surface = z_levels[0]
@@ -4124,7 +4126,7 @@ def _fused_rk2_step_3d_bary_pchip_dl(
         U1, V1, ok1 = _interp_barycentric_core_pchip4_dl(
             lons[i], lats[i], node_i, zs[i], time_dir,
             node_to_elems, node_to_elems_count,
-            elem_nodes, nodes_lon, nodes_lat, p, last,
+            elem_nodes, nodes_lon, nodes_lat, p, last, bed,
             u_0, v_0, u_1, v_1, u_2, v_2, u_3, v_3,
             t0, t1, t2, t3, tq1, r_earth,
         )
@@ -4205,7 +4207,7 @@ def _fused_rk2_step_3d_bary_pchip_dl(
         U2, V2, ok2 = _interp_barycentric_core_pchip4_dl(
             lon_mid, lat_mid, nn_mid, z_mid, time_dir,
             node_to_elems, node_to_elems_count,
-            elem_nodes, nodes_lon, nodes_lat, p, last,
+            elem_nodes, nodes_lon, nodes_lat, p, last, bed,
             u_0, v_0, u_1, v_1, u_2, v_2, u_3, v_3,
             t0, t1, t2, t3, tq2, r_earth,
         )
@@ -4347,7 +4349,9 @@ def _fused_3d_uv_placement(site, named):
 
 def _fused_3d_dl_table(site, named, mesh, placement):
     """The depth-point table a fused depth-linear kernel reads (``None`` for
-    ``"layer"``: nothing is read or built).
+    ``"layer"``: nothing is read or built): ``depth_points(mesh,
+    placement)``, whose ``p``, ``last`` and ``bed`` the runners pass after
+    ``z_levels``.
 
     Every field of ``named`` (see :func:`_fused_3d_uv_placement`) passes the
     record check first (``check_depth_linear_record``, skipped when
@@ -4562,7 +4566,7 @@ def _run_fused_rk2_3d_bary_tinterp(state, vel, vel_next, dt_to_next, mesh,
         table = ()
     else:
         fused_kernel = _fused_rk2_step_3d_bary_tinterp_dl
-        table = (dp.p, dp.last)
+        table = (dp.p, dp.last, dp.bed)
 
     z_levels = _get_z_levels(mesh)
     # exact stage-1 anchor, same call the unfused path makes
@@ -4728,7 +4732,7 @@ def _run_fused_rk2_3d_bary_pchip(state, recon, mesh, dt, time_dir, w_code,
         table = ()
     else:
         fused_kernel = _fused_rk2_step_3d_bary_pchip_dl
-        table = (dp.p, dp.last)
+        table = (dp.p, dp.last, dp.bed)
 
     P = state.n_particles
     z_levels = _get_z_levels(mesh)

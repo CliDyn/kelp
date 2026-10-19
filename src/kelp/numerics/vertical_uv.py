@@ -439,9 +439,10 @@ def uv_bracket(p: np.ndarray, last_i: int, z: float):
     directly instead), as :func:`kelp.numerics.vertical._w_bracket` does,
     and ``(0, -1.0)`` (the surface point, read directly) when
     ``last_i == 0``.  The interpolation kernels never pass a NaN: they map
-    a NaN particle depth to ``+inf`` first, which reads each vertex's last
-    point directly (``(last_i, -1.0)``, "below the bed"), the layer path's
-    outcome for a NaN depth.
+    a NaN particle depth to ``+inf`` first, the layer path's reading of a
+    NaN depth, which :func:`uv_wet` makes dry wherever the bed is finite
+    (a column it leaves wet reads its last point directly,
+    ``(last_i, -1.0)``).
 
     Parameters
     ----------

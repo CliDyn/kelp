@@ -18,7 +18,9 @@ Fixtures: the HEALPix dual mesh of ``test_fused_3d_bary`` with random u/v on
 the data points and NaN at every point below each node's last usable point
 (a read there would surface as a NaN velocity); the hole-band structured
 mesh of ``test_fused_3d_bary`` for the heal paths; the 3x3 mesh of
-``test_interp_depth_linear`` for the hand-valued PCHIP-order case.
+``test_interp_depth_linear`` for the hand-valued PCHIP-order case; a
+triangle mesh with a trench for the walls at depth (a vertex dry at the
+stage depth left out, the deepest vertex below every bed).
 """
 from __future__ import annotations
 
@@ -238,6 +240,137 @@ def test_fused_equals_unfused_pchip(mesh, monkeypatch, placement, tdir,
     direct = I._run_fused_rk2_3d_bary_pchip(st, kw["recon"], mesh, DT, tdir,
                                            w_code)
     _assert_same(direct, ref)
+
+
+# ---------------------------------------------------------------------------
+# Walls at depth: a trench
+# ---------------------------------------------------------------------------
+
+TRENCH_LEVELS = np.array([0.0, 50.0, 100.0, 200.0, 300.0, 500.0, 800.0,
+                          1200.0, 2000.0, 3000.0])
+
+
+def _trench_mesh():
+    """A triangle mesh of 0.2 deg spacing over 4..6 E, 4..6 N with a trench
+    along 5 E: the nodes on 5 E are 2000 m deep, those on 4.8 and 5.2 E
+    800 m, the rest 300 m.  The triangles beside the trench have vertices
+    dry at depths between their beds."""
+    from tests.test_3d_analytical import _make_mesh
+    m = _make_mesh(5.0, 5.0, span=1.0, nx=11, ny=11,
+                   z_levels=TRENCH_LEVELS, bottom_depth=300.0)
+    off = np.abs(m.nodes_lon - 5.0)
+    m.depth = np.where(off < 0.1, 2000.0, np.where(off < 0.3, 800.0, 300.0))
+    return m
+
+
+def _trench_off(n, c):
+    """Per-node offsets of the trench field (m/s): the vertices differ."""
+    return c * np.sin(1.7 * np.arange(n))
+
+
+def _trench_uv_hand(m, t):
+    """``value(nd, zc)`` of u and v of :func:`_trench_field` at time t."""
+    ou, ov = _trench_off(m.n_nodes, 0.05), _trench_off(m.n_nodes, -0.03)
+    return ((lambda nd, zc: 0.1 + 1e-4 * zc + ou[nd] + 2e-6 * t),
+            (lambda nd, zc: -0.05 - 5e-5 * zc + ov[nd] + 1e-6 * t))
+
+
+def _trench_field(m, placement, t):
+    """u/v linear in depth and time with a different offset per node, NaN
+    below each node's last usable point; w = 0.02 m/s (the stage depths
+    move by 36 and 72 m in a step)."""
+    dp = depth_points(m, placement)
+    n = m.n_nodes
+    fu, fv = _trench_uv_hand(m, t)
+    u = np.array([[fu(nd, pk) for nd in range(n)] for pk in dp.p])
+    v = np.array([[fv(nd, pk) for nd in range(n)] for pk in dp.p])
+    w = np.full((TRENCH_LEVELS.size, n), 0.02)
+    return VelocityField(u=_nan_below_last(u, dp), v=_nan_below_last(v, dp),
+                         eta=np.zeros(n), w=w, uv_layout="node",
+                         uv_vertical=placement)
+
+
+def _trench_seeds(m, n=400, seed=9):
+    """Seeds beside the trench at depths between the beds, on the beds,
+    below every bed and NaN."""
+    rng = np.random.default_rng(seed)
+    lon = rng.uniform(4.65, 5.35, n)
+    lat = rng.uniform(4.2, 5.8, n)
+    z = rng.uniform(0.0, 2600.0, n)
+    z[::11] = 800.0
+    z[1::11] = 2000.0
+    z[2::13] = 2500.0
+    z[3::17] = np.nan
+    st = make_state(lon, lat, z)
+    return st.replace(failure_reason=np.zeros(n, dtype=np.int8),
+                      nearest_node=find_nearest_nodes(m, lon, lat))
+
+
+@pytest.mark.parametrize("w_interp", ["nearest", "barycentric"])
+@pytest.mark.parametrize("tdir", [1.0, -1.0])
+@pytest.mark.parametrize("mode", ["lerp", "pchip"])
+@pytest.mark.parametrize("placement", PLACEMENTS)
+def test_fused_equals_unfused_with_walls(monkeypatch, placement, mode, tdir,
+                                         w_interp):
+    """The trench mesh: the fused RK2 twin (linear in time and PCHIP)
+    equals the unfused step bit for bit where vertices are dry at the
+    stage depths, and the recorded first-stage velocity is the wall rule
+    by hand (``tests/test_interp_depth_linear._hand_wall``): dry vertices
+    left out and the weights renormalised; below every bed the deepest
+    vertex at its last point."""
+    from kelp.core.mesh import _find_containing_element_local
+    from tests.test_interp_depth_linear import _hand_wall, _lam
+    m = _trench_mesh()
+    times = [0.0, 21600.0, 43200.0, 64800.0]
+    snaps = [_trench_field(m, placement, t) for t in times]
+    if mode == "lerp":
+        a, b = (1, 2) if tdir > 0 else (2, 1)
+        vel, kw = snaps[a], dict(vel_next=snaps[b], dt_to_next=21600.0)
+        t1 = times[a]
+    else:
+        q = 30000.0 if tdir > 0 else 35000.0
+        vel = snaps[1] if tdir > 0 else snaps[2]
+        kw = dict(vel_next=snaps[2] if tdir > 0 else snaps[1],
+                  dt_to_next=21600.0, recon=(snaps, times, q, tdir))
+        t1 = q
+    st = _trench_seeds(m)
+    calls = _spy(monkeypatch, _LAYER_KERNELS + _DL_KERNELS)
+    got = I.rk2_step(st, vel, m, 3600.0, tdir, uv_interp="barycentric",
+                     w_interp=w_interp, **kw)
+    want = _DL_KERNELS[1] if mode == "pchip" else _DL_KERNELS[0]
+    assert calls[want] == 1 and sum(calls.values()) == 1, calls
+    ref_kw = dict(recon=kw["recon"]) if mode == "pchip" else kw
+    ref = I._rk2_step_unfused(st, vel, m, 3600.0, tdir, 0, True,
+                              w_interp=w_interp, uv_interp="barycentric",
+                              **ref_kw)
+    _assert_same(got, ref)
+    assert (got.status == 1).all()
+    # the first stage by hand, and the fixture does reach the walls
+    fu, fv = _trench_uv_hand(m, t1)
+    n_wall = n_dry = n_wet = 0
+    for i in range(st.n_particles):
+        x, y, z = st.lon[i], st.lat[i], st.z[i]
+        e, inside = _find_containing_element_local(
+            x, y, int(st.nearest_node[i]), m.node_to_elems,
+            m.node_to_elems_count, m.elem_nodes, m.nodes_lon, m.nodes_lat)
+        assert inside
+        tri = [int(nd) for nd in m.elem_nodes[e]]
+        lam = _lam(m, tri, x, y)
+        wet = (np.inf if np.isnan(z) else z) <= m.depth[tri]
+        n_wet += wet.all()
+        n_dry += not wet.any()
+        n_wall += wet.any() and not wet.all()
+        hu = _hand_wall(m, placement, tri, lam, z, fu)
+        hv = _hand_wall(m, placement, tri, lam, z, fv)
+        # the vertex values are up to ~0.4 m/s: an absolute bound too, for
+        # a result near zero (cancellation between vertices)
+        np.testing.assert_allclose(got.u[i], tdir * hu, rtol=1e-12,
+                                   atol=1e-14, err_msg=f"particle {i}")
+        np.testing.assert_allclose(got.v[i], tdir * hv, rtol=1e-12,
+                                   atol=1e-14, err_msg=f"particle {i}")
+    # 136 / 178 / 86 of the 400 seeds (rng seed 9)
+    assert n_wall >= 100 and n_dry >= 100 and n_wet >= 60, (n_wall, n_dry,
+                                                           n_wet)
 
 
 def _as_float32(vel):
