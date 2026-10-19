@@ -295,7 +295,8 @@ class Fesom14Reader:
                      mode_cfg: Optional["ModeConfig"] = None, *,
                      time_stamp: Optional[str] = None,
                      time_window: Optional[str] = None,
-                     time_offset: Optional[str] = None) -> xr.Dataset:
+                     time_offset: Optional[str] = None,
+                     dry_mask_var: Optional[str] = None) -> xr.Dataset:
         """Open the variables a run consumes, on one exactly resolved time axis.
 
         Only checks intrinsic to the files happen here; every check against
@@ -318,6 +319,11 @@ class Fesom14Reader:
             what each record's stamp means (see
             :mod:`kelp.readers.fesom14._timeaxis`); validated before any file
             is read.
+        dry_mask_var : str, optional
+            ``beaching.dry_mask_var`` of a run with beaching enabled: the
+            dry mask is opened like a sampled variable (3-D like the
+            velocities, or 2-D), required, with the records of u. Default
+            None: no mask is opened.
 
         Returns
         -------
@@ -325,8 +331,9 @@ class Fesom14Reader:
             The CONSUMED variables only, chosen before any time resolution
             or alignment: u and v; w for 3-D tracking (``mode.Fdrift3D``;
             without a mode config, when present); the sea-surface height
-            when present; every ``mode.sample_vars`` entry. Other variables
-            and files under ``path`` are ignored. Each variable keeps the
+            when present; every ``mode.sample_vars`` entry; the dry mask
+            ``dry_mask_var`` when given. Other variables and files under
+            ``path`` are ignored. Each variable keeps the
             dimensions of its files: ``(time, <depth>, <horizontal>)``
             (level-wise) or ``(time, nodes_3d)`` (one vector over the 3-D
             nodes) for 3-D fields, ``(time, <horizontal>)`` for 2-D ones;
@@ -335,8 +342,12 @@ class Fesom14Reader:
             Coordinates: ``time``, the resolved instants (cftime in the
             calendar of the u files; the window centre of a mean, the stamp
             of a snapshot); the level coordinate of the level-wise form; the
-            node coordinates ``lon``/``lat`` of the u files when they carry
-            them. Attributes: ``fesom14_form`` (``"levelwise"`` or
+            node coordinates any file of a consumed variable carries, one
+            set per number of nodes: ``lon``/``lat`` over u's horizontal
+            dimension, ``lon_<dim>``/``lat_<dim>`` over a horizontal
+            dimension ``<dim>`` of another number of nodes (``nodes_2d`` of
+            a ``zos`` next to vectors over the 3-D nodes). Attributes:
+            ``fesom14_form`` (``"levelwise"`` or
             ``"nodes3d"``), ``fesom14_has_eta`` (``1`` or ``0``) and
             ``fesom14_time_source`` (``"options"``, ``"bounds"`` or
             ``"schedule"``: what resolved the u axis). ``close()`` closes
@@ -353,7 +364,8 @@ class Fesom14Reader:
             output of the older branch (``<runid>.<year>.oce.mean.nc``) that
             holds a consumed variable, or that is the only candidate for a
             missing one; a required variable that no file holds (also a
-            ``mode.var_eta`` set but absent); a layout that is not one of the
+            ``mode.var_eta`` set but absent, and the dry mask
+            ``dry_mask_var``); a layout that is not one of the
             two FESOM 1.4 forms; files or variables of different layouts,
             dimension sizes, levels (beyond 1e-3 m) or node coordinates
             (beyond 1e-6 deg, either longitude convention); any refusal of
@@ -379,7 +391,7 @@ class Fesom14Reader:
         opts.validate()                  # before any file is read
         sources = [str(p) for p in (path, v_path, w_path) if p]
         heads = [_header(f) for f in _data_files(sources)]
-        roles = _consumed_roles(mode_cfg)
+        roles = _consumed_roles(mode_cfg, dry_mask_var)
         holders = _holders(roles, heads, sources)
         eta_name = next(r.name for r in roles if r.eta)
         roles = [r for r in roles if holders[r.name]]
@@ -434,9 +446,11 @@ class Fesom14Reader:
             and 2-D fields) or 3-D nodes (``(time, nodes_3d)`` vectors); a
             level axis other than the mesh's full level table (in length, or
             by more than 1e-3 m at a level), or a level dimension without a
-            coordinate; node coordinates ``lon``/``lat`` in the dataset that
+            coordinate; node coordinates in the dataset (``lon``/``lat``, or
+            ``lon_<dim>``/``lat_<dim>``, over any horizontal dimension) that
             differ from the mesh's by more than 1e-6 deg (either longitude
-            convention); a dataset without records; record 0 of a variable
+            convention; over ``nodes_3d``, from the coordinates of each 3-D
+            node's 2-D node); a dataset without records; record 0 of a variable
             whose wet mask is not the mesh's: a level-wise record with a
             value in a dry slot or none in a wet one (the ASCII mesh's index
             table, or the mask a mesh from cell polygons was built with), a
@@ -454,8 +468,12 @@ class Fesom14Reader:
         three masks), ~65 MB for 46 levels and 127k nodes. A dataset whose
         nodes are ALL in another order than the mesh's (a common
         permutation) can have masks that agree with the mesh's (columns of
-        equal length); only its node coordinates show it, so data without
-        ``lon``/``lat`` cannot be checked for it.
+        equal length); only node coordinates show it. Those of ANY
+        variable count: :meth:`open_dataset` keeps every set its files
+        carry (u's, and over another number of nodes, e.g. the 2-D nodes of
+        a ``zos`` next to vectors over the 3-D nodes), and each is compared
+        here. Data none of whose files carries ``lon``/``lat`` cannot be
+        checked for it.
         """
         facts = _mesh_facts(mesh)
         fields = _fields(ds)
@@ -579,7 +597,8 @@ class Fesom14Reader:
         ----------
         ds : xarray.Dataset
             A dataset from :meth:`open_dataset` (opened with these names in
-            ``mode.sample_vars``), or a time window of one.
+            ``mode.sample_vars``, or the beaching dry mask as its
+            ``dry_mask_var``), or a time window of one.
         timestep : int
             The record, an index into ``ds.time``.
         mesh : Mesh
@@ -623,10 +642,12 @@ class Fesom14Reader:
         for name in varnames:
             if name not in ds.data_vars:
                 raise ValueError(
-                    f"fesom14: the sampled variable {name!r} (mode.sample_vars) "
-                    "is not in the dataset; open_dataset opens the variables of "
-                    "mode.sample_vars, so open the data with the same mode, and "
-                    f"check that a file under data.ncinput holds {name!r}")
+                    f"fesom14: the variable {name!r} (mode.sample_vars, or "
+                    "beaching.dry_mask_var) is not in the dataset; open_dataset "
+                    "opens only the variables of mode.sample_vars and the dry "
+                    "mask named by its dry_mask_var argument, so open the data "
+                    "with the run's mode and dry mask, and check that a file "
+                    f"under data.ncinput holds {name!r}")
             layout = _classify(tuple(ds[name].dims), levelwise)
             if layout == "2d":
                 out[name] = _record_2d(ds, name, "mode.sample_vars", timestep,
@@ -1134,7 +1155,7 @@ class _Role:
 
     name: str        # the variable's name in the files
     key: str         # the config key that names it (for messages)
-    kind: str        # "u" | "v" | "w" | "eta" | "sample"
+    kind: str        # "u" | "v" | "w" | "eta" | "sample" | "mask"
     required: bool
     eta: bool = False    # it is the sea-surface height (also when sampled)
 
@@ -1200,8 +1221,10 @@ def _header(path: str) -> _Head:
                  schedule=None if schedule is None else str(schedule))
 
 
-def _consumed_roles(mode_cfg: Optional["ModeConfig"]) -> List[_Role]:
-    """The variables the run consumes, u first, each name once."""
+def _consumed_roles(mode_cfg: Optional["ModeConfig"],
+                    dry_mask_var: Optional[str] = None) -> List[_Role]:
+    """The variables the run consumes, u first, each name once; the
+    beaching dry mask ``dry_mask_var`` last."""
     def cfg(attr: str):
         return getattr(mode_cfg, attr, None) if mode_cfg is not None else None
 
@@ -1216,6 +1239,9 @@ def _consumed_roles(mode_cfg: Optional["ModeConfig"]) -> List[_Role]:
                        bool(eta), eta=True))
     for name in cfg("sample_vars") or ():
         roles.append(_Role(str(name), "mode.sample_vars", "sample", True))
+    if dry_mask_var:
+        roles.append(_Role(str(dry_mask_var), "beaching.dry_mask_var", "mask",
+                           True))
     out: List[_Role] = []
     for r in roles:
         same = [i for i, o in enumerate(out) if o.name == r.name]
@@ -1269,7 +1295,15 @@ def _kind_error(head: _Head, kind: str, why: str) -> ValueError:
 _ROLE_WHAT = {"u": "the eastward velocity", "v": "the northward velocity",
               "w": "the vertical velocity of 3-D tracking",
               "eta": "the sea-surface height",
-              "sample": "a variable to sample along the trajectories"}
+              "sample": "a variable to sample along the trajectories",
+              "mask": "the dry mask of the beaching model"}
+
+#: roles read like sampled scalars (3-D like the velocities, or 2-D)
+_SCALAR_KINDS = ("sample", "mask")
+
+#: how messages name a variable of such a role
+_SCALAR_WHAT = {"sample": "A sampled variable",
+                "mask": "The beaching dry mask"}
 
 
 def _holders(roles: List[_Role], heads: List[_Head],
@@ -1323,8 +1357,14 @@ def _open_lazy(path: str) -> xr.Dataset:
                          f"({exc})") from exc
 
 
-def _layout(role: _Role, path: str, da: xr.DataArray) -> str:
-    """``"levelwise"``, ``"nodes3d"`` or ``"2d"`` (``(time, <horizontal>)``)."""
+def _layout(role: _Role, path: str, da: xr.DataArray,
+            levelwise: bool = False) -> str:
+    """``"levelwise"``, ``"nodes3d"`` or ``"2d"`` (``(time, <horizontal>)``).
+
+    A sampled ``(time, nodes_3d)`` variable is a vector over the 3-D nodes,
+    unless u is level-wise (``levelwise``): there it is a 2-D field over a
+    horizontal dimension named ``nodes_3d``, as in :func:`_classify`.
+    """
     dims = tuple(da.dims)
     is_2d = len(dims) == 2 and dims[0] == TIME_DIM and dims[1] in HORIZONTAL_DIMS
     if role.kind == "eta":
@@ -1334,14 +1374,15 @@ def _layout(role: _Role, path: str, da: xr.DataArray) -> str:
                 f"{dims}; the sea-surface height must be (time, <horizontal>) "
                 f"with <horizontal> one of {HORIZONTAL_DIMS}. {_role_hint(role)}")
         return "2d"
-    if role.kind == "sample" and dims != (TIME_DIM, "nodes_3d") and is_2d:
+    if (role.kind in _SCALAR_KINDS and is_2d
+            and (levelwise or dims != (TIME_DIM, "nodes_3d"))):
         return "2d"
     try:
         return detect_form(da)
     except ValueError as exc:
-        extra = (" A sampled variable is 3-D like the velocities or 2-D "
-                 f"(time, <horizontal>). {_role_hint(role)}."
-                 if role.kind == "sample" else "")
+        extra = (f" {_SCALAR_WHAT[role.kind]} is 3-D like the velocities or "
+                 f"2-D (time, <horizontal>). {_role_hint(role)}."
+                 if role.kind in _SCALAR_KINDS else "")
         raise ValueError(f"fesom14: {path} ({role.key}): {_strip(exc)}{extra}") from exc
 
 
@@ -1352,13 +1393,16 @@ def _describe_layout(da: xr.DataArray) -> str:
 def _check_layouts(roles: List[_Role],
                    files: Dict[str, List[Tuple[_Head, xr.Dataset]]]) -> str:
     """Every variable has one layout across its files; every 3-D variable the
-    layout of u; shared dimension names have one size. Returns the form."""
+    layout of u; shared dimension names have one size. Returns the form.
+    u (the first role) is classified first: its form decides what a sampled
+    ``(time, nodes_3d)`` variable is."""
     u = roles[0].name
     first: Dict[str, Tuple[str, xr.DataArray, str]] = {}   # name -> (path, da, layout)
     for r in roles:
+        levelwise = u in first and first[u][2] == "levelwise"
         for h, ds in files[r.name]:
             da = ds[r.name]
-            lay = _layout(r, h.path, da)
+            lay = _layout(r, h.path, da, levelwise)
             if r.name not in first:
                 first[r.name] = (h.path, da, lay)
                 continue
@@ -1479,6 +1523,15 @@ def _check_node_coords(roles: List[_Role],
     return {n: (v[0], v[1]) for n, v in refs.items()}
 
 
+def _coord_names(hdim: str, u_hdim: str) -> Tuple[str, str]:
+    """The dataset's names of the node coordinates over ``hdim``: ``lon``,
+    ``lat`` over u's horizontal dimension ``u_hdim``, ``lon_<hdim>``,
+    ``lat_<hdim>`` over another."""
+    if hdim == u_hdim:
+        return "lon", "lat"
+    return f"lon_{hdim}", f"lat_{hdim}"
+
+
 # ---------------------------------------------------------------------------
 # open_dataset: time
 # ---------------------------------------------------------------------------
@@ -1498,6 +1551,14 @@ def _role_hint(role: _Role, velocities: str = "") -> str:
     if role.kind == "sample":
         return (f"Remove {role.name!r} from mode.sample_vars, or give it the "
                 "records of the velocities")
+    if role.kind == "mask" and role.eta:
+        return ("Remove beaching.dry_mask_var or set it to another variable, "
+                f"and leave the {role.name!r} files out of data.ncinput (the "
+                "sea-surface height is then 0); or give it the records of the "
+                "velocities")
+    if role.kind == "mask":
+        return ("Remove beaching.dry_mask_var or set it to another variable, "
+                f"or give {role.name!r} the records of the velocities")
     return velocities
 
 
@@ -1711,11 +1772,21 @@ def _open_consumed(roles: List[_Role], holders: Dict[str, List[_Head]],
     if levels is not None:
         zdim, z, zattrs = levels
         coords[zdim] = (zdim, z, zattrs)
-    hdim = data_vars[u].dims[-1]
-    node_coords = coords_by_size.get(data_vars[u].sizes[hdim])
-    if node_coords is not None:
-        coords["lon"] = (hdim, node_coords[0])
-        coords["lat"] = (hdim, node_coords[1])
+    # the node coordinates, one set per number of nodes: over u's horizontal
+    # dimension and over each one of another size (the 2-D nodes of a zos
+    # next to vectors over the 3-D nodes), so that prepare compares every
+    # set any file carries with the mesh
+    u_hdim = data_vars[u].dims[-1]
+    n_u = data_vars[u].sizes[u_hdim]
+    for da in data_vars.values():
+        hdim = da.dims[-1]
+        n = da.sizes[hdim]
+        node_coords = coords_by_size.get(n)
+        if node_coords is None or (hdim != u_hdim and n == n_u):
+            continue            # none, or u's nodes: u's set already
+        lon_name, lat_name = _coord_names(hdim, u_hdim)
+        coords[lon_name] = (hdim, node_coords[0])
+        coords[lat_name] = (hdim, node_coords[1])
     ds = xr.Dataset(data_vars, coords=coords, attrs={
         "fesom14_form": form,
         "fesom14_has_eta": int(any(r.eta for r in roles)),
@@ -1932,22 +2003,33 @@ def _owners(idx: np.ndarray, n3d: int) -> Tuple[np.ndarray, np.ndarray]:
     return node_of, level_of
 
 
+def _node_coord_names(ds: xr.Dataset, hdim: str) -> Optional[Tuple[str, str]]:
+    """The names of the node coordinates over ``hdim`` in a dataset:
+    ``lon``/``lat``, else ``lon_<hdim>``/``lat_<hdim>`` (open_dataset's
+    names over a horizontal dimension other than u's), else None."""
+    for pair in (("lon", "lat"), (f"lon_{hdim}", f"lat_{hdim}")):
+        if all(c in ds.variables and tuple(ds[c].dims) == (hdim,)
+               for c in pair):
+            return pair
+    return None
+
+
 def _check_mesh_coords(ds: xr.Dataset, fields: List[_Field],
                        facts: _MeshFacts) -> None:
-    """Node coordinates ``lon``/``lat`` over a horizontal dimension of the
-    data equal the mesh's within ``_COORD_TOL`` (either longitude
-    convention); over ``nodes_3d`` (vectors over the 3-D nodes) each entry
-    has the coordinates of its 2-D node."""
+    """Node coordinates over each horizontal dimension of the data
+    (:func:`_node_coord_names`) equal the mesh's within ``_COORD_TOL``
+    (either longitude convention); over ``nodes_3d`` (vectors over the 3-D
+    nodes) each entry has the coordinates of its 2-D node."""
     seen = set()
     for f in fields:
         if f.hdim in seen:
             continue
         seen.add(f.hdim)
-        if not all(c in ds.variables and tuple(ds[c].dims) == (f.hdim,)
-                   for c in ("lon", "lat")):
+        names = _node_coord_names(ds, f.hdim)
+        if names is None:
             continue
-        lon = np.asarray(ds["lon"].values, dtype=np.float64)
-        lat = np.asarray(ds["lat"].values, dtype=np.float64)
+        lon = np.asarray(ds[names[0]].values, dtype=np.float64)
+        lat = np.asarray(ds[names[1]].values, dtype=np.float64)
         node_of = level_of = None
         if f.layout == "nodes3d":
             node_of, level_of = _owners(facts.idx, facts.n3d)
@@ -1962,8 +2044,9 @@ def _check_mesh_coords(ds: xr.Dataset, fields: List[_Field],
         at = (f"3-D node {i} (node {int(node_of[i])}, level {int(level_of[i])})"
               if node_of is not None else f"node {i}")
         raise ValueError(
-            f"fesom14: the node coordinates of the data (lon, lat over "
-            f"{f.hdim!r}; variable {f.name!r}{f.where}) differ from the mesh's "
+            f"fesom14: the node coordinates of the data ({names[0]}, "
+            f"{names[1]} over {f.hdim!r}; variable {f.name!r}{f.where}) "
+            f"differ from the mesh's "
             f"at {at}: ({float(lon[i]):.7f}, {float(lat[i]):.7f}) against "
             f"({float(ref_lon[i]):.7f}, {float(ref_lat[i]):.7f}) "
             f"({int(off.sum())} node(s) differ by more than {_COORD_TOL:g} deg, "

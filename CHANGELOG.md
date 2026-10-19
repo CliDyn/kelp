@@ -76,7 +76,8 @@ the tracker was developed privately from 2026-06.
   (e.g. the published CMIP6 output) and the raw writer's vectors over the 3-D
   nodes `(time, nodes_3d)`, mapped through the ASCII mesh's index table. Files
   are grouped by the variables they hold, not by their names; only the
-  variables a run consumes are opened. u, v and w come back on the levels and
+  variables a run consumes are opened (the velocities, `zos`, the
+  `mode.sample_vars` and, with beaching enabled, `beaching.dry_mask_var`). u, v and w come back on the levels and
   are always read linearly in depth (`uv_vertical = "level"`): a prism-wise
   approximation (barycentric on the triangle, linear in depth per vertex) of
   FESOM 1.4's own interpolation on tetrahedra. Every record of every variable

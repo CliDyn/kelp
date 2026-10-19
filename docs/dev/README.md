@@ -156,7 +156,8 @@ Paths are below `src/kelp/`.
   "nemo" | "healpix")`) and shared helpers: engine detection, the time axis and its
   epoch, the sign rule for W in the file; the reader hook `prepare` (`_prepare_dataset`)
   and the stamp options of a reader that resolves its record times
-  (`_time_option_kwargs`), which `tracking.py` and `kelp info` share — they live here
+  (`_time_option_kwargs`) and the beaching dry mask of a reader that opens only the
+  consumed variables (`_dry_mask_kwargs`), which `tracking.py` and `kelp info` share — they live here
   so that `kelp info` does not import the integrators. Notes:
   [readers.md](readers.md); how a run uses the hook and the options in
   [tracking.md](tracking.md); the W sign from

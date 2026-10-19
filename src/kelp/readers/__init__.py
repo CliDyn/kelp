@@ -18,7 +18,9 @@ that checks a dataset against the mesh; every entry of a run (and ``kelp
 info``) calls it through :func:`_prepare_dataset`.  A reader that resolves
 what time each record represents (``_READER_RESOLVES_TIME``) takes the
 ``data.time_*`` stamp options as ``open_dataset`` keywords
-(:func:`_time_option_kwargs`).
+(:func:`_time_option_kwargs`); a reader that opens only the variables a run
+consumes (``_READER_OPENS_CONSUMED``) takes the beaching dry mask
+(:func:`_dry_mask_kwargs`).
 """
 from __future__ import annotations
 
@@ -357,6 +359,35 @@ def _time_option_kwargs(config) -> Dict[str, str]:
             "window or the snapshot cadence), and data.time_offset for "
             "stamps that sit early or late")
     return kw
+
+
+#: mesh types whose reader opens only the variables a run consumes: the
+#: beaching dry mask is named to its ``open_dataset``
+_READER_OPENS_CONSUMED = ("fesom14",)
+
+
+def _dry_mask_kwargs(config) -> Dict[str, str]:
+    """``beaching.dry_mask_var`` as an ``open_dataset`` kwarg, for a reader
+    that opens only the consumed variables (``mesh.type: fesom14``).
+
+    Parameters
+    ----------
+    config : AppConfig
+
+    Returns
+    -------
+    dict
+        ``{"dry_mask_var": name}`` when the mesh type is in
+        ``_READER_OPENS_CONSUMED``, beaching is enabled and
+        ``beaching.dry_mask_var`` is set; else empty, so the other readers'
+        ``open_dataset`` calls stay exactly as they are.
+    """
+    if config.mesh.type not in _READER_OPENS_CONSUMED:
+        return {}
+    beach = getattr(config.numerics, "beaching", None)
+    name = (getattr(beach, "dry_mask_var", None)
+            if beach is not None and beach.enabled else None)
+    return {"dry_mask_var": name} if name else {}
 
 
 def _describe_record_times(ds, offset: Optional[str] = None) -> Optional[str]:

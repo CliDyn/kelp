@@ -36,8 +36,8 @@ from .core.release import (activate_released, mask_dormant_for_record,
 from .numerics.vertical_uv import check_depth_linear_record, is_checked
 from .readers import (get_reader, extract_time_info, time_axis_epoch,
                       NO_EPOCH_NOTE, RESOLVED_BY_READER, _READER_RESOLVES_TIME,
-                      _describe_record_times, _prepare_dataset,
-                      _time_option_kwargs)
+                      _describe_record_times, _dry_mask_kwargs,
+                      _prepare_dataset, _time_option_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -3050,6 +3050,9 @@ def run_tracking(
         _extra["diffusion"] = _d0
     # the stamp options, only when set (only the fesom14 reader takes them)
     _extra.update(time_kw)
+    # the beaching dry mask, for a reader that opens only the variables the
+    # run consumes (fesom14); empty for every other reader
+    _extra.update(_dry_mask_kwargs(config))
     ds = reader.open_dataset(config.data.ncinput, v_path=v_path, w_path=w_path,
                              mode_cfg=config.mode, **_extra)
     # the reader's optional mesh-relative dataset hook, before anything

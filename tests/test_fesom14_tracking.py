@@ -565,6 +565,88 @@ def test_em_m1_diffusion_refused_before_writer(tmp_path, scheme, integrator,
     assert not np.array_equal(tr["lon"], _expected_lon(SEEDS, [0.01, 0.08], 3))
 
 
+# ---------------------------------------------------------------------------
+# The beaching dry mask
+# ---------------------------------------------------------------------------
+
+def _mask_data(d: Path, value: float, n_time: int = 6) -> Path:
+    """The run's files and ``drymask(time, ncells)`` = ``value`` at every
+    node (daily means with bounds, the records of the velocities)."""
+    if not d.exists():
+        _data(d, n_time=n_time)
+        tvars, tdims = _time_vars(n_time, True)
+        _write_nc(d / "drymask.nc", {"time": None, **tdims, "ncells": LON.size},
+                  tvars + [("drymask", ("time", "ncells"),
+                            np.full((n_time, LON.size), value),
+                            {"_FillValue": 1e20, "units": "1"})])
+    return d
+
+
+@pytest.mark.parametrize("value, sampled, status", [
+    (1.0, False, ParticleStatus.BEACHED), (0.0, False, ParticleStatus.ALIVE),
+    (1.0, True, ParticleStatus.BEACHED)], ids=["dry", "wet", "dry_sampled"])
+def test_dry_mask_var(tmp_path, value, sampled, status):
+    """``beaching.dry_mask_var`` without the mask in ``mode.sample_vars``:
+    ``open_dataset`` opens it and every step reads it (a mask that says dry
+    everywhere beaches both particles in water 50 m deep, a mask that says
+    wet leaves them alive), and the output holds no mask variable; listed
+    in ``mode.sample_vars`` too, the output holds it."""
+    beach = BeachingConfig(enabled=True, criteria=["depth"],
+                           dry_mask_var="drymask")
+    mode = {"sample_vars": ["drymask"]} if sampled else None
+    cfg = _cfg(tmp_path, data=_mask_data(tmp_path / f"data{value}", value),
+               mode=mode, numerics={"beaching": beach})
+    _run(cfg)
+    tr = load_trajectories(cfg.data.output_path)
+    assert (tr["status"][:, -1] == status).all(), tr["status"]
+    with netCDF4.Dataset(cfg.data.output_path) as nc:
+        assert ("drymask" in nc.variables) == sampled
+        assert nc.getncattr("beaching_enabled") == 1
+
+
+def test_dry_mask_var_missing_refused_before_writer(tmp_path):
+    """A ``beaching.dry_mask_var`` that no file holds: refused before the
+    output exists, naming the key, the variable and the fix; with beaching
+    disabled the key is not read and the run goes through."""
+    beach = BeachingConfig(enabled=True, criteria=["depth"],
+                           dry_mask_var="nope")
+    cfg = _cfg(tmp_path, numerics={"beaching": beach})
+    with pytest.raises(ValueError) as info:
+        _run(cfg)
+    msg = str(info.value)
+    for needle in ("beaching.dry_mask_var", "'nope'", "data.ncinput"):
+        assert needle in msg, msg
+    assert "mode.sample_vars" not in msg, msg
+    assert not Path(cfg.data.output_path).exists()
+
+    off = BeachingConfig(enabled=False, dry_mask_var="nope")
+    cfg = _cfg(tmp_path, out="off.nc", numerics={"beaching": off})
+    _run(cfg)
+    assert Path(cfg.data.output_path).exists()
+
+
+@pytest.mark.parametrize("mesh_type", ["fesom2", "fesomc", "healpix", "nemo"])
+def test_dry_mask_reaches_the_fesom14_reader_only(tmp_path, mesh_type):
+    """The dry mask is an ``open_dataset`` keyword of the fesom14 reader
+    only, and only with beaching enabled: for every other reader the kwargs
+    stay empty, so its ``open_dataset`` call is unchanged."""
+    from kelp.readers import _dry_mask_kwargs
+
+    def cfg(mesh: str, enabled: bool = True) -> AppConfig:
+        beach = BeachingConfig(enabled=enabled, criteria=["depth"],
+                               dry_mask_var="wetdry")
+        return AppConfig(
+            mode=ModeConfig(), numerics=NumericsConfig(beaching=beach),
+            mesh=MeshConfig(type=mesh, meshpath=str(tmp_path / "absent")),
+            data=DataConfig(ncinput=str(tmp_path / "absent")),
+            time=TimeConfig(n_steps=1))
+
+    assert _dry_mask_kwargs(cfg(mesh_type)) == {}
+    assert _dry_mask_kwargs(cfg("fesom14")) == {"dry_mask_var": "wetdry"}
+    assert _dry_mask_kwargs(cfg("fesom14", enabled=False)) == {}
+    assert _dry_mask_kwargs(_cfg(tmp_path)) == {}            # no beaching
+
+
 @pytest.mark.parametrize("mesh_type", ["fesomc", "fesom2", "healpix", "nemo"])
 def test_input_rotation_refused_for_other_mesh_types(mesh_type):
     with pytest.raises(ValueError) as info:
@@ -661,6 +743,31 @@ def test_kelp_info_reads_split_paths(tmp_path, capsys):
         ncinput_w=str(dirs["wo"])), capsys)
     assert rc == 0, (out, err)
     assert "2000-01-06 12:00:00" in out
+
+
+def test_kelp_info_opens_the_dry_mask(tmp_path, capsys, monkeypatch):
+    """``kelp info`` with ``beaching.dry_mask_var`` opens the mask as a run
+    does (``prepare`` sees it in the dataset), and refuses one no file
+    holds, naming the key."""
+    seen = []
+    real = Fesom14Reader.prepare
+
+    def spy(mesh, ds):
+        seen.append(sorted(ds.data_vars))
+        return real(mesh, ds)
+    monkeypatch.setattr(Fesom14Reader, "prepare", staticmethod(spy))
+    data = _mask_data(tmp_path / "data", 0.0)
+    cfg = _info_cfg(data, data)
+    cfg["numerics"]["beaching"] = {"enabled": True, "criteria": ["depth"],
+                                   "dry_mask_var": "drymask"}
+    rc, out, err = _info(tmp_path, "mask", cfg, capsys)
+    assert rc == 0, (out, err)
+    assert seen == [["drymask", "uo", "vo", "wo"]]
+
+    cfg["numerics"]["beaching"]["dry_mask_var"] = "nope"
+    rc, out, err = _info(tmp_path, "nope", cfg, capsys)
+    assert rc == 1, (out, err)
+    assert "beaching.dry_mask_var" in err and "'nope'" in err, err
 
 
 # ---------------------------------------------------------------------------

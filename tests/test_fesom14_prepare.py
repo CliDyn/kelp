@@ -116,11 +116,14 @@ def _write_var(path: Path, var: str, lon, lat, ncol, *, levels=LEVELS,
 
 
 def _write_raw(path: Path, var: str, size: int, *, n_time=3, two_d=False,
-               fill_at=None, coords=None) -> Path:
+               fill_at=None, coords=None, values=None) -> Path:
     """A file ``var(time, nodes_3d)`` with ``size`` entries (with
     ``two_d``: ``var(time, nodes_2d)``); ``fill_at`` = (record, entry) of a
-    raw 1e30; ``coords`` = (lon, lat) written over the same dimension."""
-    vals = BASE[var] + np.arange(n_time)[:, None] + 0.001 * np.arange(size)
+    raw 1e30; ``coords`` = (lon, lat) written over the same dimension;
+    ``values`` = the ``(time, size)`` values written instead of the
+    generated ones."""
+    vals = (BASE[var] + np.arange(n_time)[:, None] + 0.001 * np.arange(size)
+            if values is None else np.array(values, dtype=np.float64))
     if fill_at is not None:
         vals[fill_at] = 1e30
     dim = "nodes_2d" if two_d else "nodes_3d"
@@ -431,6 +434,99 @@ def test_nodes3d_coordinates(tmp_path):
         msg = _refusal(mesh, ds)
     assert "at 3-D node 10 (node 1, level 2)" in msg
     assert "(11.0000000, 50.0010000) against (11.0000000, 50.0000000)" in msg
+
+
+def _raw_uniform(d: Path, perm=None, *, coords_3d=False, zos_coords=True,
+                 zos_perm=None) -> Path:
+    """Raw data on the uniform ASCII mesh (four levels at every node, so
+    the 3-D node of node ``n`` at level ``k`` is ``5 k + n``): u/v/w over
+    ``nodes_3d`` and ``zos(time, nodes_2d)``.  The files list the 2-D nodes
+    in the order ``perm`` (entry ``5 k + j`` of a vector holds node
+    ``perm[j]`` at level ``k``; ``zos`` entry ``j`` holds node
+    ``zos_perm[j]``, by default ``perm[j]``), values and coordinates alike:
+    ``BASE + t + 0.01 k + 0.001 n`` for node ``n``.  ``coords_3d`` writes
+    ``lon``/``lat`` over ``nodes_3d`` into the u/v/w files, ``zos_coords``
+    over ``nodes_2d`` into the ``zos`` file."""
+    perm = np.arange(5) if perm is None else np.asarray(perm)
+    zos_perm = perm if zos_perm is None else np.asarray(zos_perm)
+    d.mkdir(parents=True, exist_ok=True)
+    t = np.arange(3)[:, None, None]
+    k = np.arange(4)[None, :, None]
+    lon3, lat3 = np.tile(HAND_LON[perm], 4), np.tile(HAND_LAT[perm], 4)
+    for var in ("uo", "vo", "wo"):
+        vec = (BASE[var] + t + 0.01 * k + 0.001 * perm[None, None, :]
+               ).reshape(3, 20)                 # entry 5 k + j
+        _write_raw(d / f"{var}.nc", var, 20, values=vec,
+                   coords=(lon3, lat3) if coords_3d else None)
+    zos = BASE["zos"] + np.arange(3)[:, None] + 0.001 * zos_perm[None, :]
+    _write_raw(d / "zos.nc", "zos", 5, two_d=True, values=zos,
+               coords=((HAND_LON[zos_perm], HAND_LAT[zos_perm])
+                       if zos_coords else None))
+    return d
+
+
+def test_raw_common_permutation_seen_by_2d_coordinates(tmp_path):
+    """Vectors over the 3-D nodes without coordinates and a ``zos`` over
+    the 2-D nodes with them, every file with nodes 0 and 1 swapped: the
+    masks agree (uniform columns) and the variables agree with each other;
+    only the coordinates of ``zos`` show it, and they are compared with the
+    mesh although u's files carry none."""
+    umesh = _uniform_ascii_mesh(tmp_path)
+    with _open(_raw_uniform(tmp_path / "perm", perm=[1, 0, 2, 3, 4])) as ds:
+        msg = _refusal(umesh, ds)
+    assert "'zos'" in msg and "zos.nc" in msg, msg
+    assert "'nodes_2d'" in msg and "at node 0:" in msg, msg
+    assert "(11.0000000, 50.0000000) against (10.0000000, 50.0000000)" in msg
+    assert "2 node(s)" in msg and "order" in msg
+
+
+def test_raw_zos_alone_permuted_refused(tmp_path):
+    """u/v/w carry the right coordinates over ``nodes_3d``; ``zos`` alone
+    lists its nodes in another order, with its coordinates: refused naming
+    ``zos`` (the two coordinate sets have different node counts, so
+    ``open_dataset`` cannot compare them with each other)."""
+    umesh = _uniform_ascii_mesh(tmp_path)
+    with _open(_raw_uniform(tmp_path / "zperm", coords_3d=True,
+                            zos_perm=[0, 1, 3, 2, 4])) as ds:
+        assert ds["lon"].dims == ("nodes_3d",)
+        msg = _refusal(umesh, ds)
+    assert "'zos'" in msg and "at node 2:" in msg, msg
+    assert "(11.5000000, 51.0000000) against (10.5000000, 51.0000000)" in msg
+
+
+def test_raw_2d_coordinates_kept_values_in_place(tmp_path):
+    """The same data in the mesh's order: the dataset keeps the 2-D nodes'
+    coordinates (``lon_nodes_2d``/``lat_nodes_2d``; u's files carry none),
+    ``prepare`` passes, and every value is read at its ``(level, node)``."""
+    umesh = _uniform_ascii_mesh(tmp_path)
+    with _open(_raw_uniform(tmp_path / "ok")) as ds:
+        assert "lon" not in ds.variables and "lat" not in ds.variables
+        assert ds["lon_nodes_2d"].dims == ("nodes_2d",)
+        np.testing.assert_array_equal(ds["lon_nodes_2d"].values, HAND_LON)
+        np.testing.assert_array_equal(ds["lat_nodes_2d"].values, HAND_LAT)
+        Fesom14Reader.prepare(umesh, ds)
+        vel = Fesom14Reader.read_velocities(ds, 1, umesh, MODE_3D)
+    k = np.arange(4)[:, None]
+    n = np.arange(5)[None, :]
+    for got, var in ((vel.u, "uo"), (vel.v, "vo")):
+        want = (BASE[var] + 1 + 0.01 * k + 0.001 * n).astype(np.float32)
+        np.testing.assert_array_equal(got, want)
+    np.testing.assert_array_equal(
+        vel.eta, (BASE["zos"] + 1 + 0.001 * np.arange(5)).astype(np.float32))
+
+
+def test_raw_common_permutation_seen_by_3d_coordinates(tmp_path):
+    """Every file with nodes 0 and 1 swapped, the coordinates over
+    ``nodes_3d`` in the u/v/w files (``zos`` without any): each 3-D node is
+    compared with the coordinates of its 2-D node."""
+    umesh = _uniform_ascii_mesh(tmp_path)
+    with _open(_raw_uniform(tmp_path / "perm3", perm=[1, 0, 2, 3, 4],
+                            coords_3d=True, zos_coords=False)) as ds:
+        msg = _refusal(umesh, ds)
+    assert "'uo'" in msg and "'nodes_3d'" in msg, msg
+    assert "at 3-D node 0 (node 0, level 0)" in msg
+    assert "(11.0000000, 50.0000000) against (10.0000000, 50.0000000)" in msg
+    assert "8 node(s)" in msg
 
 
 def test_levelwise_dimension_named_nodes_3d(tmp_path, island):

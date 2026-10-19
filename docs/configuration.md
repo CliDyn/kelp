@@ -149,7 +149,7 @@ the remaining keys are not even validated.
 | `criteria` | `[depth]` | Non-empty subset of `depth`, `coastal_element`, `on_failure`, `stochastic`; OR-combined. A single string is coerced to a list. |
 | `depth_min` | `0.3` | Metres: beach a particle when the raw (unclamped) column height `H` drops below this. Must be > 0. |
 | `use_eta` | `false` | Include the per-timestep sea level in `H = depth + eta` (tidal drying). **Requires an ssh/eta/zos (or `mode.var_eta`) variable in the dataset** — otherwise startup fails with `ValueError` (the FESOM2 reader would silently substitute zeros and hide all drying; for `fesom14` the message names the `zos` files to add to `data.ncinput`). |
-| `dry_mask_var` | `null` | Node variable name: value > 0.5 means dry, ORed into the depth criterion. Probe-read at startup (missing → `ValueError`). Read internally each step; appears in output only if also listed in `mode.sample_vars`. |
+| `dry_mask_var` | `null` | Node variable name: value > 0.5 means dry, ORed into the depth criterion. Probe-read at startup (missing → `ValueError`). Read internally each step; appears in output only if also listed in `mode.sample_vars`. With `mesh.type: fesom14` (whose reader opens only the variables a run consumes) the mask is opened as one more of them, like a sampled variable (2-D, or 3-D like the velocities) with the records of u; a mask no file holds is refused when the data are opened, naming this key. |
 | `zone_depth` | `null` → `2·depth_min` | Stochastic-beaching zone: water shallower than this counts as "near shore". |
 | `t_beach` | `86400.0` | Seconds: stochastic criterion timescale, `P = 1 − exp(−|dt|/t_beach)` per step inside the zone. Must be > 0 when `stochastic` is enabled. |
 | `resuspension` | `never` | `never` / `auto` (release when re-wetted) / `stochastic` (probabilistic release, always re-wet-gated) / `auto_or_stochastic`. |
@@ -245,9 +245,10 @@ never by their names:
   together — whatever the names (`<var>_<runid>_<YYYYMMDD>.nc` of the raw
   writer, the CMIP6 names, others). Other variables and files are ignored.
 - Consumed: `mode.var_u` / `var_v` (`uo` / `vo`), in 3-D `var_w` (`wo`), the
-  sea-surface height `var_eta` (`zos`) when some file holds it, and every
-  `mode.sample_vars` entry (`thetao`, `so`, …). A required variable that no
-  file holds is refused, listing the variables the files hold.
+  sea-surface height `var_eta` (`zos`) when some file holds it, every
+  `mode.sample_vars` entry (`thetao`, `so`, …) and, with beaching enabled,
+  `beaching.dry_mask_var`. A required variable that no file holds is refused,
+  listing the variables the files hold.
 - Each variable's time axis is decoded file by file (each file's own epoch and
   calendar) and resolved (`data.time_stamp` row of §5); then every consumed
   variable must have exactly the records of u — the same instants and windows.
@@ -260,7 +261,9 @@ never by their names:
   variables of different layouts, levels or node coordinates.
 - The checks against the mesh (sizes, the level axis, node coordinates, the
   wet mask of record 0 of every variable) run right after, before any output
-  file exists.
+  file exists. Node coordinates count from any file that carries them: next to
+  vectors over the 3-D nodes, the `lon`/`lat` of a `zos` file over the 2-D
+  nodes are compared with the mesh too.
 
 **FESOM2 (`mesh.type: fesom2`), `ncinput` is a file or Zarr store:**
 
@@ -360,7 +363,8 @@ mode with a clean directory.)
 `kelp info config.yaml` prints the mesh statistics and the time range of
 whatever was actually opened — use it to verify a config before running. It
 opens the data as a run does: `ncinput` with `ncinput_v`/`ncinput_w` (since
-2026-10-19; before, `ncinput` only) and the `data.time_*` stamp options, and
+2026-10-19; before, `ncinput` only), the `data.time_*` stamp options and, for
+`fesom14` with beaching enabled, `beaching.dry_mask_var`, and
 it runs the reader's checks against the mesh; for `fesom14` it also prints
 what resolved the record times and the first and last instant.
 

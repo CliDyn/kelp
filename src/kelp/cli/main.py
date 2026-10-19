@@ -59,7 +59,8 @@ def _cmd_info(args: argparse.Namespace) -> int:
     # the helpers a run uses too, from the registry: info never imports the
     # tracking loop and its integrators
     from ..readers import (get_reader, _describe_record_times,
-                           _prepare_dataset, _time_option_kwargs)
+                           _dry_mask_kwargs, _prepare_dataset,
+                           _time_option_kwargs)
 
     config_path = Path(args.config).expanduser()
     if not config_path.exists():
@@ -121,11 +122,13 @@ def _cmd_info(args: argparse.Namespace) -> int:
         print(f"    grid hash: (not evaluated: {exc})")
 
     try:
-        # the separate v/w paths, as a run passes them
+        # the separate v/w paths, as a run passes them; the beaching dry
+        # mask too, for a reader that opens only what a run consumes
         ds = reader.open_dataset(config.data.ncinput,
                                  v_path=config.data.ncinput_v or None,
                                  w_path=config.data.ncinput_w or None,
-                                 mode_cfg=config.mode, **time_kw)
+                                 mode_cfg=config.mode, **time_kw,
+                                 **_dry_mask_kwargs(config))
     except Exception as exc:
         print(f"error: could not open dataset {config.data.ncinput!r}: {exc}",
               file=sys.stderr)

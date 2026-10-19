@@ -91,21 +91,21 @@ def _time(nc, n_time: int, unit: str = "days") -> None:
 
 def _write_levelwise(path: Path, var: str, vals: np.ndarray, *, attrs=None,
                      lon=HAND_LON, lat=HAND_LAT, levels=LEVELS,
-                     unit: str = "days") -> Path:
-    """``var(time, depth, ncells)`` from ``vals`` (time, level, node), one
+                     unit: str = "days", hdim: str = "ncells") -> Path:
+    """``var(time, depth, <hdim>)`` from ``vals`` (time, level, node), one
     record per ``unit``; NaN is written as the ``_FillValue``."""
     n_time, n_lev, n_nodes = vals.shape
     with netCDF4.Dataset(str(path), "w") as nc:
         _time(nc, n_time, unit)
         nc.createDimension("depth", n_lev)
-        nc.createDimension("ncells", n_nodes)
+        nc.createDimension(hdim, n_nodes)
         z = nc.createVariable("depth", "f8", ("depth",))
         z.units, z.positive = "m", "down"
         z[:] = levels
         for name, values in (("lon", lon), ("lat", lat)):
-            c = nc.createVariable(name, "f8", ("ncells",))
+            c = nc.createVariable(name, "f8", (hdim,))
             c[:] = values
-        v = nc.createVariable(var, "f4", ("time", "depth", "ncells"),
+        v = nc.createVariable(var, "f4", ("time", "depth", hdim),
                               fill_value=np.float32(1e20))
         for key, value in (attrs or {}).items():
             v.setncattr(key, value)
@@ -149,11 +149,12 @@ def _write_2d(path: Path, var: str, vals: np.ndarray, *,
 
 def _dataset(d: Path, form: str = "levelwise",
              variables=("uo", "vo", "wo"), *, n_time: int = 3, edit=None,
-             attrs=None, tables=None, zos=None) -> Path:
+             attrs=None, tables=None, zos=None, hdim: str = "ncells") -> Path:
     """One file per variable.  ``edit[var](vals)`` plants a defect,
     ``attrs[var]`` sets attributes, ``tables[var]`` = a (level, node) table
     used for every record instead of the generated values; ``zos`` =
-    ``(dim, values (time, entries))`` adds a 2-D sea-surface height."""
+    ``(dim, values (time, entries))`` adds a 2-D sea-surface height;
+    ``hdim`` names the horizontal dimension of the level-wise files."""
     d.mkdir(parents=True, exist_ok=True)
     for var in variables:
         if tables and var in tables:
@@ -162,8 +163,12 @@ def _dataset(d: Path, form: str = "levelwise",
             vals = _values(var, n_time)
         if edit and var in edit:
             edit[var](vals)
-        write = _write_levelwise if form == "levelwise" else _write_nodes3d
-        write(d / f"{var}.nc", var, vals, attrs=(attrs or {}).get(var))
+        if form == "levelwise":
+            _write_levelwise(d / f"{var}.nc", var, vals,
+                             attrs=(attrs or {}).get(var), hdim=hdim)
+        else:
+            _write_nodes3d(d / f"{var}.nc", var, vals,
+                           attrs=(attrs or {}).get(var))
     if zos is not None:
         _write_2d(d / "zos.nc", "zos", zos[1], dim=zos[0])
     return d
@@ -678,6 +683,50 @@ def test_scalar_refusals(tmp_path):
         Fesom14Reader.read_scalar_fields(ds, 1, mesh, ["zos"], MODE_3D)
         with pytest.raises(ValueError, match=r"'zos'.*2000-01-03.*node 4"):
             Fesom14Reader.read_scalar_fields(ds, 2, mesh, ["zos"], MODE_3D)
+
+
+#: a 2-D field sampled along the trajectories, (time, node); exact in float32
+TOS = 10.0 + 0.5 * np.arange(15.0).reshape(3, 5)
+
+
+@pytest.mark.parametrize("three_d", [True, False], ids=["3d", "2d"])
+def test_sampled_2d_field_over_nodes_3d_levelwise(tmp_path, three_d):
+    """The level-wise writer names its horizontal dimension ``nodes_3d``
+    (length nod2D): next to level-wise velocities over it, a sampled
+    ``tos(time, nodes_3d)`` is a 2-D field, opened, checked and read as one
+    value per node, in 3-D and in 2-D tracking."""
+    mesh = _hand_mesh(tmp_path)
+    d = _dataset(tmp_path / "data", hdim="nodes_3d")
+    _write_2d(d / "tos.nc", "tos", TOS, dim="nodes_3d")
+    mode = ModeConfig(Fdrift3D=three_d, sample_vars=["tos"])
+    with _open(d, mode) as ds:
+        assert ds["uo"].dims == ("time", "depth", "nodes_3d")
+        assert ds["tos"].dims == ("time", "nodes_3d")
+        Fesom14Reader.prepare(mesh, ds)
+        assert Fesom14Reader.probe_uv_layout(ds, mode, mesh) == "node"
+        out = Fesom14Reader.read_scalar_fields(ds, 1, mesh, ["tos"], mode)
+        vel = _read(ds, 2, mesh, mode, sample_vars=["tos"])
+    assert out["tos"].shape == (5,) and out["tos"].dtype == np.float64
+    np.testing.assert_array_equal(out["tos"], TOS[1])
+    np.testing.assert_array_equal(vel.scalars["tos"], TOS[2])
+    want = _expected("uo", 2)
+    np.testing.assert_array_equal(vel.u, want if three_d else want[0])
+
+
+def test_sampled_nodes_3d_next_to_raw_velocities_is_3d(tmp_path):
+    """Next to vectors over the 3-D nodes, a sampled ``(time, nodes_3d)``
+    variable is one more such vector: placed on the levels with the index
+    table, ``(K, N)``, forward-filled below the bed."""
+    mesh = _hand_mesh(tmp_path)
+    d = _dataset(tmp_path / "raw", "nodes3d",
+                 variables=("uo", "vo", "wo", "thetao"),
+                 tables={"thetao": T_TABLE})
+    mode = ModeConfig(Fdrift3D=True, sample_vars=["thetao"])
+    with _open(d, mode) as ds:
+        assert ds["thetao"].dims == ("time", "nodes_3d")
+        Fesom14Reader.prepare(mesh, ds)
+        out = Fesom14Reader.read_scalar_fields(ds, 1, mesh, ["thetao"], mode)
+    np.testing.assert_array_equal(out["thetao"], T_FILLED)
 
 
 # ---------------------------------------------------------------------------
