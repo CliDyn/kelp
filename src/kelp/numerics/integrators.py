@@ -53,7 +53,8 @@ from .interpolate import (
     _interp_barycentric_core_tinterp,
     _interp_barycentric_core_tinterp_3d, _interp_barycentric_core_pchip4_3d,
     _interp_barycentric_core_tinterp_dl, _interp_barycentric_core_pchip4_dl,
-    get_interpolator, UV_INTERP_USES_ELEMS, _reject_depth_linear,
+    _interp_leastsq_core_dl,
+    get_interpolator, UV_INTERP_USES_ELEMS, _reject_depth_linear, _DL_LAYOUT,
 )
 from .vertical_uv import check_depth_linear_record, depth_points, is_checked
 from ..core.mesh import (
@@ -62,6 +63,7 @@ from ..core.mesh import (
     _local_nearest_node, _find_containing_element_local,
     _grid_hash_nearest_widened, _grid_hash_nearest_3x3,
     _grid_hash_nearest_exact, _anchor_provable, _require_node_xyz,
+    build_elem_areas,
 )
 from ..core.particles import ParticleState, ParticleStatus, FailureReason
 # The fused 3-D RK2 kernels below inline the W barycentric twins, which take
@@ -1064,6 +1066,10 @@ def _raise_step_mixture(where: str, named) -> None:
                     for name, f in named))
 
 
+#: the interpolators that evaluate a depth-linear element-layout field
+_DL_ELEMENT_UV_INTERP = ("leastsq", "edge_leastsq", "barycentric")
+
+
 def _check_depth_linear_entry(vel, mesh, uv_interp: str, integrator: str, *,
                               vel_next=None, recon=None) -> None:
     """Entry gate of the step functions for depth-linear u/v.
@@ -1079,13 +1085,17 @@ def _check_depth_linear_entry(vel, mesh, uv_interp: str, integrator: str, *,
     A depth-linear ``vel`` (``uv_vertical`` ``"level"`` or
     ``"layer_linear"``) is refused, in this order, for the ``rk45``
     integrator, a mesh that is not z-level, a field that is not 3-D (no
-    ``w``), a layout other than ``"node"`` and a ``uv_interp`` other than
-    ``"barycentric"`` — the only interpolator that evaluates it.  Then the
-    placements must agree, and each field passes the record check
-    (``check_depth_linear_record``) unless already checked for this mesh's
-    table: ``vel``, ``vel_next``, each ``recon`` snapshot, and the raw
-    parents ``vel_a`` / ``vel_b`` of any ``LazyLerpField`` among them
-    (checked first, so a bad parent is named).
+    ``w``), and a layout and ``uv_interp`` outside the table of the
+    interpolators that evaluate it: node layout with ``"barycentric"``
+    only, element layout with ``"leastsq"``, ``"edge_leastsq"`` or
+    ``"barycentric"`` (any other layout is refused).  Then the placements
+    must agree, and each field passes the record check
+    (``check_depth_linear_record``, which also holds an element-layout
+    field to the element table: ``"layer_linear"`` data and the reader's
+    element bottoms) unless already checked for this mesh's table:
+    ``vel``, ``vel_next``, each ``recon`` snapshot, and the raw parents
+    ``vel_a`` / ``vel_b`` of any ``LazyLerpField`` among them (checked
+    first, so a bad parent is named).
 
     Parameters
     ----------
@@ -1139,14 +1149,21 @@ def _check_depth_linear_entry(vel, mesh, uv_interp: str, integrator: str, *,
             vel, where, "needs a 3-D field (u/v on depth points and a w "
             "field)")
     layout = getattr(vel, "uv_layout", "element")
-    if layout != "node":
+    if layout == "node":
+        if uv_interp != "barycentric":
+            _reject_depth_linear(
+                vel, where, "on node layout (uv_layout='node') needs "
+                f"uv_interp='barycentric', got uv_interp={uv_interp!r}")
+    elif layout == "element":
+        if uv_interp not in _DL_ELEMENT_UV_INTERP:
+            _reject_depth_linear(
+                vel, where, "on element layout (uv_layout='element') needs "
+                "uv_interp 'leastsq', 'edge_leastsq' or 'barycentric', got "
+                f"uv_interp={uv_interp!r}")
+    else:
         _reject_depth_linear(
-            vel, where, f"needs node layout (uv_layout='node'), got "
+            vel, where, f"needs uv_layout 'node' or 'element', got "
             f"{layout!r}")
-    if uv_interp != "barycentric":
-        _reject_depth_linear(
-            vel, where, f"needs uv_interp='barycentric', got "
-            f"uv_interp={uv_interp!r}")
 
     named = _step_fields(vel, vel_next, recon)
     if any(getattr(f, "uv_vertical", "layer") != placement
@@ -1674,6 +1691,127 @@ def _fused_euler_step_3d(
         # W for EVERY alive particle, before the u/v verdict — the unfused
         # path computes it with mask=alive and it is also the vel_w
         # diagnostic of a particle that dies here (parity, 2026-09-12).
+        if w_method == _W_LEASTSQ:
+            WW, _ = _interp_w_leastsq_single(
+                lons[i], lats[i], z_particles[i], node_i,
+                w_field, z_levels, time_dir, node_depths,
+                nodes_lon, nodes_lat,
+                node_to_elems, node_to_elems_count, elem_nodes,
+            )
+        else:
+            WW = _interp_w_linear_single(w_field, z_levels, z_particles[i], node_i, time_dir)
+        W_out[i] = WW
+
+        if not ok:
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = z_particles[i]
+            status_out[i] = OUTSIDE
+            fr_out[i] = _FR_INTERP
+            nn_out[i] = node_i
+            continue
+
+        lat_rad = lats[i] * DEG2RAD
+        z0 = math.cos(lat_rad) * _SLM
+        if z0 < 1.0:
+            z0 = 1.0
+        lon_new = lons[i] + dt * UU / z0
+        lat_new = lats[i] + dt * VV / _SLM
+        z_new = z_particles[i] + WW * dt
+        lon_new = ((lon_new + 180.0) % 360.0) - 180.0
+        if lat_new > 90.0:
+            lat_new = 90.0
+        elif lat_new < -90.0:
+            lat_new = -90.0
+
+        nn_new = _fused_site_anchor(
+            lon_new, lat_new,
+            gh_offsets, gh_node_ids, gh_cell_size,
+            gh_lon_min, gh_lat_min, gh_nx, gh_ny, gh_wrap_lon,
+            nodes_lon, nodes_lat, node_xyz, exact, gh_far_rows,
+        )
+
+        _, in_dom = _find_containing_element_local(
+            lon_new, lat_new, nn_new,
+            node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat,
+        )
+
+        if not in_dom:
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = z_particles[i]
+            status_out[i] = OUTSIDE
+            fr_out[i] = _FR_OOB
+            nn_out[i] = node_i
+        else:
+            lon_out[i] = lon_new
+            lat_out[i] = lat_new
+            z_clamped = z_new
+            if z_clamped < z_levels[0]:
+                z_clamped = z_levels[0]
+            bd = node_depths[nn_new]
+            if z_clamped > bd:
+                z_clamped = bd
+            z_out[i] = z_clamped
+            status_out[i] = ALIVE
+            nn_out[i] = nn_new
+
+
+@njit(parallel=True, cache=True)
+def _fused_euler_step_3d_dl(
+    P, lons, lats, z_particles, alive_mask, status_in,
+    gh_offsets, gh_node_ids, gh_cell_size, gh_lon_min, gh_lat_min,
+    gh_nx, gh_ny, gh_wrap_lon, gh_far_rows,
+    node_to_elems_count, node_to_elems,
+    elem_center_lon, elem_center_lat,
+    elem_nodes, nodes_lon, nodes_lat, node_xyz,
+    node_depths, z_levels,
+    p, last, bed, elem_areas,
+    u_2d, v_2d, w_field,
+    dt, time_dir, w_method,
+    lon_out, lat_out, z_out, status_out, nn_out, U_out, V_out, W_out, fr_out, exact
+):
+    """Depth-linear twin of :func:`_fused_euler_step_3d` (element layout,
+    ``uv_vertical`` ``"layer_linear"``): the same kernel with the element
+    table ``p`` (``(M,)``), ``last``, ``bed`` and the element areas
+    ``elem_areas`` (``(E,)``) after ``z_levels``, and u/v of shape
+    ``(M, E)``.  No layer is looked up for u/v: they are read at the
+    particle's depth by :func:`_interp_leastsq_core_dl` (an element dry
+    there left out, the fallbacks of the wet members' area mean and the
+    containing element), the core the unfused step runs.  The anchors, W,
+    the move, the domain check and the clamp are the layer kernel's."""
+    ALIVE = 1
+    OUTSIDE = 3
+    _W_NEAREST = 0
+    _W_LEASTSQ = 1
+    for i in prange(P):
+        if not alive_mask[i]:
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = z_particles[i]
+            status_out[i] = status_in[i]
+            continue
+
+        node_i = _fused_site_anchor(
+            lons[i], lats[i],
+            gh_offsets, gh_node_ids, gh_cell_size,
+            gh_lon_min, gh_lat_min, gh_nx, gh_ny, gh_wrap_lon,
+            nodes_lon, nodes_lat, node_xyz, exact, gh_far_rows,
+        )
+
+        UU, VV, ok = _interp_leastsq_core_dl(
+            lons[i], lats[i], z_particles[i], node_i,
+            node_to_elems_count, node_to_elems,
+            elem_center_lon, elem_center_lat, time_dir,
+            p, last, bed, elem_areas, elem_nodes, nodes_lon, nodes_lat,
+            u_2d, v_2d,
+        )
+        U_out[i] = UU
+        V_out[i] = VV
+
+        # W for EVERY alive particle, before the u/v verdict (as the
+        # layer kernel: the unfused path computes it with mask=alive)
         if w_method == _W_LEASTSQ:
             WW, _ = _interp_w_leastsq_single(
                 lons[i], lats[i], z_particles[i], node_i,
@@ -3378,10 +3516,53 @@ def _run_fused_2d_pchip(state, recon, mesh, dt, time_dir, layer,
 
 
 
+def _fused_euler_3d_dl_table(vel, mesh, placement):
+    """The element table, the element areas and u/v that the depth-linear
+    twin :func:`_fused_euler_step_3d_dl` reads.
+
+    The field must be element layout (``leastsq`` evaluates no other
+    depth-linear field); it passes the record check unless already checked
+    for the mesh's table (a lazy field through its parents first, so a bad
+    parent is named), and its u/v must have the table's shape ``(M, E)``
+    (no bounds checks inside the kernel).
+    """
+    site = "_run_fused_euler_3d"
+    if getattr(vel, "uv_layout", "element") != "element":
+        _reject_depth_linear(vel, site, _DL_LAYOUT)
+    named = []
+    if hasattr(vel, "vel_a"):
+        named += [("vel.vel_a", vel.vel_a), ("vel.vel_b", vel.vel_b)]
+    named.append(("vel", vel))
+    dp = _fused_3d_dl_table(site, named, mesh, placement, layout="element")
+    u, v = vel.u, vel.v
+    want = (dp.p.size, mesh.n_elements)
+    if (getattr(u, "shape", None) != want
+            or getattr(v, "shape", None) != want):
+        raise ValueError(
+            f"{site}: depth-linear u/v must be (M, E) = {want}, got u "
+            f"{getattr(u, 'shape', None)}, v {getattr(v, 'shape', None)}")
+    return dp, build_elem_areas(mesh), u, v
+
+
 def _run_fused_euler_3d(state, vel, mesh, dt, time_dir, w_interp="leastsq"):
-    """Run the fused 3D Euler kernel and return the new ParticleState."""
+    """Run the fused 3D Euler kernel and return the new ParticleState.
+
+    A ``"layer"`` field runs :func:`_fused_euler_step_3d`; a depth-linear
+    element-layout field (``uv_vertical`` ``"layer_linear"``) its twin
+    :func:`_fused_euler_step_3d_dl` on the element table
+    (:func:`_fused_euler_3d_dl_table`).
+    """
     P = state.n_particles
     alive = state.alive_mask
+    placement = getattr(vel, "uv_vertical", "layer")
+    if placement == "layer":
+        fused_kernel = _fused_euler_step_3d
+        table = ()
+        u_f, v_f = vel.u, vel.v
+    else:
+        fused_kernel = _fused_euler_step_3d_dl
+        dp, areas, u_f, v_f = _fused_euler_3d_dl_table(vel, mesh, placement)
+        table = (dp.p, dp.last, dp.bed, areas)
     z_levels = _get_z_levels(mesh)
 
     w_method = _W_METHOD_MAP.get(w_interp, W_LEASTSQ)
@@ -3396,14 +3577,14 @@ def _run_fused_euler_3d(state, vel, mesh, dt, time_dir, w_interp="leastsq"):
     W_out = np.zeros(P, dtype=np.float64)
     fr_out = np.zeros(P, dtype=np.int8)
 
-    _fused_euler_step_3d(
+    fused_kernel(
         P, state.lon, state.lat, state.z, alive, state.status,
         *_mesh_gh_args(mesh),
         mesh.node_to_elems_count, mesh.node_to_elems,
         mesh.elem_center_lon, mesh.elem_center_lat,
         mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat, _require_node_xyz(mesh),
-        mesh.depth, z_levels,
-        vel.u, vel.v, vel.w,
+        mesh.depth, z_levels, *table,
+        u_f, v_f, vel.w,
         dt, time_dir, w_method,
         lon_out, lat_out, z_out, status_out, nn_out, U_out, V_out, W_out,
         fr_out, _exact_nearest_on(mesh),
@@ -4347,11 +4528,12 @@ def _fused_3d_uv_placement(site, named):
     return placement
 
 
-def _fused_3d_dl_table(site, named, mesh, placement):
+def _fused_3d_dl_table(site, named, mesh, placement, layout="node"):
     """The depth-point table a fused depth-linear kernel reads (``None`` for
     ``"layer"``: nothing is read or built): ``depth_points(mesh,
-    placement)``, whose ``p``, ``last`` and ``bed`` the runners pass after
-    ``z_levels``.
+    placement, layout)`` — the node table for the barycentric RK2 runners,
+    the element table for the Euler runner — whose ``p``, ``last`` and
+    ``bed`` the runners pass after ``z_levels``.
 
     Every field of ``named`` (see :func:`_fused_3d_uv_placement`) passes the
     record check first (``check_depth_linear_record``, skipped when
@@ -4367,7 +4549,7 @@ def _fused_3d_dl_table(site, named, mesh, placement):
         seen.add(id(f))
         if not is_checked(f, mesh):
             check_depth_linear_record(f, mesh, record=f"{label} ({site})")
-    return depth_points(mesh, placement)
+    return depth_points(mesh, placement, layout)
 
 
 #: max KD-heal rounds for flagged stage anchors before the terminal
@@ -5039,13 +5221,15 @@ def euler_step(
             # through to the unfused dispatcher).  Under mesh.exact_nearest
             # it anchors every site through the in-kernel exact search
             # (_fused_site_anchor -> _grid_hash_nearest_exact), like every
-            # other fused kernel; no flag/heal round trip.  It reads raw
-            # u[layer] rows, so a depth-linear field never enters it (the
-            # entry check already refuses leastsq for one; this keeps the
-            # kernel safe on its own).
+            # other fused kernel; no flag/heal round trip.  A "layer" field
+            # runs the layer kernel (raw u[layer] rows), a "layer_linear"
+            # one (element layout, the runner refuses any other) its
+            # depth-linear twin; a "level" field (node layout, which leastsq
+            # does not evaluate) never enters it.
             fused_ok = (not is_sigma_3d and w_interp in ("nearest", "leastsq")
                         and uv_interp == "leastsq"
-                        and getattr(vel, "uv_vertical", "layer") == "layer")
+                        and getattr(vel, "uv_vertical", "layer")
+                        in ("layer", "layer_linear"))
             if fused_ok:
                 result = _run_fused_euler_3d(state, vel, mesh, dt, time_dir,
                                              w_interp=w_interp)

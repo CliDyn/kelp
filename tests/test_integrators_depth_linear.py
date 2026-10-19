@@ -8,7 +8,8 @@ step functions refuse a depth-linear field they cannot serve at entry
 they receive (``vel``, ``vel_next``, each PCHIP snapshot, the raw parents
 of a ``LazyLerpField``).  Fused RK2 on node-layout barycentric data runs the
 depth-linear twins (``tests/test_fused_3d_depth_linear.py``); the fused
-Euler kernel stays layer-only.
+Euler kernel runs element ``leastsq`` fields through its depth-linear twin
+(``tests/test_integrators_depth_linear_elements.py``).
 
 All synthetic: the 3x3 test mesh of ``test_3d_analytical`` with levels
 ``[0, 10, 20, 30, 40]`` m (the fixture of ``test_interp_depth_linear``), and
@@ -400,8 +401,11 @@ _PREFIX = r"^{}_step: depth-linear horizontal velocity \(uv_vertical='level'\) "
 
 @pytest.mark.parametrize("name", ["euler", "rk2", "rk4"])
 def test_direct_default_uv_interp_refused(name):
-    """A direct call with the default ``uv_interp="leastsq"`` (or any
-    other non-barycentric interpolator) is refused at the step entry."""
+    """A direct call on a NODE-layout depth-linear field with the default
+    ``uv_interp="leastsq"`` (or any other non-barycentric interpolator) is
+    refused at the step entry, naming the layout (element layout takes
+    ``leastsq`` and ``edge_leastsq``: the layout table,
+    ``tests/test_integrators_depth_linear_elements.py::test_entry_table``)."""
     mesh = _deep_mesh()
     vel = _deep_field("level", 0.004)
     st = _state()
@@ -410,8 +414,9 @@ def test_direct_default_uv_interp_refused(name):
         STEPS[name](st, vel, mesh, 600.0, 1.0)
     for other in ("leastsq", "edge_leastsq"):
         with pytest.raises(ValueError, match=_PREFIX.format(name)
-                           + rf"needs uv_interp='barycentric', got "
-                             rf"uv_interp='{other}'"):
+                           + r"on node layout \(uv_layout='node'\) needs "
+                             rf"uv_interp='barycentric', got "
+                             rf"uv_interp='{other}'$"):
             STEPS[name](st, vel, mesh, 600.0, 1.0, uv_interp=other,
                         w_interp="barycentric")
 
@@ -440,8 +445,10 @@ def test_sigma_mesh_refused(name):
 
 def test_check_depth_linear_entry_refusals():
     """Every refusal of the helper, in its order: rk45, the mesh, a 3-D
-    field, node layout, the interpolator; then one placement for all
-    fields, whichever side is depth-linear."""
+    field, the layout x interpolator table (node layout: ``barycentric``
+    only; element layout: ``leastsq``, ``edge_leastsq``, ``barycentric``,
+    and its field then meets the element table's rules); then one
+    placement for all fields, whichever side is depth-linear."""
     chk = I._check_depth_linear_entry
     mesh = _deep_mesh()
     sigma = _deep_mesh()
@@ -457,12 +464,20 @@ def test_check_depth_linear_entry_refusals():
                          uv_layout="node", uv_vertical="level")
     with pytest.raises(ValueError, match=pre + r"needs a 3-D field"):
         chk(no_w, mesh, "leastsq", "rk2")
+    # element layout passes the table with leastsq, then meets the element
+    # table's rules: layer-centred data only
     elem = SimpleNamespace(uv_vertical="level", uv_layout="element",
                            u=level.u, v=level.v, w=level.w, eta=level.eta)
-    with pytest.raises(ValueError, match=pre + r"needs node layout "
-                       r"\(uv_layout='node'\), got 'element'"):
+    with pytest.raises(ValueError, match=r"^depth-linear u/v on element "
+                       r"layout is 'layer_linear' only"):
         chk(elem, mesh, "leastsq", "rk2")
-    with pytest.raises(ValueError, match=pre + r"needs uv_interp="
+    with pytest.raises(ValueError, match=pre + r"on element layout "
+                       r"\(uv_layout='element'\) needs uv_interp 'leastsq', "
+                       r"'edge_leastsq' or 'barycentric', got "
+                       r"uv_interp='nearest'"):
+        chk(elem, mesh, "nearest", "rk2")
+    with pytest.raises(ValueError, match=pre + r"on node layout "
+                       r"\(uv_layout='node'\) needs uv_interp="
                        r"'barycentric', got uv_interp='leastsq'"):
         chk(level, mesh, "leastsq", "rk2")
     # mixed placements among the step's fields
@@ -568,20 +583,25 @@ def _spies(monkeypatch, names):
 
 
 @needs_numba
-def test_euler_fused_gate_layer_only(monkeypatch):
-    """Euler's fused 3-D kernel (leastsq u/v on raw layers) is gated on
-    ``uv_vertical == "layer"`` on its own: with the entry check bypassed,
-    a depth-linear field falls to the unfused path, whose leastsq entry
-    refuses it.  Control: an element-layout layer field takes the kernel."""
+def test_euler_fused_gate_placements(monkeypatch):
+    """Euler's fused 3-D kernel (leastsq u/v) is gated on the placement on
+    its own: ``"layer"`` and ``"layer_linear"`` (element layout: the
+    depth-linear twin, ``tests/test_integrators_depth_linear_elements.py``)
+    take the runner; with the entry check bypassed, a node-layout
+    ``"level"`` field falls to the unfused path, whose leastsq entry
+    refuses it."""
     mesh = _deep_mesh()
     calls = _spies(monkeypatch, ("_run_fused_euler_3d",))
     monkeypatch.setattr(I, "_check_depth_linear_entry",
                         lambda *a, **k: None)
-    lay = _layer_field(0.004, layout="element",
-                       n_elem=mesh.elem_nodes.shape[0])
-    with pytest.raises(_Taken):
-        I.euler_step(_state(), lay, mesh, 600.0, 1.0)
-    assert calls == ["_run_fused_euler_3d"]
+    n_elem = mesh.elem_nodes.shape[0]
+    lay = _layer_field(0.004, layout="element", n_elem=n_elem)
+    lin = dataclasses.replace(lay, uv_vertical="layer_linear")
+    for vel in (lay, lin):
+        calls.clear()
+        with pytest.raises(_Taken):
+            I.euler_step(_state(), vel, mesh, 600.0, 1.0)
+        assert calls == ["_run_fused_euler_3d"]
     calls.clear()
     with pytest.raises(ValueError, match=r"^interp_leastsq: depth-linear"):
         I.euler_step(_state(), _deep_field("level", 0.004), mesh, 600.0, 1.0)
