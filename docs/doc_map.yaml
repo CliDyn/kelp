@@ -6,7 +6,7 @@ architecture:
   - src/kelp/core/io.py:VelocityField
   - src/kelp/core/particles.py:ParticleState
   doc: docs/architecture.md
-  verified_at: fce6ff1
+  verified_at: d5d4815
 beaching:
   code:
   - src/kelp/numerics/beaching.py:evaluate_beaching
@@ -15,7 +15,7 @@ beaching:
   - src/kelp/tracking.py:_apply_beaching_hook
   - src/kelp/core/mesh.py:build_boundary_info
   doc: docs/beaching.md
-  verified_at: fce6ff1
+  verified_at: d5d4815
 configuration:
   code:
   - src/kelp/core/config.py:load_config
@@ -27,7 +27,7 @@ configuration:
   - src/kelp/core/config.py:ModeConfig
   - src/kelp/readers/fesom14/reader.py:Fesom14Reader
   doc: docs/configuration.md
-  verified_at: fce6ff1
+  verified_at: d5d4815
 coordinate_frame:
   code:
   - src/kelp/core/rotation.py:euler_matrix
@@ -39,7 +39,7 @@ coordinate_frame:
   - src/kelp/tracking.py:_validate_restart_frame
   - src/kelp/readers/healpix.py:_apply_rotation
   doc: docs/coordinate_frame.md
-  verified_at: fce6ff1
+  verified_at: d5d4815
 dev_config:
   code:
   - src/kelp/core/config.py:load_config
@@ -107,7 +107,7 @@ dev_readers:
   - src/kelp/readers/nemo.py:NemoReader
   - src/kelp/readers/fesom14/
   doc: docs/dev/readers.md
-  verified_at: fce6ff1
+  verified_at: d5d4815
 dev_tracking:
   code:
   - src/kelp/tracking.py:run_tracking
@@ -118,7 +118,7 @@ dev_tracking:
   - src/kelp/tracking.py:_apply_max_levels
   - src/kelp/readers/__init__.py:_prepare_dataset
   doc: docs/dev/tracking.md
-  verified_at: fce6ff1
+  verified_at: d5d4815
 dev_visualization:
   code:
   - src/kelp/visualization/core.py:TrajectoryDataset
@@ -144,7 +144,7 @@ diffusion:
   - src/kelp/numerics/diffusion.py:DiffusionStepArgs
   - src/kelp/tracking.py:_resolve_composition
   doc: docs/diffusion.md
-  verified_at: fce6ff1
+  verified_at: d5d4815
 doc-sync:
   code:
   - docs/check_doc_sync.py
@@ -157,7 +157,7 @@ field_sampling:
   - src/kelp/tracking.py:_sample_record_fields
   - src/kelp/readers/fesom2.py:read_scalar_fields
   doc: docs/field_sampling.md
-  verified_at: fce6ff1
+  verified_at: d5d4815
 healpix:
   code:
   - src/kelp/readers/healpix.py:build_healpix_dual_mesh
@@ -195,7 +195,7 @@ io_and_time:
   - src/kelp/core/release.py:mask_inactive_velocity
   - src/kelp/readers/fesom14/_timeaxis.py:resolve_axis
   doc: docs/io_and_time.md
-  verified_at: fce6ff1
+  verified_at: d5d4815
 localization:
   code:
   - src/kelp/core/mesh.py:Mesh
@@ -219,20 +219,20 @@ performance:
   - src/kelp/core/io.py:LazyLerpField
   - src/kelp/writers.py:TrajectoryWriter
   doc: docs/performance.md
-  verified_at: fce6ff1
+  verified_at: d5d4815
 running:
   code:
   - src/kelp/tracking.py:run_tracking
   - src/kelp/core/config.py:TimeConfig
   - src/kelp/cli/main.py:main
   doc: docs/running.md
-  verified_at: fce6ff1
+  verified_at: d5d4815
 shared_fields:
   code:
   - src/kelp/core/shared_fields.py:SharedFieldCache
   - src/kelp/tracking.py:_shared_fields_tag
   doc: docs/configuration.md
-  verified_at: fce6ff1
+  verified_at: d5d4815
 time_integration:
   code:
   - src/kelp/numerics/integrators.py:euler_step
