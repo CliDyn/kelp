@@ -1,4 +1,5 @@
-"""Depth-linear least-squares u/v on element layout.
+"""Depth-linear u/v on element layout: ``leastsq``, ``edge_leastsq`` and
+element ``barycentric``.
 
 ``interp_leastsq`` dispatches an element-layout ``"layer_linear"`` field to
 the depth-linear twins (``_interp_leastsq_dl`` ->
@@ -9,10 +10,26 @@ to ``p[0] .. p[last_e]``).  An element whose bed lies above the particle is
 a wall and is left out of the fit, as elements beyond the coast are absent
 from a coastal node's ring.  When the wet elements are too few for the
 fit (fewer than three, or a singular fit) the value is their area-weighted
-mean; when no element is wet, the containing element at its last usable
-point.  With every element wet the arithmetic is the layer core's, so a
-singular all-wet ring stays frozen.  A node-layout depth-linear field is
-refused.
+mean; when no element is wet, the containing element read at the
+particle depth (below its own bed too: its last usable point).  With every
+element wet the arithmetic is the layer core's, so a singular all-wet ring
+stays frozen.  A node-layout depth-linear field is refused.
+
+``interp_edge_leastsq`` (``_interp_edge_leastsq_dl`` ->
+``_loop_interp_edge_lsq_3d_dl`` -> ``_interp_edge_leastsq_core_dl``): the
+fit of ``_interp_edge_leastsq_core`` over the containing element and its
+edge neighbours.  A neighbour dry at the particle depth is a boundary edge
+whose ghost ``edge_leastsq_bc`` builds from the own element's value at that
+depth, as for a coastal edge.  A dry containing element: the area-weighted
+mean of its wet edge neighbours, no ghosts; none wet, the containing
+element at its last usable point.
+
+``interp_barycentric`` on element layout (``_interp_barycentric_dl`` ->
+``_loop_interp_bary_elem_dl`` -> ``_interp_bary_elem_core_dl``): each vertex
+value is the area-weighted mean of its wet ring elements at the particle
+depth; a vertex without one is left out and the weights of the others
+renormalised (their equal-weight mean when those weights sum below
+1e-12); no vertex left, the containing element at its last usable point.
 
 All synthetic: the 5x5-node test mesh of ``test_3d_analytical`` (32
 triangles, 0.5 deg spacing, centred at 5E 5N) with levels
@@ -29,8 +46,13 @@ import pytest
 
 from kelp.core.io import LazyLerpField, VelocityField
 from kelp.core.mesh import (
+    Mesh,
     _find_containing_element_local,
     build_elem_areas,
+    build_elem_neighbors,
+    build_node_to_elems,
+    build_search,
+    find_containing_elements_walk,
     find_nearest_nodes,
 )
 from kelp.core.particles import ParticleStatus, make_state
@@ -39,6 +61,7 @@ from kelp.numerics import vertical_uv as vu
 
 from tests._bitwise import assert_bitwise
 from tests.test_3d_analytical import _make_mesh
+from tests.test_interp_depth_linear import _lam
 
 LEVELS = [0.0, 10.0, 30.0, 60.0, 100.0, 150.0]
 #: layer centres (the data points of "layer_linear")
@@ -683,6 +706,807 @@ def test_python_fallback_equals_numba(monkeypatch):
                     mesh.nodes_lon, mesh.nodes_lat, vel.u, vel.v)
             c = ip._interp_leastsq_core_dl(*args)
             p = ip._interp_leastsq_core_dl.py_func(*args)
+            assert_bitwise(np.array(p[:2]), np.array(c[:2]), f"core i={i}")
+            assert p[2] == c[2]
+            if st.alive_mask[i]:
+                assert_bitwise(np.array(c[:2]),
+                               np.array([ref[0][i], ref[1][i]]),
+                               f"core vs wrapper i={i}")
+
+
+# ---------------------------------------------------------------------------
+# leastsq: a containing element outside the ring
+# ---------------------------------------------------------------------------
+
+def _obtuse_mesh():
+    """Two obtuse triangles on the common edge A-B: element 0 =
+    ``[A, B, C]`` above it, element 1 = ``[A, D, B]`` below it, ``D``
+    close to the edge.  A particle in element 0 near the edge has ``D``
+    (node 3) as its nearest node, whose ring is ``[1]``: the containing
+    element lies outside that ring (the 2-ring scan of
+    ``_find_containing_element_local`` finds it).  Beds: element 0 150 m,
+    element 1 30 m."""
+    lon = np.array([5.0, 6.0, 5.5, 5.5])
+    lat = np.array([5.0, 5.0, 5.15, 4.95])
+    en = np.array([[0, 1, 2], [0, 3, 1]], dtype=np.int32)
+    n2e, cnt = build_node_to_elems(lon.size, en)
+    mesh = Mesh(name="obtuse", nodes_lon=lon, nodes_lat=lat,
+                depth=np.full(lon.size, 150.0), elem_nodes=en,
+                elem_center_lon=np.array([lon[e].mean() for e in en]),
+                elem_center_lat=np.array([lat[e].mean() for e in en]),
+                node_to_elems=n2e, node_to_elems_count=cnt,
+                sigma=np.array(LEVELS))
+    build_search(mesh)
+    bed = np.array([150.0, 30.0])
+    mesh.metadata["uv_data_last_elem"] = _geo_last(bed)
+    mesh.metadata["elem_bed"] = bed
+    return mesh
+
+
+def test_all_dry_ring_reads_wet_containing_element_at_z():
+    """The nearest node's ring (element 1, bed 30 m) is dry below 30 m;
+    the containing element 0 lies outside that ring and is wet down to
+    150 m: it is read at the particle depth (``uv_bracket``), not at its
+    last usable point."""
+    mesh = _obtuse_mesh()
+    vel = _linear_field(mesh)
+    dp = _table(mesh)
+    pts = [(5.5, 5.01), (5.45, 5.02), (5.56, 5.015)]
+    for x, y in pts:
+        nd = find_nearest_nodes(mesh, np.array([x]), np.array([y]))[0]
+        assert nd == 3 and _ring(mesh, nd) == [1]
+        assert _containing(mesh, x, y, nd) == (0, True)
+    for td in (1.0, -1.0):
+        for z in (45.0, 52.5, 80.0, 110.0):
+            U, V, ok, _ = _run(mesh, vel, _state(pts, z), td)
+            uz, vz = _values_at(mesh, vel, z)
+            assert ok.all()
+            assert np.all(U == td * uz[0]) and np.all(V == td * vz[0]), z
+            assert np.all(U != td * vel.u[dp.last[0], 0])
+
+
+# ---------------------------------------------------------------------------
+# edge_leastsq
+# ---------------------------------------------------------------------------
+
+BCS = ("freeslip", "noslip")
+
+#: barycentric coordinates of the test points inside one element
+LAMS = np.array([[0.6, 0.2, 0.2], [0.2, 0.6, 0.2], [0.2, 0.2, 0.6],
+                 [0.34, 0.33, 0.33], [0.1, 0.45, 0.45],
+                 [0.45, 0.1, 0.45]])
+
+
+def _pts_in(mesh, e, lams=LAMS):
+    """Points inside element ``e`` at the barycentric coordinates ``lams``
+    of its vertices."""
+    nds = mesh.elem_nodes[e][mesh.elem_nodes[e] >= 0]
+    return [(float(lam @ mesh.nodes_lon[nds]),
+             float(lam @ mesh.nodes_lat[nds])) for lam in lams]
+
+
+def _big_field(mesh, dry, big=1000.0):
+    """The linear field with ``big`` (u) and ``-big`` (v) in the usable
+    points of the elements ``dry`` (finite: the record check passes; any
+    weight they get shows)."""
+    return _efield(
+        mesh,
+        lambda e, p: big + 0.0 * p if e in dry else CU[e] + BU[e] * p,
+        lambda e, p: -big + 0.0 * p if e in dry else CV[e] + BV[e] * p)
+
+
+def _run_edge(mesh, vel, st, td=1.0, bc="freeslip", *, elems=None,
+              layer=0):
+    nn = find_nearest_nodes(mesh, st.lon, st.lat)
+    U, V, ok = ip.interp_edge_leastsq(st, mesh, vel, nn, td, layer, bc=bc,
+                                      elems=elems)
+    return U, V, ok, nn
+
+
+def _layer_edge(mesh, x, y, nd, td, bc, uvals, vvals, absent=()):
+    """The LAYER core ``_interp_edge_leastsq_core`` at ``(x, y)`` (nearest
+    node ``nd``, the core's own containment search) on per-element values;
+    the elements ``absent`` are removed from the edge adjacency, so their
+    edges are boundary edges (a mesh where they are absent, like elements
+    beyond a coast)."""
+    nb = build_elem_neighbors(mesh)
+    if absent:
+        nb = nb.copy()
+        nb[np.isin(nb, list(absent))] = -1
+    return ip._interp_edge_leastsq_core(
+        float(x), float(y), int(nd), -1, float(td), ip._bc_to_int(bc),
+        mesh.node_to_elems, mesh.node_to_elems_count, mesh.elem_nodes,
+        mesh.nodes_lon, mesh.nodes_lat, nb,
+        mesh.elem_center_lon, mesh.elem_center_lat, uvals, vvals)
+
+
+def _edge_members(mesh, e):
+    """The stencil of ``edge_leastsq`` in element ``e``: ``e`` and its
+    edge neighbours."""
+    return [int(e)] + [int(n) for n in build_elem_neighbors(mesh)[e]
+                       if n >= 0]
+
+
+#: (containing element, dry edge neighbours): an interior element with one
+#: wall and with two; a corner element whose only neighbour is dry (every
+#: edge a ghost); a coastal element with a wall
+EDGE_WALL_CASES = [(19, (26,)), (19, (20, 18)), (0, (1,)), (15, (22,))]
+
+
+def _check_dry_neighbour_is_boundary(bc):
+    """Below the 30 m bed of the dry neighbours (1000 m/s in their
+    columns): BITWISE the layer core on a mesh where they are absent —
+    their edges boundary edges, whose ghosts are built from the own
+    element's value at ``z`` — every element at its value at ``z``; at and
+    above that bed: the full stencil, bitwise."""
+    for own, dry in EDGE_WALL_CASES:
+        bed = np.full(32, 150.0)
+        bed[list(dry)] = 30.0
+        mesh = _mesh(bed)
+        assert set(dry) <= set(build_elem_neighbors(mesh)[own].tolist())
+        vel = _big_field(mesh, dry)
+        pts = _pts_in(mesh, own)
+        st = _state(pts, 50.0)
+        nn = find_nearest_nodes(mesh, st.lon, st.lat)
+        for (x, y), nd in zip(pts, nn):
+            assert _containing(mesh, x, y, nd) == (own, True)
+        for td in (1.0, -1.0):
+            for z in (30.5, 45.0, 52.5, 80.0, 125.0, 140.0, 150.0):
+                U, V, ok, nn = _run_edge(mesh, vel, _state(pts, z), td, bc)
+                assert ok.all()
+                uz, vz = _values_at(mesh, vel, z)
+                for i, (x, y) in enumerate(pts):
+                    Ur, Vr, okr = _layer_edge(mesh, x, y, nn[i], td, bc,
+                                              uz, vz, absent=dry)
+                    assert okr
+                    assert_bitwise(np.array([U[i], V[i]]),
+                                   np.array([Ur, Vr]),
+                                   f"{own} {dry} z={z} i={i}")
+                assert np.all(np.abs(U) < 5.0) and np.all(np.abs(V) < 5.0)
+            for z in (5.0, 20.0, 30.0):
+                U, V, ok, nn = _run_edge(mesh, vel, _state(pts, z), td, bc)
+                assert ok.all()
+                uz, vz = _values_at(mesh, vel, z)
+                for i, (x, y) in enumerate(pts):
+                    Ur, Vr, _ = _layer_edge(mesh, x, y, nn[i], td, bc,
+                                            uz, vz)
+                    assert_bitwise(np.array([U[i], V[i]]),
+                                   np.array([Ur, Vr]),
+                                   f"wet {own} {dry} z={z} i={i}")
+                assert np.abs(U).max() > 10.0    # the 1000 m/s is in the fit
+
+
+def test_edge_dry_neighbour_is_boundary_freeslip():
+    """``edge_leastsq_bc: freeslip``: a neighbour dry at ``z`` is a
+    boundary edge with the free-slip ghost (the own value at ``z``
+    mirrored across the edge)."""
+    _check_dry_neighbour_is_boundary("freeslip")
+
+
+def test_edge_dry_neighbour_is_boundary_noslip():
+    """``edge_leastsq_bc: noslip``: a neighbour dry at ``z`` is a boundary
+    edge with the no-slip ghost (the own value at ``z`` negated)."""
+    _check_dry_neighbour_is_boundary("noslip")
+
+
+def test_edge_own_element_dry():
+    """The containing element 19 is dry below 30 m (1000 m/s in its
+    column, never read while dry); its edge neighbours ``[20, 26, 18]``
+    have beds 150, 150 and 40 m and model-provided areas 6:2:1.  The value
+    is the area-weighted mean of the wet neighbours in slot order, no
+    ghosts, for both boundary conditions: 20, 26 and 18 down to 40 m, 20
+    and 26 below.  With every neighbour dry too (beds 50, 50, 40 m),
+    element 19 at its last usable point, also for a NaN depth."""
+    bed = np.full(32, 150.0)
+    bed[19] = 30.0
+    bed[18] = 40.0
+    areas = np.full(32, 2.0e9)
+    areas[20] = 6.0e9
+    areas[18] = 1.0e9
+    mesh = _mesh(bed, areas=areas)
+    assert build_elem_neighbors(mesh)[19, :3].tolist() == [20, 26, 18]
+    vel = _big_field(mesh, (19,))
+    pts = _pts_in(mesh, 19)
+    a18, a20, a26 = areas[18], areas[20], areas[26]
+    for bc in BCS:
+        for td in (1.0, -1.0):
+            for z in (30.5, 35.0, 40.0):
+                U, V, ok, _ = _run_edge(mesh, vel, _state(pts, z), td, bc)
+                uz, vz = _values_at(mesh, vel, z)
+                den = a20 + a26 + a18
+                Ue = td * ((a20 * uz[20] + a26 * uz[26] + a18 * uz[18])
+                           / den)
+                Ve = td * ((a20 * vz[20] + a26 * vz[26] + a18 * vz[18])
+                           / den)
+                assert ok.all()
+                assert np.all(U == Ue) and np.all(V == Ve), (bc, z, U, Ue)
+            for z in (40.5, 52.5, 80.0, 140.0):
+                U, V, ok, _ = _run_edge(mesh, vel, _state(pts, z), td, bc)
+                uz, vz = _values_at(mesh, vel, z)
+                Ue = td * ((a20 * uz[20] + a26 * uz[26]) / (a20 + a26))
+                Ve = td * ((a20 * vz[20] + a26 * vz[26]) / (a20 + a26))
+                assert ok.all()
+                assert np.all(U == Ue) and np.all(V == Ve), (bc, z, U, Ue)
+                assert np.all(np.abs(U - td * 0.5 * (uz[20] + uz[26]))
+                              > 1e-4)
+    bed[[20, 26]] = 50.0
+    mesh = _mesh(bed, areas=areas)
+    vel = _linear_field(mesh)
+    dp = _table(mesh)
+    k19 = int(dp.last[19])
+    assert k19 == 1
+    for bc in BCS:
+        for td in (1.0, -1.0):
+            for z in (50.5, 80.0, 1.0e6, np.nan):
+                U, V, ok, _ = _run_edge(mesh, vel, _state(pts, z), td, bc)
+                assert ok.all()
+                assert np.all(U == td * vel.u[k19, 19]), (bc, z, U)
+                assert np.all(V == td * vel.v[k19, 19]), (bc, z, V)
+                for e in (18, 20, 26):
+                    assert np.all(U != td * vel.u[dp.last[e], e])
+
+
+def _all_elem_points(mesh, lams):
+    pts, own = [], []
+    for e in range(mesh.n_elements):
+        pts += _pts_in(mesh, e, lams)
+        own += [e] * len(lams)
+    return pts, own
+
+
+def test_edge_depth_constant_matches_layer():
+    """A depth-constant field (``c_e`` at every usable point of element
+    ``e``, NaN below ``last_e``; declared prefixes of 2..5 points, every bed
+    150 m: every member wet) gives the layer core's answer on ``c`` in
+    every element, coastal ones with their ghosts, for both boundary
+    conditions: BITWISE wherever every member reads a stored value, and
+    between data points within ``8 ulp`` of ``max|c|`` over the stencil
+    (u and v together: the free-slip ghost mixes the components).
+    Measured worst over the 7,680 evaluations between points (of 16,128;
+    u and v): 3 ulp."""
+    rng = np.random.default_rng(59)
+    decl = rng.integers(1, M, size=32).astype(np.int32)
+    mesh = _mesh(decl=decl)
+    vel = _const_field(mesh)
+    assert np.isnan(vel.u).any()
+    pts, own = _all_elem_points(mesh, LAMS[:3])
+    between = sorted(set(rng.uniform(5.0, 125.0, size=10).tolist())
+                     - set(P.tolist()))
+    for bc in BCS:
+        for td in (1.0, -1.0):
+            for z_set, exact in ((DIRECT_Z, True), (between, False)):
+                for z in z_set:
+                    U, V, ok, nn = _run_edge(mesh, vel, _state(pts, z), td,
+                                             bc)
+                    assert ok.all(), z
+                    for i, (x, y) in enumerate(pts):
+                        Ur, Vr, okr = _layer_edge(mesh, x, y, nn[i], td, bc,
+                                                  CU, CV)
+                        assert okr
+                        if exact:
+                            assert_bitwise(np.array([U[i], V[i]]),
+                                           np.array([Ur, Vr]),
+                                           f"{bc} z={z} i={i}")
+                            continue
+                        mem = _edge_members(mesh, own[i])
+                        ulp = np.spacing(max(np.abs(CU[mem]).max(),
+                                             np.abs(CV[mem]).max()))
+                        du = abs(U[i] - Ur) / ulp
+                        dv = abs(V[i] - Vr) / ulp
+                        assert du <= 8.0 and dv <= 8.0, (bc, z, i, du, dv)
+
+
+def test_edge_linear_in_depth_exact():
+    """``u = a_e + b_e z`` per element (declared prefixes of 2..5 points,
+    every member wet): the layer core on the exact values
+    ``a_e + b_e clip(z, p[0], p[last_e])``, to 1e-12 of the largest
+    stencil value, in every element and for both boundary conditions; the
+    layer answer (every element at the centre of the depth's layer) is
+    not."""
+    rng = np.random.default_rng(61)
+    decl = rng.integers(1, M, size=32).astype(np.int32)
+    mesh = _mesh(decl=decl)
+    vel = _linear_field(mesh)
+    dp = _table(mesh)
+    pts, own = _all_elem_points(mesh, LAMS[:2])
+    for bc in BCS:
+        for td in (1.0, -1.0):
+            for z in rng.uniform(5.0, 140.0, size=8):
+                U, V, ok, nn = _run_edge(mesh, vel, _state(pts, z), td, bc)
+                assert ok.all()
+                zc = np.clip(z, P[0], P[dp.last])
+                ue = CU + BU * zc
+                ve = CV + BV * zc
+                for i, (x, y) in enumerate(pts):
+                    Ur, Vr, okr = _layer_edge(mesh, x, y, nn[i], td, bc,
+                                              ue, ve)
+                    assert okr
+                    mem = _edge_members(mesh, own[i])
+                    tol = 1e-12 * max(np.abs(ue[mem]).max(),
+                                      np.abs(ve[mem]).max())
+                    assert abs(U[i] - Ur) <= tol, (bc, z, i, U[i], Ur)
+                    assert abs(V[i] - Vr) <= tol, (bc, z, i, V[i], Vr)
+    mesh = _mesh()
+    vel = _linear_field(mesh)
+    pts = _pts_in(mesh, 19)
+    ul, vl = _values_at(mesh, vel, 45.0)
+    for bc in BCS:
+        U, V, ok, nn = _run_edge(mesh, vel, _state(pts, 52.5), 1.0, bc)
+        for i, (x, y) in enumerate(pts):
+            Ul, _, _ = _layer_edge(mesh, x, y, nn[i], 1.0, bc, ul, vl)
+            assert abs(U[i] - Ul) > 1e-4, (bc, i, U[i], Ul)
+
+
+def test_edge_singular_with_wall_area_mean():
+    """Element 19's centroid moved onto its edge (17, 16) (lat 5.5), the
+    centroids of its neighbours 20 and 18 onto the same parallel;
+    neighbour 26, across that edge, dry below 30 m.  Its ghost — the own
+    centroid mirrored across the edge — is the centroid itself: every
+    point of the fit lies on one parallel, the fit is singular, and the
+    value is the area-weighted mean of the wet members in stencil order
+    (19, 20, 18).  With 26 wet the same centroids give a regular fit: the
+    layer core, bitwise."""
+    bed = np.full(32, 150.0)
+    bed[26] = 30.0
+    mesh = _mesh(bed)
+    lat = mesh.elem_center_lat.copy()
+    lat[[18, 19, 20]] = 5.5
+    mesh.elem_center_lat = lat
+    vel = _linear_field(mesh)
+    areas = build_elem_areas(mesh)
+    pts = _pts_in(mesh, 19)
+    for bc in BCS:
+        for td in (1.0, -1.0):
+            U, V, ok, nn = _run_edge(mesh, vel, _state(pts, 80.0), td, bc)
+            assert ok.all()
+            uz, vz = _values_at(mesh, vel, 80.0)
+            for i, (x, y) in enumerate(pts):
+                _, _, okr = _layer_edge(mesh, x, y, nn[i], td, bc, uz, vz,
+                                        absent=(26,))
+                assert not okr                 # the fit alone would freeze
+            num_u = num_v = den = 0.0
+            for e in (19, 20, 18):
+                num_u += areas[e] * uz[e]
+                num_v += areas[e] * vz[e]
+                den += areas[e]
+            assert np.all(U == td * (num_u / den)), (bc, U)
+            assert np.all(V == td * (num_v / den)), (bc, V)
+            U, V, ok, nn = _run_edge(mesh, vel, _state(pts, 20.0), td, bc)
+            assert ok.all()
+            uz, vz = _values_at(mesh, vel, 20.0)
+            for i, (x, y) in enumerate(pts):
+                Ur, Vr, okr = _layer_edge(mesh, x, y, nn[i], td, bc, uz, vz)
+                assert okr
+                assert_bitwise(np.array([U[i], V[i]]), np.array([Ur, Vr]),
+                               f"all wet {bc} i={i}")
+
+
+def test_walk_equals_local_in_trench():
+    """A trench one cell row wide (elements 16..23, bed 150 m; every other
+    element 30 m): below 30 m the off-trench neighbours of each trench
+    element are walls.  The containing elements the edge walk tracks
+    (walked from element 0 across the walls, or from the right element)
+    give the bits of the local search, both boundary conditions, both
+    directions."""
+    bed = np.full(32, 30.0)
+    bed[16:24] = 150.0
+    mesh = _mesh(bed)
+    vel = _linear_field(mesh)
+    pts, local = [], []
+    for e in range(16, 24):
+        pts += _pts_in(mesh, e, LAMS[:3])
+        local += [e] * 3
+    local = np.array(local, dtype=np.int32)
+    lons = np.array([x for x, _ in pts])
+    lats = np.array([y for _, y in pts])
+    walks = []
+    for start in (np.zeros(local.size, dtype=np.int32), local.copy()):
+        el, inside = find_containing_elements_walk(mesh, lons, lats, start)
+        assert inside.all()
+        assert_bitwise(np.asarray(el, dtype=np.int32), local, "walk")
+        walks.append(el)
+    for bc in BCS:
+        for td in (1.0, -1.0):
+            for z in (20.0, 52.5, 80.0, 140.0):
+                st = _state(pts, z)
+                ref = _run_edge(mesh, vel, st, td, bc)
+                assert ref[2].all()
+                for el in walks:
+                    got = _run_edge(mesh, vel, st, td, bc, elems=el)
+                    for a, b, name in zip(got[:3], ref[:3], ("U", "V", "ok")):
+                        assert_bitwise(a, b, f"{name} {bc} td={td} z={z}")
+                if z > 30.0:                   # the walls are in effect
+                    uz, vz = _values_at(mesh, vel, z)
+                    full = np.array([
+                        _layer_edge(mesh, x, y, ref[3][i], td, bc, uz, vz)[0]
+                        for i, (x, y) in enumerate(pts)])
+                    assert np.any(np.abs(ref[0] - full) > 1e-6)
+
+
+# ---------------------------------------------------------------------------
+# barycentric, element layout
+# ---------------------------------------------------------------------------
+
+def _run_bary(mesh, vel, st, td=1.0, *, elems=None, layer=0):
+    nn = find_nearest_nodes(mesh, st.lon, st.lat)
+    U, V, ok = ip.interp_barycentric(st, mesh, vel, nn, td, layer,
+                                     elems=elems)
+    return U, V, ok, nn
+
+
+def _layer_bary(mesh, x, y, nd, td, uvals, vvals, absent=(), hint=-1):
+    """The LAYER core ``_interp_barycentric_core`` (element layout) at
+    ``(x, y)`` on per-element values; the elements ``absent`` are removed
+    from every vertex ring, the order of the others kept (a mesh where
+    they are absent); ``hint`` is the containing element (``-1``: the
+    core's own search)."""
+    n2e = mesh.node_to_elems
+    cnt = mesh.node_to_elems_count
+    if absent:
+        n2e = np.full_like(n2e, -1)
+        cnt = cnt.copy()
+        for k in range(mesh.n_nodes):
+            ring = [e for e in _ring(mesh, k) if e not in absent]
+            n2e[k, :len(ring)] = ring
+            cnt[k] = len(ring)
+    return ip._interp_barycentric_core(
+        float(x), float(y), int(nd), int(hint), float(td),
+        ip.UV_LAYOUT_ELEMENT, n2e, cnt, mesh.elem_nodes, mesh.nodes_lon,
+        mesh.nodes_lat, build_elem_areas(mesh), uvals, vvals, mesh.r_earth)
+
+
+def _vertex_mean(mesh, vel, nd, z):
+    """Vertex ``nd``'s value at ``z`` by hand: the area-weighted mean of its
+    wet ring elements in ring order (the kernel's summation); ``None``
+    when none is wet."""
+    bed = _table(mesh).bed
+    areas = build_elem_areas(mesh)
+    uz, vz = _values_at(mesh, vel, z)
+    zq = np.inf if np.isnan(z) else z
+    wet = [e for e in _ring(mesh, nd) if zq <= bed[e]]
+    if not wet:
+        return None
+    num_u = num_v = den = 0.0
+    for e in wet:
+        num_u += areas[e] * uz[e]
+        num_v += areas[e] * vz[e]
+        den += areas[e]
+    return num_u / den, num_v / den
+
+
+def _bary_members(mesh, e):
+    """Every element in the rings of element ``e``'s vertices."""
+    return sorted({m for nd in mesh.elem_nodes[e] if nd >= 0
+                   for m in _ring(mesh, int(nd))})
+
+
+def test_bary_elem_dry_ring_member():
+    """Element 13 (in the rings of vertices 12 and 13) has its bed at
+    30 m and 1000 m/s in its column.  Below 30 m it is left out of each
+    vertex mean: BITWISE the layer core on a mesh where it is absent from
+    the rings (the same containing element), every element at its value at
+    ``z``; at and above its bed it is in the means."""
+    mesh = _wall_mesh()
+    vel = _wall_field(mesh)
+    pts = _pts_in(mesh, 19) + _pts_in(mesh, 20)
+    st = _state(pts, 50.0)
+    nn = find_nearest_nodes(mesh, st.lon, st.lat)
+    hints = [_containing(mesh, x, y, nd) for (x, y), nd in zip(pts, nn)]
+    assert hints == [(19, True)] * 6 + [(20, True)] * 6
+    for td in (1.0, -1.0):
+        for z in (30.5, 45.0, 52.5, 80.0, 125.0, 140.0, 150.0):
+            U, V, ok, nn = _run_bary(mesh, vel, _state(pts, z), td)
+            assert ok.all()
+            uz, vz = _values_at(mesh, vel, z)
+            for i, (x, y) in enumerate(pts):
+                Ur, Vr, okr = _layer_bary(mesh, x, y, nn[i], td, uz, vz,
+                                          absent=(13,), hint=hints[i][0])
+                assert okr
+                assert_bitwise(np.array([U[i], V[i]]), np.array([Ur, Vr]),
+                               f"z={z} i={i}")
+            assert np.all(np.abs(U) < 2.0)
+        for z in (5.0, 20.0, 30.0):
+            U, V, ok, nn = _run_bary(mesh, vel, _state(pts, z), td)
+            uz, vz = _values_at(mesh, vel, z)
+            for i, (x, y) in enumerate(pts):
+                Ur, Vr, _ = _layer_bary(mesh, x, y, nn[i], td, uz, vz)
+                assert_bitwise(np.array([U[i], V[i]]), np.array([Ur, Vr]),
+                               f"wet z={z} i={i}")
+            assert np.abs(U).max() > 10.0      # the 1000 m/s is in the means
+
+
+def test_bary_elem_vertex_without_wet_element():
+    """Every element around vertex 12 has its bed at 30 m (the others
+    150 m; unequal model-provided areas).  Below 30 m vertex 12 has no wet
+    element: it is left out and the barycentric weights of the other two
+    vertices renormalised, each of them the area-weighted mean of its wet
+    ring elements (1e-13 of the largest vertex value: the hand weights
+    are computed in degrees); at 30 m (every element wet) the layer core,
+    bitwise."""
+    bed = np.full(32, 150.0)
+    bed[RING] = 30.0
+    areas = np.random.default_rng(67).uniform(1.0e9, 5.0e9, size=32)
+    mesh = _mesh(bed, areas=areas)
+    vel = _linear_field(mesh)
+    for own in (19, 18, 11):
+        tri = [int(nd) for nd in mesh.elem_nodes[own]]
+        assert CENTRE in tri
+        pts = _pts_in(mesh, own)
+        for td in (1.0, -1.0):
+            for z in (30.5, 45.0, 80.0, 140.0):
+                U, V, ok, _ = _run_bary(mesh, vel, _state(pts, z), td)
+                assert ok.all()
+                vals = {nd: _vertex_mean(mesh, vel, nd, z) for nd in tri}
+                assert vals[CENTRE] is None
+                wet = [nd for nd in tri if nd != CENTRE]
+                scale = max(abs(c) for nd in wet for c in vals[nd])
+                for i, (x, y) in enumerate(pts):
+                    lam = dict(zip(tri, _lam(mesh, tri, x, y)))
+                    ws = sum(lam[nd] for nd in wet)
+                    ue = td * sum(lam[nd] * vals[nd][0] for nd in wet) / ws
+                    ve = td * sum(lam[nd] * vals[nd][1] for nd in wet) / ws
+                    assert abs(U[i] - ue) <= 1e-13 * scale, (own, z, i)
+                    assert abs(V[i] - ve) <= 1e-13 * scale, (own, z, i)
+            U, V, ok, nn = _run_bary(mesh, vel, _state(pts, 30.0), td)
+            uz, vz = _values_at(mesh, vel, 30.0)
+            for i, (x, y) in enumerate(pts):
+                Ur, Vr, _ = _layer_bary(mesh, x, y, nn[i], td, uz, vz)
+                assert_bitwise(np.array([U[i], V[i]]), np.array([Ur, Vr]),
+                               f"all wet {own} i={i}")
+
+
+def test_bary_elem_at_dry_vertex_equal_mean():
+    """A particle exactly ON vertex 12, whose ring is dry (beds 30 m;
+    particle at 45..140 m): the weights of the other two vertices of the
+    containing element sum to zero, so the value is the equal-weight mean
+    of their values — each the area-weighted mean of its wet ring elements
+    (unequal model-provided areas and velocities)."""
+    bed = np.full(32, 150.0)
+    bed[RING] = 30.0
+    areas = np.random.default_rng(71).uniform(1.0e9, 5.0e9, size=32)
+    mesh = _mesh(bed, areas=areas)
+    vel = _linear_field(mesh)
+    x, y = float(mesh.nodes_lon[CENTRE]), float(mesh.nodes_lat[CENTRE])
+    e, inside = _containing(mesh, x, y, CENTRE)
+    assert inside
+    others = [int(nd) for nd in mesh.elem_nodes[e] if nd != CENTRE]
+    assert len(others) == 2
+    for td in (1.0, -1.0):
+        for z in (45.0, 52.5, 80.0, 140.0):
+            U, V, ok, nn = _run_bary(mesh, vel, _state([(x, y)], z), td)
+            assert ok[0] and nn[0] == CENTRE
+            (ua, va), (ub, vb) = (_vertex_mean(mesh, vel, nd, z)
+                                  for nd in others)
+            assert U[0] == td * ((ua + ub) / 2.0), (z, U[0])
+            assert V[0] == td * ((va + vb) / 2.0), (z, V[0])
+            # the area weights matter: the plain mean differs
+            uz, _ = _values_at(mesh, vel, z)
+            wet_a = [m for m in _ring(mesh, others[0]) if m not in RING]
+            assert abs(ua - np.mean(uz[wet_a])) > 1e-6
+
+
+def test_bary_elem_all_rings_dry_reads_containing_element():
+    """Every element around the vertices of element 19 is shallower than
+    the particle; the deepest of them is 28 (60 m), element 19 itself
+    35 m: no vertex is left, so the value is element 19 at its last usable
+    point (unequal last-point values), also for a NaN depth."""
+    members = _bary_members(_mesh(), 19)
+    bed = np.full(32, 150.0)
+    bed[members] = np.linspace(26.0, 58.0, len(members))
+    bed[19] = 35.0
+    bed[28] = 60.0
+    mesh = _mesh(bed)
+    vel = _linear_field(mesh)
+    dp = _table(mesh)
+    pts = _pts_in(mesh, 19)
+    assert members[int(np.argmax(bed[members]))] == 28
+    k19 = int(dp.last[19])
+    assert k19 == 1 and dp.last[28] == 2
+    for td in (1.0, -1.0):
+        for z in (60.5, 80.0, 1.0e6, np.nan):
+            U, V, ok, _ = _run_bary(mesh, vel, _state(pts, z), td)
+            assert ok.all()
+            assert np.all(U == td * vel.u[k19, 19]), (z, U)
+            assert np.all(V == td * vel.v[k19, 19]), (z, V)
+            assert np.all(U != td * vel.u[dp.last[28], 28])
+
+
+def test_bary_elem_depth_constant_matches_layer():
+    """A depth-constant field (declared prefixes of 2..5 points, every bed
+    150 m: every member wet) gives the layer core's answer on ``c`` in
+    every element: BITWISE wherever every member reads a stored value, and
+    between data points within ``4 ulp`` of ``max|c|`` over the vertex
+    rings — the vertex value is an area mean inside the barycentric sum, a
+    two-level sum (node layout: one level, ``2 ulp``); in the worst case
+    seen, one element's blend ``(1 - a) c + a c`` 1 ulp off moved its
+    vertex mean by 2 ulp and the sum by 3.
+    Measured worst over the 3,840 evaluations between points (of 8,064;
+    u and v): 2 ulp; over 40 further seeds: 3 ulp, in 4 of 122,880
+    values."""
+    rng = np.random.default_rng(73)
+    decl = rng.integers(1, M, size=32).astype(np.int32)
+    mesh = _mesh(decl=decl)
+    vel = _const_field(mesh)
+    pts, own = _all_elem_points(mesh, LAMS[:3])
+    between = sorted(set(rng.uniform(5.0, 125.0, size=10).tolist())
+                     - set(P.tolist()))
+    for td in (1.0, -1.0):
+        for z_set, exact in ((DIRECT_Z, True), (between, False)):
+            for z in z_set:
+                U, V, ok, nn = _run_bary(mesh, vel, _state(pts, z), td)
+                assert ok.all(), z
+                for i, (x, y) in enumerate(pts):
+                    Ur, Vr, okr = _layer_bary(mesh, x, y, nn[i], td, CU, CV)
+                    assert okr
+                    if exact:
+                        assert_bitwise(np.array([U[i], V[i]]),
+                                       np.array([Ur, Vr]), f"z={z} i={i}")
+                        continue
+                    mem = _bary_members(mesh, own[i])
+                    du = abs(U[i] - Ur) / np.spacing(np.abs(CU[mem]).max())
+                    dv = abs(V[i] - Vr) / np.spacing(np.abs(CV[mem]).max())
+                    assert du <= 4.0 and dv <= 4.0, (z, i, du, dv)
+
+
+# ---------------------------------------------------------------------------
+# edge_leastsq and element barycentric: regimes, dispatch, fallback
+# ---------------------------------------------------------------------------
+
+#: the depth-linear entries of the two sections above
+KINDS = ["edge_freeslip", "edge_noslip", "barycentric"]
+
+
+def _run_kind(kind, mesh, vel, st, td=1.0, *, layer=0, elems=None):
+    if kind == "barycentric":
+        return _run_bary(mesh, vel, st, td, elems=elems, layer=layer)
+    return _run_edge(mesh, vel, st, td, kind.split("_")[1], elems=elems,
+                     layer=layer)
+
+
+def _kind_regimes(kind, mesh, st, nn):
+    """Counts of alive particles inside the mesh by regime.  Edge: every
+    stencil element wet; the own element wet and a wall; the own element
+    dry and a neighbour wet; none wet.  Barycentric: every ring element
+    wet; a dry ring element but every vertex wet; a vertex left out; no
+    vertex left."""
+    bed = _table(mesh).bed
+    nb = build_elem_neighbors(mesh)
+    out = {}
+    for i in np.flatnonzero(st.alive_mask):
+        e, inside = _containing(mesh, st.lon[i], st.lat[i], nn[i])
+        if not inside:
+            continue
+        zq = np.inf if np.isnan(st.z[i]) else st.z[i]
+        if kind == "barycentric":
+            rings = [[zq <= bed[m] for m in _ring(mesh, int(nd))]
+                     for nd in mesh.elem_nodes[e] if nd >= 0]
+            key = ("all_wet" if all(all(r) for r in rings)
+                   else "dry_member" if all(any(r) for r in rings)
+                   else "vertex_out" if any(any(r) for r in rings)
+                   else "all_dry")
+        else:
+            wet = [zq <= bed[m] for m in nb[e] if m >= 0]
+            if zq <= bed[e]:
+                key = "all_wet" if all(wet) else "wall"
+            else:
+                key = "own_dry" if any(wet) else "all_dry"
+        out[key] = out.get(key, 0) + 1
+    return out
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_new_cores_nan_below_last_never_read(kind):
+    """NaN below each element's last usable point never reaches a result:
+    the same field with +inf / 1e300 below ``last`` gives the same bits
+    over particles in every regime (walls, both fallbacks, NaN depth,
+    outside the mesh)."""
+    mesh = _mixed_mesh()
+    vel_nan = _linear_field(mesh)
+    vel_inf = _linear_field(mesh, below=np.inf)
+    vel_big = _linear_field(mesh, below=1.0e300)
+    st = _mixed_state()
+    nn = find_nearest_nodes(mesh, st.lon, st.lat)
+    regimes = _kind_regimes(kind, mesh, st, nn)
+    assert len(regimes) == 4 and min(regimes.values()) >= 10, regimes
+    for td in (1.0, -1.0):
+        ref = _run_kind(kind, mesh, vel_nan, st, td)[:3]
+        assert ref[2].sum() > 200
+        assert np.all(np.isfinite(ref[0])) and np.all(np.isfinite(ref[1]))
+        for other in (vel_inf, vel_big):
+            got = _run_kind(kind, mesh, other, st, td)[:3]
+            for a, b, name in zip(got, ref, ("U", "V", "ok")):
+                assert_bitwise(a, b, f"{name} td={td}")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_new_cores_dispatch(kind):
+    """The layer argument is ignored (scalar or per particle), each
+    particle is read at ``state.z``, dead particles get zeros and
+    ``ok = False``, a lazy blend of two fields is read like the eager one,
+    and pre-validated containing elements (``elems=``; ``-1`` = search)
+    give the bits of the search."""
+    mesh = _mixed_mesh()
+    vel = _linear_field(mesh)
+    st = _mixed_state()
+    ref = _run_kind(kind, mesh, vel, st)
+    assert not ref[2][3] and ref[0][3] == 0.0 and ref[1][17] == 0.0
+    for layer in (3, np.full(st.n_particles, 2, dtype=np.int32)):
+        got = _run_kind(kind, mesh, vel, st, layer=layer)
+        for a, b, name in zip(got[:3], ref[:3], ("U", "V", "ok")):
+            assert_bitwise(a, b, f"{name} layer={layer!r}")
+    lazy = LazyLerpField(vel, _linear_field(mesh), 0.5)
+    got = _run_kind(kind, mesh, lazy, st)
+    for a, b, name in zip(got[:3], ref[:3], ("U", "V", "ok")):
+        assert_bitwise(a, b, f"{name} lazy")
+    nn = ref[3]
+    elems = np.array([_containing(mesh, st.lon[i], st.lat[i], nn[i])[0]
+                      for i in range(st.n_particles)], dtype=np.int32)
+    assert (elems >= 0).sum() > 200
+    elems[::4] = -1
+    got = _run_kind(kind, mesh, vel, st, elems=elems)
+    for a, b, name in zip(got[:3], ref[:3], ("U", "V", "ok")):
+        assert_bitwise(a, b, f"{name} elems")
+    deep = _mesh()
+    U2 = _run_kind(kind, deep, _linear_field(deep),
+                   _state([CENTRE_PTS[0]] * 2, [45.0, 52.5]))[0]
+    assert abs(U2[1] - U2[0]) > 1e-4
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_new_cores_record_checked(kind):
+    """A non-finite value at a usable point is refused, naming the
+    element; a passing field is stamped as checked for the table."""
+    mesh = _mesh()
+    vel = _linear_field(mesh)
+    vel.u[2, 13] = np.nan
+    st = _state(CENTRE_PTS, 50.0)
+    with pytest.raises(ValueError, match=r"u = nan is non-finite at element "
+                                         r"13, point 2"):
+        _run_kind(kind, mesh, vel, st)
+    good = _linear_field(mesh)
+    assert not vu.is_checked(good, mesh)
+    _run_kind(kind, mesh, good, st)
+    assert vu.is_checked(good, mesh)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_new_cores_python_fallback_equals_numba(kind, monkeypatch):
+    """The pure-Python core (``.py_func``) and the wrapper's no-Numba loop
+    give the compiled bits in every regime."""
+    mesh = _mixed_mesh()
+    vel = _linear_field(mesh)
+    st = _mixed_state()
+    nn = find_nearest_nodes(mesh, st.lon, st.lat)
+    dp = _table(mesh)
+    areas = build_elem_areas(mesh)
+    nb = build_elem_neighbors(mesh)
+    for td in (1.0, -1.0):
+        ref = _run_kind(kind, mesh, vel, st, td)[:3]
+        with monkeypatch.context() as mp:
+            mp.setattr(ip, "HAS_NUMBA", False)
+            got = _run_kind(kind, mesh, vel, st, td)[:3]
+        for a, b, name in zip(got, ref, ("U", "V", "ok")):
+            assert_bitwise(a, b, f"{name} wrapper td={td}")
+        for i in range(st.n_particles):
+            head = (float(st.lon[i]), float(st.lat[i]), float(st.z[i]),
+                    int(nn[i]), -1, td)
+            if kind == "barycentric":
+                core = ip._interp_bary_elem_core_dl
+                args = head + (
+                    mesh.node_to_elems, mesh.node_to_elems_count,
+                    mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat,
+                    dp.p, dp.last, dp.bed, areas, vel.u, vel.v,
+                    mesh.r_earth)
+            else:
+                core = ip._interp_edge_leastsq_core_dl
+                args = head + (
+                    ip._bc_to_int(kind.split("_")[1]),
+                    mesh.node_to_elems, mesh.node_to_elems_count,
+                    mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat, nb,
+                    mesh.elem_center_lon, mesh.elem_center_lat,
+                    dp.p, dp.last, dp.bed, areas, vel.u, vel.v)
+            c = core(*args)
+            p = core.py_func(*args)
             assert_bitwise(np.array(p[:2]), np.array(c[:2]), f"core i={i}")
             assert p[2] == c[2]
             if st.alive_mask[i]:

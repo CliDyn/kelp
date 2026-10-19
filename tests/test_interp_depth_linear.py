@@ -716,9 +716,9 @@ _LAYOUT = ("on node layout (uv_layout='node') needs uv_interp='barycentric'; "
 def test_other_interpolators_refuse(placement):
     """Each entry refuses before any slicing: ``layer=7`` is out of range
     for the field's rows, so a slice would raise IndexError (and the
-    edge entries' node-layout refusal would come first).  ``leastsq``
-    evaluates element-layout depth-linear u/v and refuses this node field
-    by its layout."""
+    edge entries' node-layout refusal would come first).  ``leastsq`` and
+    ``edge_leastsq`` evaluate element-layout depth-linear u/v and refuse
+    this node field by its layout, for both ``edge_leastsq_bc`` values."""
     mesh = _mesh()
     vel = _field(placement)
     st = _state(DEEP_PTS, 5.0)
@@ -737,11 +737,11 @@ def test_other_interpolators_refuse(placement):
          lambda: ip.interp_leastsq_single(4.3, 4.2, 7, mesh, vel, 0)),
         ("interp_nearest_element", _NEEDS_BARY,
          lambda: ip.interp_nearest_element(elem_ids, vel, 7)),
-        ("interp_edge_leastsq", _NEEDS_BARY,
+        ("interp_edge_leastsq", _LAYOUT,
          lambda: ip.interp_edge_leastsq(st, mesh, vel, nn, 1.0, 7)),
         ("interp_edge_leastsq_single", _NO_DEPTH,
          lambda: ip.interp_edge_leastsq_single(4.3, 4.2, 7, mesh, vel, 0)),
-        ("interp_edge_leastsq", _NEEDS_BARY,
+        ("interp_edge_leastsq", _LAYOUT,
          lambda: ip.get_interpolator("edge_leastsq", "noslip")(
              st, mesh, vel, nn, 1.0, 7)),
         ("interp_leastsq", _LAYOUT,

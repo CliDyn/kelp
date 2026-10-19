@@ -570,13 +570,14 @@ def _interp_leastsq_core_fortran(
 
 # ---------------------------------------------------------------------------
 # Depth-linear u/v (uv_vertical "level" / "layer_linear"): the vectorised
-# barycentric interpolator evaluates node layout (interp_barycentric ->
-# _interp_barycentric_dl), the vectorised leastsq interpolator element
-# layout (interp_leastsq -> _interp_leastsq_dl); every other entry, and
-# these two for the other layout, refuses it before any slicing.
+# barycentric interpolator evaluates both layouts (interp_barycentric ->
+# _interp_barycentric_dl), the vectorised leastsq and edge_leastsq
+# interpolators element layout (interp_leastsq -> _interp_leastsq_dl,
+# interp_edge_leastsq -> _interp_edge_leastsq_dl); every other entry, and
+# these two for node layout, refuses it before any slicing.
 # ---------------------------------------------------------------------------
 
-#: refusal reason of the edge_leastsq / nearest-element entries
+#: refusal reason of the nearest-element entry
 _DL_NEEDS_BARYCENTRIC = "needs uv_interp='barycentric'"
 #: refusal reason of the element-layout interpolators for a node field
 _DL_LAYOUT = ("on node layout (uv_layout='node') needs "
@@ -821,19 +822,23 @@ def _dl_elem_wet_mean(members, n, zq, own, time_dir, p, last, bed,
 
     The fallback of the depth-linear element-layout interpolators when
     their wet members cannot support the interpolator (too few, or a
-    singular fit), and when no member is wet.  An element ``e`` (entries
-    ``< 0`` are skipped) is wet at depth ``zq`` when
-    ``uv_wet(bed, e, zq)`` and reads its depth-linear value there
-    (``uv_bracket(p, last[e], zq)``, ``uv_at``).  The result is
-    ``time_dir * sum(A_e u_e) / sum(A_e)`` over the wet members in the
-    order given, ``A_e = elem_areas[e]``
+    singular fit), and when no member is wet; the vertex value of the
+    element-layout barycentric twin.  An element ``e`` (entries ``< 0``
+    are skipped) is wet at depth ``zq`` when ``uv_wet(bed, e, zq)`` and
+    reads its depth-linear value there (``uv_bracket(p, last[e], zq)``,
+    ``uv_at``).  The result is ``time_dir * sum(A_e u_e) / sum(A_e)`` over
+    the wet members in the order given, ``A_e = elem_areas[e]``
     (:func:`kelp.core.mesh.build_elem_areas`).
 
     No member wet: the element ``own`` (the particle's containing element)
-    at its last usable point, ``time_dir * u_f[last[own], own]``; ``own < 0``
-    (no containing element, or none asked for) gives ``ok = False``.  Wet
-    members whose areas sum to zero or less: ``ok = False``.  A NaN ``zq``
-    is read as ``+inf``: dry wherever the bed is finite.
+    read at ``zq`` with ``uv_bracket(p, last[own], zq)`` — its last usable
+    point when it is dry too (``zq`` below its bed, so below
+    ``p[last[own]]``), its value at ``zq`` when it lies outside the members
+    and is wet (``leastsq``'s containing element from the 2-ring search);
+    ``own < 0`` (no containing element, or none asked for) gives
+    ``ok = False``.  Wet members whose areas sum to zero or less:
+    ``ok = False``.  A NaN ``zq`` is read as ``+inf``: dry wherever the bed
+    is finite.
 
     Parameters
     ----------
@@ -882,8 +887,9 @@ def _dl_elem_wet_mean(members, n, zq, own, time_dir, p, last, bed,
     if n_wet == 0:
         if own < 0:
             return 0.0, 0.0, False
-        return (time_dir * uv_at(u_f, own, last[own], -1.0),
-                time_dir * uv_at(v_f, own, last[own], -1.0), True)
+        kb, ab = uv_bracket(p, last[own], zq)
+        return (time_dir * uv_at(u_f, own, kb, ab),
+                time_dir * uv_at(v_f, own, kb, ab), True)
     if not den > 0.0:
         return 0.0, 0.0, False
     return time_dir * (num_u / den), time_dir * (num_v / den), True
@@ -930,8 +936,9 @@ def _interp_leastsq_core_dl(
     (:func:`_dl_elem_wet_mean`).  None wet (the particle below every bed
     of the ring): the containing element
     (:func:`~kelp.core.mesh._find_containing_element_local`, searched in
-    this case only) at its last usable point; outside the mesh
-    ``ok = False``.  A wet element below ``p[last[e]]`` (a partial bottom
+    this case only) read at ``z`` — its last usable point, since it is dry
+    too unless the 2-ring search found it outside the ring; outside the
+    mesh ``ok = False``.  A wet element below ``p[last[e]]`` (a partial bottom
     layer, a ``max_levels`` cut, a declared prefix) reads its last usable
     point.
 
@@ -2050,6 +2057,175 @@ def _interp_barycentric_core_pchip4_dl(xp, yp, nn_node, z, time_dir,
     return time_dir * U, time_dir * V, True
 
 
+# ---------------------------------------------------------------------------
+# Depth-linear twin (uv_vertical "layer_linear", element layout): the
+# geometry of _interp_barycentric_core, each vertex value the area-weighted
+# mean of the ring elements wet at the particle depth (_dl_elem_wet_mean);
+# a vertex without one is a wall, left out like a dry vertex of the node
+# layout.
+# ---------------------------------------------------------------------------
+
+@njit(cache=True)
+def _interp_bary_elem_core_dl(xp, yp, z, nn_node, elem_hint, time_dir,
+                              node_to_elems, node_to_elems_count,
+                              elem_nodes, nodes_lon, nodes_lat,
+                              p, last, bed, elem_areas, u_f, v_f, r_earth):
+    """Depth-linear vertex-barycentric u/v at one point (element layout).
+
+    Containment search (1-ring, then the 2-ring fallback of
+    ``_find_containing_element_local``), the ``elem_hint`` shortcut, the
+    compacted vertex ring, the centroid-anchored metric projection and
+    ``_polygon_weights`` are those of :func:`_interp_barycentric_core`.
+    The vertex value differs: at vertex ``nd``, the area-weighted mean of
+    the elements around it (``node_to_elems``) that are wet at ``z``, each
+    read linearly in depth between its own layer centres
+    (``uv_bracket(p, last[e], z)``, ``uv_at``; a point below ``last[e]``
+    is never read) — :func:`_dl_elem_wet_mean`, the summation of the layer
+    kernel's vertex mean.
+
+    Walls at depth: an element whose bed lies above ``z``
+    (``z > bed[e]``) is dry and left out of each vertex mean, as elements
+    beyond a coast are absent from a coastal vertex's ring.  A vertex with
+    no wet element is left out and the weights of the others renormalised
+    (their equal-weight mean when those weights sum below 1e-12: the
+    particle on that vertex).  Every element wet: the layer kernel's
+    arithmetic; every vertex with a wet element: the plain barycentric
+    sum.  No vertex left (the particle below every bed around the
+    element): the containing element, dry too, at its last usable point.
+    A vertex whose wet elements' areas sum to zero or less gives
+    ``ok = False``, as in the layer kernel.
+
+    ``z`` is the particle depth (m, positive down, as ``state.z``).  A NaN
+    ``z`` is read as ``+inf``: dry wherever the bed is finite.
+
+    ``p`` (``(M,)``), ``last`` and ``bed`` (``(E,)``, positive down) are
+    the element table of :func:`kelp.numerics.vertical_uv.depth_points`;
+    ``elem_areas`` is ``(E,)`` (:func:`kelp.core.mesh.build_elem_areas`);
+    ``u_f``/``v_f`` are ``(M, E)``.  Returns ``(U, V, ok)``.
+    """
+    if elem_hint >= 0:
+        elem_id = int(elem_hint)
+    else:
+        elem_id, in_dom = _find_containing_element_local(
+            xp, yp, nn_node, node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat)
+        if not in_dom:
+            return 0.0, 0.0, False
+    max_v = elem_nodes.shape[1]
+    verts = np.empty(max_v, dtype=np.int64)
+    nv = 0
+    for k in range(max_v):
+        nd = int(elem_nodes[elem_id, k])
+        if nd < 0:
+            continue
+        if nv > 0 and nd == verts[0]:
+            continue          # FESOM-C tri stored as quad repeats vertex 0
+        verts[nv] = nd
+        nv += 1
+    if nv < 3:
+        return 0.0, 0.0, False
+    DEG2R = 0.017453292519943295
+    R = r_earth
+    lon_ref = nodes_lon[verts[0]]
+    dsum = 0.0; lat0 = 0.0
+    for k in range(nv):
+        dsum += ((nodes_lon[verts[k]] - lon_ref + 180.0) % 360.0) - 180.0
+        lat0 += nodes_lat[verts[k]]
+    lon0 = lon_ref + dsum / nv
+    lat0 /= nv
+    cosl = np.cos(lat0 * DEG2R)
+    vx = np.empty(nv); vy = np.empty(nv)
+    for k in range(nv):
+        dlon = ((nodes_lon[verts[k]] - lon0 + 180.0) % 360.0) - 180.0
+        vx[k] = dlon * DEG2R * R * cosl
+        vy[k] = (nodes_lat[verts[k]] - lat0) * DEG2R * R
+    dlon_p = ((xp - lon0 + 180.0) % 360.0) - 180.0
+    px = dlon_p * DEG2R * R * cosl
+    py = (yp - lat0) * DEG2R * R
+    w = _polygon_weights(px, py, vx, vy, nv)
+    if w[0] == -1.0:
+        return 0.0, 0.0, False
+    zq = z
+    if np.isnan(zq):
+        zq = np.inf           # dry wherever the bed is finite
+    # vertex values: the area mean of the wet ring elements (time_dir 1.0:
+    # the layer kernel applies time_dir to the sum)
+    un = np.empty(nv); vn = np.empty(nv)
+    wet = np.zeros(nv, dtype=np.bool_)
+    n_wet = 0
+    wsum = 0.0
+    for k in range(nv):
+        nd = verts[k]
+        cnt = int(node_to_elems_count[nd])
+        uk, vk, okk = _dl_elem_wet_mean(node_to_elems[nd], cnt, zq, -1,
+                                        1.0, p, last, bed, elem_areas,
+                                        u_f, v_f)
+        if not okk:
+            for j in range(cnt):
+                e = int(node_to_elems[nd, j])
+                if e >= 0 and uv_wet(bed, e, zq):
+                    # wet elements whose areas sum to <= 0: the layer
+                    # kernel's refusal
+                    return 0.0, 0.0, False
+            continue          # no wet element: a wall at this depth
+        un[k] = uk; vn[k] = vk
+        wet[k] = True
+        n_wet += 1
+        wsum += w[k]
+    if n_wet == 0:
+        # below every bed around the element: the containing element (in
+        # every vertex ring, so dry too) at its last usable point
+        return _dl_elem_wet_mean(verts, 0, zq, elem_id, time_dir,
+                                 p, last, bed, elem_areas, u_f, v_f)
+    den = 1.0
+    if n_wet < nv:
+        if wsum < 1e-12:
+            # the particle on a left-out vertex: the equal-weight mean
+            for k in range(nv):
+                if wet[k]:
+                    w[k] = 1.0
+            den = float(n_wet)
+        else:
+            den = wsum
+    U = 0.0; V = 0.0
+    for k in range(nv):
+        if not wet[k]:
+            continue          # left out
+        U += w[k] * un[k]; V += w[k] * vn[k]
+    if n_wet < nv:
+        U = U / den; V = V / den
+    return time_dir * U, time_dir * V, True
+
+
+@njit(parallel=True, cache=True)
+def _loop_interp_bary_elem_dl(
+    P: int, alive_mask: np.ndarray, lons: np.ndarray, lats: np.ndarray,
+    zs: np.ndarray, nn_nodes: np.ndarray, elems: np.ndarray,
+    time_dir: float,
+    node_to_elems: np.ndarray, node_to_elems_count: np.ndarray,
+    elem_nodes: np.ndarray, nodes_lon: np.ndarray, nodes_lat: np.ndarray,
+    p: np.ndarray, last: np.ndarray, bed: np.ndarray,
+    elem_areas: np.ndarray, u_f: np.ndarray, v_f: np.ndarray,
+    U: np.ndarray, V: np.ndarray, ok: np.ndarray, r_earth: float
+):
+    """Depth-linear element-layout vertex-barycentric u/v for every alive
+    particle (each at its own depth ``zs[i]``); see
+    :func:`_interp_bary_elem_core_dl`."""
+    for i in prange(P):
+        if not alive_mask[i]:
+            continue
+        u, v, success = _interp_bary_elem_core_dl(
+            lons[i], lats[i], zs[i], int(nn_nodes[i]), int(elems[i]),
+            time_dir,
+            node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat,
+            p, last, bed, elem_areas, u_f, v_f, r_earth
+        )
+        U[i] = u
+        V[i] = v
+        ok[i] = success
+
+
 def _interp_barycentric_dl(
     state: ParticleState,
     mesh: Mesh,
@@ -2063,19 +2239,26 @@ def _interp_barycentric_dl(
 
     The ``interp_barycentric`` route for ``vel.uv_vertical`` ``"level"`` /
     ``"layer_linear"``: each particle is read at its depth ``state.z`` (m,
-    positive down); there is no layer argument.  A vertex whose bed
-    (``mesh.depth``) lies above the particle is a wall and left out
-    (:func:`_interp_barycentric_core_dl`).
+    positive down); there is no layer argument.  Node layout: a vertex
+    whose bed (``mesh.depth``) lies above the particle is a wall and left
+    out (:func:`_interp_barycentric_core_dl`).  Element layout
+    (``"layer_linear"``): an element whose bed
+    (``mesh.metadata["elem_bed"]``) lies above the particle is left out of
+    each vertex mean, a vertex without a wet element is left out
+    (:func:`_interp_bary_elem_core_dl`).
 
     Parameters
     ----------
     state : ParticleState
     mesh : Mesh
-        A z-level mesh (the depth-point table is
-        ``depth_points(mesh, vel.uv_vertical)``).
+        A z-level mesh; the depth-point table is
+        ``depth_points(mesh, vel.uv_vertical, vel.uv_layout)`` (element
+        layout: with the element bottoms
+        ``mesh.metadata["uv_data_last_elem"]``, ``["elem_bed"]``).
     vel : VelocityField or LazyLerpField
-        Node-layout u/v of shape ``(M, N)``.  Checked once per mesh table
-        with :func:`kelp.numerics.vertical_uv.check_depth_linear_record`
+        Node-layout u/v of shape ``(M, N)`` or element-layout u/v of shape
+        ``(M, E)``.  Checked once per mesh table with
+        :func:`kelp.numerics.vertical_uv.check_depth_linear_record`
         (skipped when :func:`~kelp.numerics.vertical_uv.is_checked`).
     nn_nodes : np.ndarray, shape ``(P,)``
         Nearest-node index per particle.
@@ -2095,14 +2278,18 @@ def _interp_barycentric_dl(
     Raises
     ------
     ValueError
-        Not node layout, u/v not 2-D, a non-z-level mesh, or a record that
-        fails the check (shape, non-finite value at a usable point).
+        A layout other than node or element, u/v not 2-D, a non-z-level
+        mesh, an element-layout mesh without the element bottoms, or a
+        record that fails the check (shape, non-finite value at a usable
+        point).
     """
     placement = getattr(vel, "uv_vertical", "layer")
-    if vel.uv_layout != "node":
+    layout = vel.uv_layout
+    if layout not in ("node", "element"):
         raise ValueError(
             f"interp_barycentric: depth-linear u/v (uv_vertical="
-            f"{placement!r}) needs uv_layout='node', got {vel.uv_layout!r}")
+            f"{placement!r}) needs uv_layout 'node' or 'element', got "
+            f"{layout!r}")
     # the record check first: a LazyLerpField is checked through its
     # parents (shape and finite prefix) before anything below blends it
     if not is_checked(vel, mesh):
@@ -2113,10 +2300,12 @@ def _interp_barycentric_dl(
     if getattr(vel.u, "ndim", None) != 2 or getattr(vel.v, "ndim", None) != 2:
         raise ValueError(
             f"interp_barycentric: depth-linear u/v (uv_vertical="
-            f"{placement!r}) must be 2-D (points, nodes), got u "
+            f"{placement!r}) must be 2-D (points, {layout}s), got u "
             f"{getattr(vel.u, 'shape', None)}, v "
             f"{getattr(vel.v, 'shape', None)}")
-    dp = depth_points(mesh, placement)
+    dp = depth_points(mesh, placement, layout)
+    areas = (build_elem_areas(mesh) if layout == "element"
+             else np.empty(0, dtype=np.float64))
 
     P = state.n_particles
     U = np.zeros(P, dtype=np.float64)
@@ -2130,7 +2319,31 @@ def _interp_barycentric_dl(
 
     u_f = vel.u
     v_f = vel.v
-    if HAS_NUMBA:
+    if layout == "element":
+        if HAS_NUMBA:
+            _loop_interp_bary_elem_dl(
+                P, state.alive_mask, state.lon, state.lat, state.z,
+                nn_nodes, elems_arr, time_dir,
+                mesh.node_to_elems, mesh.node_to_elems_count,
+                mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat,
+                dp.p, dp.last, dp.bed, areas, u_f, v_f, U, V, ok,
+                mesh.r_earth
+            )
+        else:
+            for i in range(P):
+                if not state.alive_mask[i]:
+                    continue
+                u, v, success = _interp_bary_elem_core_dl(
+                    state.lon[i], state.lat[i], state.z[i],
+                    int(nn_nodes[i]), int(elems_arr[i]), time_dir,
+                    mesh.node_to_elems, mesh.node_to_elems_count,
+                    mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat,
+                    dp.p, dp.last, dp.bed, areas, u_f, v_f, mesh.r_earth
+                )
+                U[i] = u
+                V[i] = v
+                ok[i] = success
+    elif HAS_NUMBA:
         _loop_interp_bary_dl(
             P, state.alive_mask, state.lon, state.lat, state.z, nn_nodes,
             elems_arr, time_dir,
@@ -2573,6 +2786,365 @@ def _loop_interp_edge_lsq_3d(
         ok[i] = success
 
 
+# ---------------------------------------------------------------------------
+# Depth-linear twin (uv_vertical "layer_linear", element layout): the fit of
+# _interp_edge_leastsq_core on each element's value at the particle depth;
+# an edge neighbour dry at that depth is a wall — its edge a boundary edge
+# with the bc's ghost, exactly as at the coast.
+# ---------------------------------------------------------------------------
+
+@njit(cache=True)
+def _interp_edge_leastsq_core_dl(
+    xp: float,
+    yp: float,
+    z: float,
+    nn_node: int,
+    elem_hint: int,
+    time_dir: float,
+    bc_code: int,
+    node_to_elems: np.ndarray,
+    node_to_elems_count: np.ndarray,
+    elem_nodes: np.ndarray,
+    nodes_lon: np.ndarray,
+    nodes_lat: np.ndarray,
+    elem_neighbors: np.ndarray,
+    elem_center_lon: np.ndarray,
+    elem_center_lat: np.ndarray,
+    p: np.ndarray,
+    last: np.ndarray,
+    bed: np.ndarray,
+    elem_areas: np.ndarray,
+    u_f: np.ndarray,
+    v_f: np.ndarray,
+) -> tuple[float, float, bool]:
+    """Depth-linear edge-neighbor LSQ u/v at one point (element layout).
+
+    The fit of :func:`_interp_edge_leastsq_core` — the containing element
+    (``_find_containing_element_local``, or the PRE-VALIDATED ``elem_hint``
+    when ``>= 0``), the compacted vertex ring, particle-centred metric
+    coordinates with wrapped longitude deltas, the own centroid first and
+    then edge by edge a neighbour or a boundary ghost, the summation
+    order, Sarrus and the scale-relative singular guard — on each
+    element's depth-linear value at ``z``:
+    ``(k, alpha) = uv_bracket(p, last[e], z)``,
+    ``u = uv_at(u_f, e, k, alpha)``, linear in depth between the layer
+    centres ``p[k]``, ``p[k + 1]``, clipped to ``p[0] .. p[last[e]]``; a
+    point below ``last[e]`` is never read.
+
+    Walls at depth: an edge neighbour whose bed lies above ``z``
+    (``z > bed[e]``) is dry and its edge a boundary edge — the ghost (the
+    own centroid mirrored across the edge) takes the own element's value
+    at ``z``, mirrored (``BC_FREESLIP``) or negated (``BC_NOSLIP``), the
+    coastal construction.  Every member wet: the layer core's arithmetic,
+    so a singular all-wet fit stays ``ok = False``.  A wall and a singular
+    fit: the area-weighted mean of the wet members (the own element, then
+    its wet neighbours in slot order; :func:`_dl_elem_wet_mean`).  The own
+    element dry: the area-weighted mean of its wet edge neighbours, no
+    ghosts; none wet, the own element at its last usable point.  A wet
+    element below ``p[last[e]]`` (a partial bottom layer, a ``max_levels``
+    cut, a declared prefix) reads its last usable point.
+
+    ``z`` is the particle depth (m, positive down, as ``state.z``).  A NaN
+    ``z`` is read as ``+inf``: dry wherever the bed is finite.
+
+    ``p`` (``(M,)``), ``last`` and ``bed`` (``(E,)``, positive down) are
+    the element table of :func:`kelp.numerics.vertical_uv.depth_points`;
+    ``elem_areas`` is ``(E,)`` (:func:`kelp.core.mesh.build_elem_areas`);
+    ``u_f``/``v_f`` are ``(M, E)``.  Returns ``(U, V, ok)``.
+    """
+    if elem_hint >= 0:
+        elem_id = int(elem_hint)
+    else:
+        elem_id, in_dom = _find_containing_element_local(
+            xp, yp, nn_node, node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat)
+        if not in_dom:
+            return 0.0, 0.0, False
+
+    # Compacted vertex ring — same rule as _interp_edge_leastsq_core
+    max_v = elem_nodes.shape[1]
+    verts = np.empty(max_v, dtype=np.int64)
+    nv = 0
+    for k in range(max_v):
+        nd = int(elem_nodes[elem_id, k])
+        if nd < 0:
+            continue
+        if nv > 0 and nd == verts[0]:
+            continue
+        verts[nv] = nd
+        nv += 1
+    if nv < 3:
+        return 0.0, 0.0, False
+
+    zq = z
+    if np.isnan(zq):
+        zq = np.inf           # dry wherever the bed is finite
+    if not uv_wet(bed, elem_id, zq):
+        # the own element dry: its wet edge neighbours' area mean, no
+        # ghosts; none wet, the own element at its last usable point
+        return _dl_elem_wet_mean(elem_neighbors[elem_id], nv, zq, elem_id,
+                                 time_dir, p, last, bed, elem_areas,
+                                 u_f, v_f)
+
+    # -- the layer core's fit, a dry neighbour's edge a boundary edge --
+    z0 = np.cos(yp * DEG2RAD) * METERS_PER_DEG_LAT
+
+    dlon_c = ((elem_center_lon[elem_id] - xp + 180.0) % 360.0) - 180.0
+    cx = dlon_c * z0
+    cy = (elem_center_lat[elem_id] - yp) * METERS_PER_DEG_LAT
+    kb, ab = uv_bracket(p, last[elem_id], zq)
+    u_own = time_dir * uv_at(u_f, elem_id, kb, ab)
+    v_own = time_dir * uv_at(v_f, elem_id, kb, ab)
+
+    a11 = 1.0
+    a12 = cx
+    a13 = cy
+    a22 = cx * cx
+    a23 = cx * cy
+    a33 = cy * cy
+    fUn = u_own
+    f1Un = u_own * cx
+    f2Un = u_own * cy
+    fVn = v_own
+    f1Vn = v_own * cx
+    f2Vn = v_own * cy
+
+    n_dry = 0
+    for k in range(nv):
+        nb = int(elem_neighbors[elem_id, k])
+        if nb >= 0 and not uv_wet(bed, nb, zq):
+            nb = -1           # a wall at this depth: a boundary edge
+            n_dry += 1
+        if nb >= 0:
+            dlon_n = ((elem_center_lon[nb] - xp + 180.0) % 360.0) - 180.0
+            ex = dlon_n * z0
+            ey = (elem_center_lat[nb] - yp) * METERS_PER_DEG_LAT
+            kb, ab = uv_bracket(p, last[nb], zq)
+            uu = time_dir * uv_at(u_f, nb, kb, ab)
+            vv = time_dir * uv_at(v_f, nb, kb, ab)
+        else:
+            # the ghost of _interp_edge_leastsq_core: the own centroid
+            # mirrored across edge k (verts[k] -> verts[(k+1) % nv])
+            na = verts[k]
+            nb2 = verts[(k + 1) % nv]
+            dax = (((nodes_lon[na] - xp + 180.0) % 360.0) - 180.0) * z0
+            day = (nodes_lat[na] - yp) * METERS_PER_DEG_LAT
+            dbx = (((nodes_lon[nb2] - xp + 180.0) % 360.0) - 180.0) * z0
+            dby = (nodes_lat[nb2] - yp) * METERS_PER_DEG_LAT
+            tx = dbx - dax
+            ty = dby - day
+            tt = tx * tx + ty * ty
+            if tt <= 0.0:
+                continue          # degenerate edge: drop the point
+            proj = ((cx - dax) * tx + (cy - day) * ty) / tt
+            fx = dax + proj * tx
+            fy = day + proj * ty
+            ex = 2.0 * fx - cx
+            ey = 2.0 * fy - cy
+            if bc_code == BC_NOSLIP:
+                uu = -u_own
+                vv = -v_own
+            else:
+                # free slip: tangential component kept, normal reversed
+                ut = (u_own * tx + v_own * ty) / tt
+                uu = 2.0 * ut * tx - u_own
+                vv = 2.0 * ut * ty - v_own
+        a11 = a11 + 1.0
+        a12 = a12 + ex
+        a13 = a13 + ey
+        a22 = a22 + ex * ex
+        a23 = a23 + ex * ey
+        a33 = a33 + ey * ey
+        fUn = fUn + uu
+        f1Un = f1Un + uu * ex
+        f2Un = f2Un + uu * ey
+        fVn = fVn + vv
+        f1Vn = f1Vn + vv * ex
+        f2Vn = f2Vn + vv * ey
+
+    a21 = a12
+    a31 = a13
+    a32 = a23
+
+    det = (a11 * a22 * a33
+           + a12 * a23 * a31
+           + a13 * a21 * a32
+           - a13 * a22 * a31
+           - a12 * a21 * a33
+           - a11 * a23 * a32)
+
+    # the scale-relative singular guard of _interp_edge_leastsq_core
+    if abs(det) < 1e-30 or abs(det) < 1e-12 * abs(a11 * a22 * a33):
+        if n_dry == 0:
+            return 0.0, 0.0, False
+        # a wall left a singular fit: the wet members' area mean
+        members = np.empty(nv + 1, dtype=np.int64)
+        members[0] = elem_id
+        for k in range(nv):
+            members[k + 1] = elem_neighbors[elem_id, k]
+        return _dl_elem_wet_mean(members, nv + 1, zq, -1, time_dir,
+                                 p, last, bed, elem_areas, u_f, v_f)
+
+    inv = 1.0 / abs(det)
+
+    b11 = a22 * a33 - a23 * a32
+    b12 = a13 * a32 - a12 * a33
+    b13 = a12 * a23 - a13 * a22
+
+    a0U = (b11 * fUn + b12 * f1Un + b13 * f2Un) * inv
+    a0V = (b11 * fVn + b12 * f1Vn + b13 * f2Vn) * inv
+
+    return a0U, a0V, True
+
+
+@njit(parallel=True, cache=True)
+def _loop_interp_edge_lsq_3d_dl(
+    P: int, alive_mask: np.ndarray, lons: np.ndarray, lats: np.ndarray,
+    zs: np.ndarray, nn_nodes: np.ndarray, elems: np.ndarray,
+    time_dir: float, bc_code: int,
+    node_to_elems: np.ndarray, node_to_elems_count: np.ndarray,
+    elem_nodes: np.ndarray, nodes_lon: np.ndarray, nodes_lat: np.ndarray,
+    elem_neighbors: np.ndarray,
+    elem_center_lon: np.ndarray, elem_center_lat: np.ndarray,
+    p: np.ndarray, last: np.ndarray, bed: np.ndarray,
+    elem_areas: np.ndarray, u_f: np.ndarray, v_f: np.ndarray,
+    U: np.ndarray, V: np.ndarray, ok: np.ndarray,
+):
+    """Depth-linear edge-neighbor LSQ u/v for every alive particle (each at
+    its own depth ``zs[i]``); see :func:`_interp_edge_leastsq_core_dl`."""
+    for i in prange(P):
+        if not alive_mask[i]:
+            continue
+        u, v, success = _interp_edge_leastsq_core_dl(
+            lons[i], lats[i], zs[i], int(nn_nodes[i]), int(elems[i]),
+            time_dir, bc_code,
+            node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat,
+            elem_neighbors, elem_center_lon, elem_center_lat,
+            p, last, bed, elem_areas, u_f, v_f,
+        )
+        U[i] = u
+        V[i] = v
+        ok[i] = success
+
+
+def _interp_edge_leastsq_dl(
+    state: ParticleState,
+    mesh: Mesh,
+    vel: VelocityField,
+    nn_nodes: np.ndarray,
+    time_dir: float,
+    *,
+    bc: str = "freeslip",
+    elems=None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Depth-linear edge-neighbor LSQ u/v for all alive particles.
+
+    The ``interp_edge_leastsq`` route for ``vel.uv_vertical``
+    ``"layer_linear"`` on element layout: each particle is read at its
+    depth ``state.z`` (m, positive down); there is no layer argument.  An
+    edge neighbour whose bed (``mesh.metadata["elem_bed"]``) lies above
+    the particle is a wall, its edge a boundary edge with the ``bc`` ghost
+    (:func:`_interp_edge_leastsq_core_dl`).
+
+    Parameters
+    ----------
+    state : ParticleState
+    mesh : Mesh
+        A z-level mesh with the element bottoms
+        (``mesh.metadata["uv_data_last_elem"]``, ``["elem_bed"]``); the
+        table is ``depth_points(mesh, vel.uv_vertical, "element")``.
+    vel : VelocityField or LazyLerpField
+        Element-layout u/v of shape ``(M, E)``.  Checked once per mesh
+        table with :func:`kelp.numerics.vertical_uv.check_depth_linear_record`
+        (skipped when :func:`~kelp.numerics.vertical_uv.is_checked`).
+    nn_nodes : np.ndarray, shape ``(P,)``
+        Nearest-node index per particle (containment search anchor).
+    time_dir : float
+        Forward (+1) or backward (-1).
+    bc : str
+        Boundary ghost value at coastal edges and at walls:
+        ``"freeslip"`` or ``"noslip"`` (:func:`interp_edge_leastsq`).
+    elems : np.ndarray or None
+        Optional per-particle PRE-VALIDATED containing elements (edge-walk
+        tracker); ``-1`` entries fall back to the internal search.
+
+    Returns
+    -------
+    U, V : np.ndarray, shape ``(P,)``
+        Interpolated velocity (m/s).  Zero for inactive particles.
+    ok : np.ndarray of bool, shape ``(P,)``
+        True where interpolation succeeded.
+
+    Raises
+    ------
+    ValueError
+        Node layout (``uv_interp='barycentric'`` evaluates it), an unknown
+        ``bc``, u/v not 2-D, a non-z-level mesh, a mesh without the
+        element bottoms, or a record that fails the check (shape,
+        non-finite value at a usable point).
+    """
+    placement = getattr(vel, "uv_vertical", "layer")
+    if getattr(vel, "uv_layout", "node") != "element":
+        _reject_depth_linear(vel, "interp_edge_leastsq", _DL_LAYOUT)
+    bc_code = _bc_to_int(bc)
+    # the record check first: a LazyLerpField is checked through its
+    # parents (shape and finite prefix) before anything below blends it
+    if not is_checked(vel, mesh):
+        check_depth_linear_record(vel, mesh)
+    # unreachable for a field checked as it stands (the check refuses
+    # non-2-D u/v); kept because the token survives an attribute replaced
+    # after the check (``vel.u = ...``), which would reach the kernel
+    if getattr(vel.u, "ndim", None) != 2 or getattr(vel.v, "ndim", None) != 2:
+        raise ValueError(
+            f"interp_edge_leastsq: depth-linear u/v (uv_vertical="
+            f"{placement!r}) must be 2-D (points, elements), got u "
+            f"{getattr(vel.u, 'shape', None)}, v "
+            f"{getattr(vel.v, 'shape', None)}")
+    dp = depth_points(mesh, placement, "element")
+    areas = build_elem_areas(mesh)
+    neighbors = build_elem_neighbors(mesh)
+
+    P = state.n_particles
+    U = np.zeros(P, dtype=np.float64)
+    V = np.zeros(P, dtype=np.float64)
+    ok = np.zeros(P, dtype=bool)
+
+    if elems is None:
+        elems_arr = np.full(P, -1, dtype=np.int32)
+    else:
+        elems_arr = np.asarray(elems, dtype=np.int32)
+
+    u_f = vel.u
+    v_f = vel.v
+    if HAS_NUMBA:
+        _loop_interp_edge_lsq_3d_dl(
+            P, state.alive_mask, state.lon, state.lat, state.z, nn_nodes,
+            elems_arr, time_dir, bc_code,
+            mesh.node_to_elems, mesh.node_to_elems_count,
+            mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat,
+            neighbors, mesh.elem_center_lon, mesh.elem_center_lat,
+            dp.p, dp.last, dp.bed, areas, u_f, v_f, U, V, ok,
+        )
+    else:
+        for i in range(P):
+            if not state.alive_mask[i]:
+                continue
+            u, v, success = _interp_edge_leastsq_core_dl(
+                state.lon[i], state.lat[i], state.z[i], int(nn_nodes[i]),
+                int(elems_arr[i]), time_dir, bc_code,
+                mesh.node_to_elems, mesh.node_to_elems_count,
+                mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat,
+                neighbors, mesh.elem_center_lon, mesh.elem_center_lat,
+                dp.p, dp.last, dp.bed, areas, u_f, v_f,
+            )
+            U[i] = u
+            V[i] = v
+            ok[i] = success
+
+    return U, V, ok
+
+
 def _reject_node_layout_edge_lsq(vel: VelocityField) -> None:
     if getattr(vel, "uv_layout", "element") == "node":
         raise ValueError(
@@ -2651,6 +3223,9 @@ def interp_edge_leastsq(
         Forward (+1) or backward (-1).
     layer : int or np.ndarray
         Scalar ``int`` for 2-D, per-particle ``(P,)`` array for 3-D.
+        Ignored for a depth-linear field (``vel.uv_vertical``
+        ``"layer_linear"``, element layout): that field is read at each
+        particle's depth ``state.z`` (:func:`_interp_edge_leastsq_dl`).
     bc : str
         Boundary ghost value: ``"freeslip"`` (mirror image of u_own —
         wall-parallel constants exact, normal component damped at the
@@ -2666,8 +3241,17 @@ def interp_edge_leastsq(
         Interpolated velocity (m/s).  Zero for inactive particles.
     ok : np.ndarray of bool, shape ``(P,)``
         True where interpolation succeeded.
+
+    Raises
+    ------
+    ValueError
+        Node layout (a depth-linear node field: ``uv_interp='barycentric'``
+        evaluates it), an unknown ``bc``, or a depth-linear record that
+        fails the check.
     """
-    _reject_depth_linear(vel, "interp_edge_leastsq", _DL_NEEDS_BARYCENTRIC)
+    if getattr(vel, "uv_vertical", "layer") != "layer":
+        return _interp_edge_leastsq_dl(state, mesh, vel, nn_nodes, time_dir,
+                                       bc=bc, elems=elems)
     _reject_node_layout_edge_lsq(vel)
     bc_code = _bc_to_int(bc)
     neighbors = build_elem_neighbors(mesh)
