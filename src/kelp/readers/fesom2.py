@@ -378,6 +378,123 @@ def _nod_in_elem2d_is_degenerate(n2e: np.ndarray, n2e_count: np.ndarray) -> bool
     return bool(mostly_empty or empty_inside_count or bad_count)
 
 
+def _elem_level_metadata(get_var, sigma_abs, n_elem: int, *,
+                         meshpath: str = "") -> dict:
+    """The element bottoms of a FESOM2 mesh diagnostic, as mesh metadata.
+
+    FESOM2 writes per element ``nlevels`` (1-based: the element has
+    ``nlevels - 1`` wet layers), ``ulevels`` (its first level, 1-based;
+    > 1 under an ice-shelf cavity) and ``zbar_e_bottom`` (its bed,
+    negative down).  The depth-linear element table
+    (:func:`kelp.numerics.vertical_uv.depth_points` with
+    ``layout="element"``) reads ``uv_data_last_elem`` and ``elem_bed``.
+
+    Parameters
+    ----------
+    get_var : callable
+        ``get_var(name)`` -> the diagnostic's variable ``name`` as an
+        array (a masked array marks missing values), or ``None`` when
+        the diagnostic has no such variable.
+    sigma_abs : ndarray, shape (K,)
+        The level depths (interfaces), positive down: the full table the
+        loader puts in ``mesh.sigma``.
+    n_elem : int
+        Number of mesh elements (file order, which the loaders keep).
+    meshpath : str, optional
+        The mesh file, named in the refusals.
+
+    Returns
+    -------
+    dict
+        Empty when the diagnostic has neither ``nlevels`` nor
+        ``zbar_e_bottom``, or the mesh has no level table (``K == 0``:
+        nothing to place the bottoms on; nothing is read).  Otherwise:
+
+        - ``"elem_bed"`` — float64 ``(E,)``, positive down:
+          ``|zbar_e_bottom|`` when present, else ``sigma_abs[nlevels - 1]``;
+        - ``"uv_data_last_elem"`` — int32 ``(E,)``, the last layer whose
+          lower level is at or above the bed,
+          ``searchsorted(sigma_abs[1:], elem_bed, side="right") - 1``
+          (``-1``: the bed is above the first layer's lower level; a
+          bottom layer the bed cuts — a partial cell — is not counted);
+        - ``"elem_ulevels"`` — int32 ``(E,)``, when ``ulevels`` is present;
+        - ``"elem_levels_source"`` — ``"zbar_e_bottom"`` or ``"nlevels"``.
+
+    Raises
+    ------
+    ValueError
+        A variable read here is not one value per element, has a missing
+        or non-finite value, or ``nlevels`` / ``ulevels`` are not integer
+        levels ``1..K``.
+    """
+    sigma_abs = np.asarray(sigma_abs, dtype=np.float64)
+    n_levels = sigma_abs.size
+    if n_levels == 0:
+        return {}
+    where = f"mesh diagnostic {meshpath!r}" if meshpath else "mesh diagnostic"
+
+    def column(name):
+        raw = get_var(name)
+        if raw is None:
+            return None
+        # missing values (masked or NaN) become NaN and are refused below
+        col = np.ma.filled(np.ma.asarray(raw, dtype=np.float64), np.nan)
+        if col.shape != (n_elem,):
+            raise ValueError(
+                f"{where}: variable {name!r} has shape {col.shape}, expected "
+                f"({n_elem},), one value per element")
+        bad = np.flatnonzero(~np.isfinite(col))
+        if bad.size:
+            raise ValueError(
+                f"{where}: variable {name!r} has a missing or non-finite "
+                f"value at element {int(bad[0])} ({bad.size} elements in all)")
+        return col
+
+    def levels(name):
+        col = column(name)
+        if col is None:
+            return None
+        bad = np.flatnonzero((col != np.round(col)) | (col < 1)
+                             | (col > n_levels))
+        if bad.size:
+            e = int(bad[0])
+            raise ValueError(
+                f"{where}: variable {name!r} must hold integer levels "
+                f"1..{n_levels} (1-based, as FESOM2 writes them, on a mesh "
+                f"of {n_levels} levels); element {e} has {col[e]:g}")
+        return col.astype(np.int32)
+
+    bottom = column("zbar_e_bottom")
+    if bottom is not None:
+        bed = np.abs(bottom)
+        source = "zbar_e_bottom"
+    else:
+        nlevels = levels("nlevels")
+        if nlevels is None:
+            return {}
+        bed = sigma_abs[nlevels - 1]
+        source = "nlevels"
+    last = np.searchsorted(sigma_abs[1:], bed, side="right") - 1
+    meta = {
+        "elem_bed": bed,
+        "uv_data_last_elem": last.astype(np.int32),
+        "elem_levels_source": source,
+    }
+    ulevels = levels("ulevels")
+    if ulevels is not None:
+        meta["elem_ulevels"] = ulevels
+    return meta
+
+
+def _print_elem_levels(meta: dict) -> None:
+    """The loaders' progress line on the element bottoms."""
+    if meta:
+        print(f"    element bottoms: from file ({meta['elem_levels_source']})")
+    else:
+        print("    element bottoms: not declared (no nlevels or zbar_e_bottom"
+              " in the file, or no levels)")
+
+
 def _load_mesh_nc(nc_path: Path, r_earth: float = 6_367_500.0,
                   rotation_angles=None) -> Mesh:
     """Load FESOM2 mesh from a NetCDF mesh diagnostic file.
@@ -389,6 +506,10 @@ def _load_mesh_nc(nc_path: Path, r_earth: float = 6_367_500.0,
         nod_in_elem2D_num(nod2)           — count of elements per node
         zbar_n_bottom(nod2)               — nodal bottom depth (optional)
         nz(nz)                            — depth levels (optional)
+        nlevels(elem), zbar_e_bottom(elem), ulevels(elem)
+                                          — element levels and bed (optional;
+                                            declared in ``mesh.metadata`` by
+                                            :func:`_elem_level_metadata`)
 
     Parameters
     ----------
@@ -457,6 +578,17 @@ def _load_mesh_nc(nc_path: Path, r_earth: float = 6_367_500.0,
     else:
         print("    element areas: not in file -> spherical fallback on demand")
 
+    # --- Element bottoms (nlevels / ulevels / zbar_e_bottom) ---
+    variables = ds.variables
+    try:
+        elem_levels = _elem_level_metadata(
+            lambda name: variables[name][:] if name in variables else None,
+            sigma, n_elems, meshpath=str(nc_path))
+    except ValueError:
+        ds.close()
+        raise
+    _print_elem_levels(elem_levels)
+
     ds.close()
 
     # --- Element centres (geographic, the rotation carriers) ---
@@ -489,7 +621,8 @@ def _load_mesh_nc(nc_path: Path, r_earth: float = 6_367_500.0,
         vertical_coord="zlevel",
         r_earth=r_earth,
         rotation_angles=rotation_angles,
-        metadata={"meshpath": str(nc_path), "source": "netcdf"},
+        metadata={"meshpath": str(nc_path), "source": "netcdf",
+                  **elem_levels},
     )
     if elem_areas is not None:
         mesh._elem_areas = elem_areas
@@ -598,6 +731,16 @@ def _load_mesh_zarr(zarr_path: Path, r_earth: float = 6_367_500.0,
     else:
         print("    element areas: not in file -> spherical fallback on demand")
 
+    # --- Element bottoms (nlevels / ulevels / zbar_e_bottom) ---
+    try:
+        elem_levels = _elem_level_metadata(
+            lambda name: ds[name].values if name in ds.variables else None,
+            sigma, n_elems, meshpath=str(zarr_path))
+    except ValueError:
+        ds.close()
+        raise
+    _print_elem_levels(elem_levels)
+
     ds.close()
     print(f"    Zarr mesh loaded  ({_time.perf_counter() - t0:.1f}s)")
 
@@ -627,7 +770,8 @@ def _load_mesh_zarr(zarr_path: Path, r_earth: float = 6_367_500.0,
         vertical_coord="zlevel",
         r_earth=r_earth,
         rotation_angles=rotation_angles,
-        metadata={"meshpath": str(zarr_path), "source": "zarr"},
+        metadata={"meshpath": str(zarr_path), "source": "zarr",
+                  **elem_levels},
     )
     if elem_areas is not None:
         mesh._elem_areas = elem_areas

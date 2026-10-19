@@ -1181,6 +1181,22 @@ def build_subset_mesh_dataset(
     )
     if mesh.sigma.size:
         ds["nz"] = (("nz",), mesh.sigma.copy())
+    # The element levels and bed (the FESOM2 reader declares each element's
+    # bottom from them) and the node level counts, values and signs as in
+    # the source.
+    for name, dim, ids, n_source in (
+            ("nlevels", "elem", elem_ids, mesh.n_elements),
+            ("ulevels", "elem", elem_ids, mesh.n_elements),
+            ("zbar_e_bottom", "elem", elem_ids, mesh.n_elements),
+            ("nlevels_nod2D", "nod2", node_ids, mesh.n_nodes)):
+        if name not in mesh.ds.variables:
+            continue
+        source = mesh.ds[name]
+        if source.shape != (n_source,):
+            raise ValueError(
+                f"Mesh {mesh.path}: variable {name!r} has shape "
+                f"{source.shape}, expected ({n_source},).")
+        ds[name] = ((dim,), np.asarray(source.values)[ids], dict(source.attrs))
 
     source_attrs = dict(mesh.ds.attrs) if copy_source_attrs else {}
     source_attrs.update(attrs)

@@ -51,6 +51,13 @@ mesh: { type: fesom2, meshpath: path/to/output_subset/fesom.mesh.diag.region.nc 
 data: { ncinput: path/to/output_subset }
 ```
 
+The subset mesh keeps the level variables of the source diagnostic when it has
+them: `nlevels`, `ulevels` and `zbar_e_bottom` for the kept elements and
+`nlevels_nod2D` for the kept nodes, values and signs as in the source. The FESOM2
+reader declares each element's bottom from `nlevels` / `zbar_e_bottom`; depth-linear
+u/v on element data (`mode.uv_vertical: linear`) needs them, so a subset written
+before the tool kept them must be extracted again.
+
 The individual `source`/`region`/`output` settings can also be given as CLI flags
 (`--mesh`, `--bbox`, `--output-dir`, …); run with `-h` to list them.
 

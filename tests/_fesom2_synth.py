@@ -24,11 +24,35 @@ ZBAR_N_BOTTOM_NEG = np.array([-30.0, -30.0, -30.0, -30.0])
 DEG2RAD = np.pi / 180.0
 
 
+def _level_vars(elem_dim: str, nod_dim: str, *, nlevels=None, ulevels=None,
+                zbar_e_bottom=None, nlevels_nod2D=None) -> dict:
+    """The optional per-element / per-node level variables of a mesh diag,
+    on the convention's element and node dimensions (``None`` = not
+    written).  ``zbar_e_bottom`` is written negative, as FESOM2 writes it,
+    whatever the sign given; ``nlevels``/``ulevels``/``nlevels_nod2D`` are
+    written as int32, 1-based as FESOM2 writes them."""
+    out = {}
+    if nlevels is not None:
+        out["nlevels"] = ((elem_dim,), np.asarray(nlevels, dtype=np.int32))
+    if ulevels is not None:
+        out["ulevels"] = ((elem_dim,), np.asarray(ulevels, dtype=np.int32))
+    if zbar_e_bottom is not None:
+        out["zbar_e_bottom"] = (
+            (elem_dim,), -np.abs(np.asarray(zbar_e_bottom, dtype=np.float64)))
+    if nlevels_nod2D is not None:
+        out["nlevels_nod2D"] = (
+            (nod_dim,), np.asarray(nlevels_nod2D, dtype=np.int32))
+    return out
+
+
 def write_meshdiag(path: Path, convention: str, *,
                    start_index: int | None = None,
                    nodes_units: str | None = None,
                    zero_nod_in_elem2D: bool = False,
-                   corrupt_nodes: list[int] | None = None) -> Path:
+                   corrupt_nodes: list[int] | None = None,
+                   zbar=None, zbar_n_bottom=None,
+                   nlevels=None, ulevels=None, zbar_e_bottom=None,
+                   nlevels_nod2D=None) -> Path:
     """convention in {'core2', 'comp', 'ugrid'}.
 
     start_index : optional UGRID ``face_nodes`` start_index attribute.  When
@@ -47,7 +71,21 @@ def write_meshdiag(path: Path, convention: str, *,
         are zeroed (their ``nod_in_elem2D_num`` stays > 0) to mimic *partial*
         corruption below the 50 % all-empty bar — the loader must still detect
         the count/data inconsistency and rebuild.
+    zbar, zbar_n_bottom : optional level interfaces ``(K,)`` and node bottoms
+        ``(4,)``, negative down as FESOM2 writes them (default ``ZBAR_NEG``
+        and ``ZBAR_N_BOTTOM_NEG``; comp/ugrid store their absolute values,
+        as before).
+    nlevels, ulevels, zbar_e_bottom : optional per-element ``(2,)`` level
+        variables of the FESOM2 mesh diagnostic (each element's number of
+        levels, 1-based; its first level; its bed, written negative);
+        ``nlevels_nod2D`` the per-node ``(4,)`` count.  ``None`` (default)
+        writes none of them, as before.
     """
+    zbar_neg = ZBAR_NEG if zbar is None else np.asarray(zbar, dtype=np.float64)
+    bottom_neg = (ZBAR_N_BOTTOM_NEG if zbar_n_bottom is None
+                  else np.asarray(zbar_n_bottom, dtype=np.float64))
+    levels = dict(nlevels=nlevels, ulevels=ulevels,
+                  zbar_e_bottom=zbar_e_bottom, nlevels_nod2D=nlevels_nod2D)
     if convention == "core2":
         if nodes_units is not None and "degree" in nodes_units.lower():
             packed = np.stack([LON_DEG, LAT_DEG])      # already degrees
@@ -59,11 +97,12 @@ def write_meshdiag(path: Path, convention: str, *,
                 # packed coords, dims (n2, nod_n) — radians unless labelled
                 "nodes": nodes_var,
                 "elem": (("n3", "elem_n"), TRI_1BASED.T),          # (3, E)
-                "zbar": (("nl",), ZBAR_NEG),                        # negative
+                "zbar": (("nl",), zbar_neg),                        # negative
                 "elem_area": (("elem_n",), ELEM_AREA),
-                "zbar_n_bottom": (("nod_n",), ZBAR_N_BOTTOM_NEG),
+                "zbar_n_bottom": (("nod_n",), bottom_neg),
                 "nod_in_elem2D": (("N", "nod_n"), NOD_IN_ELEM_1BASED.T),
                 "nod_in_elem2D_num": (("nod_n",), NOD_IN_ELEM_NUM),
+                **_level_vars("elem_n", "nod_n", **levels),
             }
         )
         if nodes_units is not None:
@@ -74,11 +113,12 @@ def write_meshdiag(path: Path, convention: str, *,
                 "lon": (("nod2",), LON_DEG),
                 "lat": (("nod2",), LAT_DEG),
                 "elements": (("n3", "elem"), TRI_1BASED.T),         # (3, E)
-                "nz": (("nz",), np.abs(ZBAR_NEG)),                  # positive
+                "nz": (("nz",), np.abs(zbar_neg)),                  # positive
                 "elem_area": (("elem",), ELEM_AREA),
-                "zbar_n_bottom": (("nod2",), np.abs(ZBAR_N_BOTTOM_NEG)),
+                "zbar_n_bottom": (("nod2",), np.abs(bottom_neg)),
                 "nod_in_elem2D": (("N", "nod2"), NOD_IN_ELEM_1BASED.T),
                 "nod_in_elem2D_num": (("nod2",), NOD_IN_ELEM_NUM),
+                **_level_vars("elem", "nod2", **levels),
             }
         )
     elif convention == "ugrid":
@@ -91,11 +131,12 @@ def write_meshdiag(path: Path, convention: str, *,
                 "lon": (("nod2",), LON_DEG),
                 "lat": (("nod2",), LAT_DEG),
                 "face_nodes": (("elem", "n3"), conn),               # (E, 3)
-                "nz": (("nz",), np.abs(ZBAR_NEG)),
+                "nz": (("nz",), np.abs(zbar_neg)),
                 "elem_area": (("elem",), ELEM_AREA),
-                "zbar_n_bottom": (("nod2",), np.abs(ZBAR_N_BOTTOM_NEG)),
+                "zbar_n_bottom": (("nod2",), np.abs(bottom_neg)),
                 "nod_in_elem2D": (("nod2", "N"), NOD_IN_ELEM_1BASED),
                 "nod_in_elem2D_num": (("nod2",), NOD_IN_ELEM_NUM),
+                **_level_vars("elem", "nod2", **levels),
             }
         )
         if start_index is not None:
@@ -121,24 +162,34 @@ def write_meshdiag(path: Path, convention: str, *,
     return path
 
 
-def write_meshdiag_zarr(path: Path, *, zero_nod_in_elem2D: bool = False) -> Path:
+def write_meshdiag_zarr(path: Path, *, zero_nod_in_elem2D: bool = False,
+                        zbar=None, zbar_n_bottom=None,
+                        nlevels=None, ulevels=None, zbar_e_bottom=None,
+                        nlevels_nod2D=None) -> Path:
     """Write a ``comp``-convention FESOM2 mesh diag as a Zarr store.
 
     This is the layout ``extract_fesom_region.py`` produces and
     ``_load_mesh_zarr`` reads.  ``zero_nod_in_elem2D`` writes the table all
     zeros (count stays valid) to exercise the degenerate-table rebuild on the
-    Zarr path (the NetCDF path has its own coverage).
+    Zarr path (the NetCDF path has its own coverage).  The level keywords
+    are those of :func:`write_meshdiag`.
     """
+    zbar_neg = ZBAR_NEG if zbar is None else np.asarray(zbar, dtype=np.float64)
+    bottom_neg = (ZBAR_N_BOTTOM_NEG if zbar_n_bottom is None
+                  else np.asarray(zbar_n_bottom, dtype=np.float64))
     ds = xr.Dataset(
         {
             "lon": (("nod2",), LON_DEG),
             "lat": (("nod2",), LAT_DEG),
             "elements": (("n3", "elem"), TRI_1BASED.T),         # (3, E)
-            "nz": (("nz",), np.abs(ZBAR_NEG)),                  # positive
+            "nz": (("nz",), np.abs(zbar_neg)),                  # positive
             "elem_area": (("elem",), ELEM_AREA),
-            "zbar_n_bottom": (("nod2",), np.abs(ZBAR_N_BOTTOM_NEG)),
+            "zbar_n_bottom": (("nod2",), np.abs(bottom_neg)),
             "nod_in_elem2D": (("N", "nod2"), NOD_IN_ELEM_1BASED.T),
             "nod_in_elem2D_num": (("nod2",), NOD_IN_ELEM_NUM),
+            **_level_vars("elem", "nod2", nlevels=nlevels, ulevels=ulevels,
+                          zbar_e_bottom=zbar_e_bottom,
+                          nlevels_nod2D=nlevels_nod2D),
         }
     )
     if zero_nod_in_elem2D:
