@@ -73,7 +73,7 @@ import numpy as np
 from kelp.core.config import load_config
 from kelp.core.mesh import set_grid_hash_cell, set_exact_nearest, apply_grid_hash_cell_rule
 from kelp.readers import get_reader, extract_time_info
-from kelp.tracking import run_single_realization, _shift_to_midpoints, _validate_restart_frame, _shared_fields_tag, _resolve_particle_offset, _resolve_start_date
+from kelp.tracking import run_single_realization, _shift_to_midpoints, _validate_restart_frame, _validate_restart_uv_vertical, _shared_fields_tag, _resolve_particle_offset, _resolve_start_date
 from kelp.writers import TrajectoryWriter, load_restart, write_restart_file
 cfg = load_config(sys.argv[1]); SEG, RDIR, EVERY, BUDGET = sys.argv[2], sys.argv[3], int(sys.argv[4]), float(sys.argv[5]); T0 = time.time()
 os.makedirs(SEG, exist_ok=True); os.makedirs(RDIR, exist_ok=True)   # a missing restart dir fails AFTER the first chunk, and the next leg re-runs it
@@ -112,6 +112,7 @@ files = glob.glob(os.path.join(RDIR, "restart_step*.nc"))
 if files:                                    # RESUME: state from the newest numbered restart
     r = load_restart(max(files, key=lambda f: int(re.search(r"step(\d+)", os.path.basename(f)).group(1))))
     _validate_restart_frame(r["rotation_angles"], mesh)
+    _validate_restart_uv_vertical(r["uv_vertical"], cfg.mode)   # one mode.uv_vertical rule per trajectory
     if (r["particle_offset"] or 0) != poff: sys.exit(f"restart keyed with particle_offset {r['particle_offset']}, config gives {poff}")   # None = an older driver, keyed from 0
     state, gstep, wet = r["state"], r["step_i"] + 1, r["wet_streak"]
 else:                                        # FRESH START: the three calls run_tracking makes, verbatim
@@ -150,7 +151,8 @@ while gstep < cfg.time.n_steps and time.time() - T0 < BUDGET:   # BUDGET = wall 
     state, wet = rr["state"], rr["wet_streak"]
     rfile = os.path.join(RDIR, f"restart_step{rr['step_i']:08d}.nc")           # numbered, never overwritten
     write_restart_file(rfile + ".tmp", state, rr["step_i"], rr["file_idx"], wet_streak=wet,
-                       rotation_angles=angles, release_step=state.release_step, particle_offset=poff); os.replace(rfile + ".tmp", rfile)
+                       rotation_angles=angles, release_step=state.release_step, particle_offset=poff,
+                       uv_vertical=cfg.mode.uv_vertical); os.replace(rfile + ".tmp", rfile)
     exhausted = rr["step_i"] + 1 < gstep + chunk                                   # the forcing ended inside this chunk
     gstep = rr["step_i"] + 1
     if exhausted: print("FORCING EXHAUSTED at step", gstep, flush=True); break

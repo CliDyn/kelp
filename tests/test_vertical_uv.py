@@ -198,6 +198,36 @@ def test_declaration_snapshot_shared_by_shallow_copies():
     assert dp_b.last.tolist() == dp_a.last.tolist() == [0, 2, 1, 0]
 
 
+def test_reader_frozen_array_is_copied():
+    """A read-only array the READER froze is not an engine snapshot: the
+    build copies it like any other declaration."""
+    vu = _vu()
+    decl = np.array([0, 2, 1, 1], dtype=np.int32)
+    decl.setflags(write=False)
+    mesh = _mesh()
+    mesh.metadata["uv_data_last"] = decl
+    vu.depth_points(mesh, "level")
+    snap = mesh.metadata["uv_data_last"]
+    assert snap is not decl and snap.base is None
+    assert vu._SNAPSHOTS.get(id(snap)) is snap
+    assert vu._SNAPSHOTS.get(id(decl)) is None
+
+
+def test_snapshot_registry_forgets_freed_snapshots():
+    """A freed snapshot drops out of the registry, so an array that later
+    gets its id is never taken for an engine snapshot."""
+    import gc
+    vu = _vu()
+    mesh = _mesh()
+    mesh.metadata["uv_data_last"] = np.array([0, 2, 1, 1], dtype=np.int32)
+    vu.depth_points(mesh, "level")
+    old_id = id(mesh.metadata["uv_data_last"])
+    assert vu._SNAPSHOTS.get(old_id) is not None
+    del mesh
+    gc.collect()
+    assert vu._SNAPSHOTS.get(old_id) is None
+
+
 @pytest.mark.parametrize("alias", ["base", "view"])
 def test_declaration_alias_cannot_change_the_table(alias):
     """A write through the reader's base array, or through a writable view
