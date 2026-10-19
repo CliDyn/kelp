@@ -104,7 +104,8 @@ Paths are below `src/kelp/`.
   u/v finite down to each node's last usable point; the field is stamped with the
   table object). Trap: the cache and the stamp compare by IDENTITY — replace
   `mesh.sigma`/`mesh.depth`/`mesh.metadata["uv_data_last"]`, never write them in
-  place. Notes: [numerics.md](numerics.md) (its own section and the interpolate.py
+  place (the engine snapshots the declaration at first use: writing into the
+  reader's array afterwards changes nothing). Notes: [numerics.md](numerics.md) (its own section and the interpolate.py
   bullet); the entry gate and the fused twins in [integrators.md](integrators.md);
   the option and the cache marking in [tracking.md](tracking.md); the HEALPix
   declaration in [readers.md](readers.md); `VelocityField.uv_vertical` and

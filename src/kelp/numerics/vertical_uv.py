@@ -35,10 +35,15 @@ cached in ``mesh._uv_depth_points``; an entry is valid while
 ``mesh.sigma``, ``mesh.depth`` and ``mesh.metadata["uv_data_last"]`` are
 the very objects it was built from (identity, never ``id()``), so a
 ``max_levels`` cut or a new depth or declaration rebuilds it.  Replace
-those arrays to change them; an in-place write is not detected — so the
-declaration is frozen (``setflags(write=False)``) once a table uses it,
-and writing into it raises.  A copied or unpickled mesh (whose declaration
-numpy returns writeable) is re-validated and frozen again on first use.
+those arrays to change them; an in-place write is not detected.  The
+engine therefore takes a SNAPSHOT of the declaration at first use: the
+table is built from an owned, read-only copy, which replaces the reader's
+array in ``mesh.metadata["uv_data_last"]`` — the declaration in effect is
+exactly what the table was built from, and no array or view the reader
+still holds can change it (writing into the snapshot raises; assign a new
+array to declare another prefix).  A copied or unpickled mesh (whose
+snapshot numpy returns writeable) gets a new snapshot, validated again, on
+first use.
 
 The record check (:func:`check_depth_linear_record`) refuses a field whose
 u or v is non-finite at a point ``<= last_i`` and stamps a passing field
@@ -112,8 +117,36 @@ class _DepthPointsEntry:
 # The table
 # ---------------------------------------------------------------------------
 
+def _snapshot_declaration(decl, cache):
+    """The declaration a table is built from: an owned, read-only copy.
+
+    ``decl`` itself when it already is the engine's snapshot — read-only
+    and held by a live entry of ``cache`` (the other placement's, or this
+    placement's before a ``max_levels`` cut); otherwise
+    ``np.array(decl, copy=True)`` (dtype kept, validated by the caller),
+    frozen before anyone else holds it, so no earlier view or base array
+    of the reader's can write into it.  ``None`` (no declaration) stays
+    ``None``.
+    """
+    if decl is None:
+        return None
+    if (isinstance(decl, np.ndarray) and not decl.flags.writeable
+            and any(e.decl is decl for e in (cache or {}).values())):
+        return decl
+    snap = np.array(decl, copy=True)
+    snap.setflags(write=False)
+    return snap
+
+
 def _build_depth_points(sigma, depth, decl, placement: str,
                         n_nodes: int) -> DepthPoints:
+    """Build and validate the table of one placement.
+
+    ``decl`` is the engine's snapshot of the declaration
+    (:func:`_snapshot_declaration`) or ``None``; it is validated here and
+    nothing of it is kept but its values in ``last``.  Raises the
+    ``ValueError`` documented in :func:`depth_points`.
+    """
     z = np.abs(np.asarray(sigma, dtype=np.float64))   # == mesh.z_levels
     need = 1 if placement == "level" else 2
     if z.ndim != 1 or z.size < need:
@@ -165,10 +198,6 @@ def _build_depth_points(sigma, depth, decl, placement: str,
                 "only: point 0 is read and must be finite), got minimum "
                 f"{int(dl.min())}")
         last = np.minimum(last, dl.astype(np.int64))
-        if isinstance(decl, np.ndarray):
-            # the table holds the declaration by identity: an in-place write
-            # would go unseen, so it raises from now on (assign a new array)
-            decl.setflags(write=False)
     last = np.maximum(last, 0).astype(np.int32)
     p.setflags(write=False)
     last.setflags(write=False)
@@ -196,6 +225,19 @@ def depth_points(mesh: Mesh, placement: str) -> DepthPoints:
         ``mesh.sigma``, ``mesh.depth`` and the declaration are the same
         objects; rebuilt (a new object) when any of them is replaced.
 
+    Notes
+    -----
+    A build takes the declaration's snapshot (an owned, read-only copy;
+    one that already is the snapshot of a live entry is reused), validates
+    it, builds from it, and installs it in
+    ``mesh.metadata["uv_data_last"]`` in place of the reader's array: the
+    declaration in effect is exactly what the table was built from, and a
+    write into the reader's array, its base or any view of it after that
+    changes nothing (assign a new array to declare another prefix).  A
+    cache entry counts only while that snapshot is still read-only, so a
+    deep-copied or unpickled mesh (numpy returns the copy writeable) gets
+    a new snapshot, validated again, on first use.
+
     Raises
     ------
     ValueError
@@ -218,20 +260,27 @@ def depth_points(mesh: Mesh, placement: str) -> DepthPoints:
     cache = mesh._uv_depth_points
     if cache:
         entry = cache.get(placement)
-        # a WRITEABLE declaration is not the frozen one the entry was built
-        # from, even when identical: a deep copy or an unpickled mesh gets a
-        # new, writeable array (numpy drops the flag) that still matches
-        # its cache entry by identity — rebuild from the current values
+        # a WRITEABLE declaration is not the frozen snapshot the entry was
+        # built from, even when identical: a deep copy or an unpickled mesh
+        # gets a new, writeable array (numpy drops the flag) that still
+        # matches its cache entry by identity — rebuild from its values
         if (entry is not None and entry.sigma is sigma
                 and entry.depth is depth and entry.decl is decl
                 and not (isinstance(decl, np.ndarray)
                          and decl.flags.writeable)):
             return entry.points
-    points = _build_depth_points(sigma, depth, decl, placement, mesh.n_nodes)
+    snap = _snapshot_declaration(decl, cache)
+    points = _build_depth_points(sigma, depth, snap, placement, mesh.n_nodes)
+    if snap is not decl:
+        # the declaration in effect is what the table was built from.  A
+        # shallow copy of the mesh shares this dict and then sees the
+        # snapshot too: equal values, so its next lookup rebuilds its own
+        # table (its entry names the replaced object) with the same prefix
+        mesh.metadata["uv_data_last"] = snap
     # copy-on-write: a shallow copy of the mesh (dataclasses.replace,
     # copy.copy) shares the dict object; never mutate it in place
     new_cache = dict(cache or {})
-    new_cache[placement] = _DepthPointsEntry(sigma, depth, decl, points)
+    new_cache[placement] = _DepthPointsEntry(sigma, depth, snap, points)
     mesh._uv_depth_points = new_cache
     return points
 

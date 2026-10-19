@@ -135,9 +135,11 @@ NaN bed depth compares false with every `lower_k`, so the set is empty and
 NaN after the last point). The table is cached on the
 mesh and rebuilt whenever `mesh.sigma`, `mesh.depth` or the declaration is
 replaced (a `max_levels` cut included; an in-place write is not seen — the
-declaration is therefore frozen once a table uses it, and writing into it
-raises; a copied or unpickled mesh, whose declaration numpy returns
-writeable, is re-validated and frozen again on first use).
+engine therefore builds the table from its own read-only snapshot of the
+declaration, which replaces the reader's array in `mesh.metadata`: writing
+into the reader's array afterwards changes nothing, writing into the snapshot
+raises, and a new array declares another prefix; a copied or unpickled mesh,
+whose snapshot numpy returns writeable, gets a new snapshot on first use).
 
 The rule at one vertex `i` and particle depth `z`:
 

@@ -45,13 +45,16 @@ the tracker was developed privately from 2026-06.
   data-point table, the bracket and the record check. Readers may set
   `native_uv_vertical = "level"` (u/v on the levels, always linear in depth) and
   provide a hook `prepare(mesh, ds)`; no reader of this version uses either.
-  `prepare` runs right after `open_dataset` and again on a direct
-  `run_single_realization` whenever the mesh was prepared for another dataset
-  (named by the token `ds.attrs["kelp_dataset_token"]`) or other kept levels
-  since, so mesh facts a dataset declares (`uv_data_last`) are its own; a
-  `prepare` that raises leaves the mesh unprepared, and the declaration is frozen
-  once a depth-point table uses it (assign a new array each call — writing into
-  it raises).
+  `prepare` runs at every entry: right after `open_dataset` (before any output
+  file exists) and again at the entry of each realization, after the
+  `max_levels` cut — 1 + R calls for R realizations, one per direct
+  `run_single_realization` — so mesh facts a dataset declares (`uv_data_last`)
+  are always those of the dataset, mesh, levels and reader in use; the engine
+  keeps no record of earlier calls. The engine takes a snapshot of the
+  declaration at first use (an owned, read-only copy that replaces the
+  reader's array in `mesh.metadata`): assign a new array to change it —
+  writing into the reader's old array changes nothing, writing into the
+  snapshot raises.
 - The cost of the option is measured by
   `benchmarks/single_node/depth_linear_cost.py` (rows pending).
 

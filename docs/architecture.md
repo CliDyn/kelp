@@ -60,9 +60,11 @@ into its own small dataclass. (Every key is documented in
    the velocity file (or directory of files) as an xarray dataset, without yet
    reading any velocity data — individual time snapshots are read on demand
    during the loop. A reader with the optional hook `prepare(mesh, ds)` gets it
-   called right after (`tracking._prepare_dataset`); a direct
-   `run_single_realization` calls it again whenever the mesh was prepared for
-   another dataset or other kept levels since.
+   called right after (`tracking._prepare_dataset`), before anything reads the
+   dataset on the mesh and before any output file exists; each realization
+   calls it again at its entry (`run_single_realization`, after the
+   `max_levels` cut), so a run with R realizations prepares 1 + R times. The
+   engine keeps no record of what a mesh was prepared for.
 
 4. **Load the seed particles.** `read_seeds_with_release(config.data.inicloud)`
    reads the initial positions (`lon lat [depth] [release_sec]`); once `dt` is
@@ -244,15 +246,16 @@ particle is in.
 | `sigma` | `(K,)` | vertical interfaces — physical depths for z-level meshes, sigma values for sigma meshes; empty for 2D |
 | `vertical_coord` | `"zlevel"` / `"sigma"` | selects the vertical-geometry backend |
 | `rotation_angles` | `(α,β,γ)` or `None` | the Euler frame the coordinates live in; `None` = geographic |
-| `metadata` | `dict` | reader and run facts: e.g. the HEALPix u/v data prefix `uv_data_last` (int `(N,)`), the uncut level table `sigma_full`, what the mesh is prepared for (`kelp_prepared_dataset`, `kelp_prepared_sigma`); shared by shallow copies of the mesh |
+| `metadata` | `dict` | reader and run facts: e.g. the HEALPix u/v data prefix `uv_data_last` (int `(N,)`), the uncut level table `sigma_full`; shared by shallow copies of the mesh |
 
 The spatial search index (grid hash with its `(N, 3)` node coordinate table
 `_node_xyz`, plus a lazily built KD-tree) is attached to the mesh by
 `build_search` during `load_mesh`. Several other quantities —
 element areas, coastal-element flags, the depth-linear data-point tables
 (`_uv_depth_points`, valid while `sigma`, `depth` and `metadata["uv_data_last"]`
-are the objects they were built from; replaced, never mutated, so a shallow
-copy never sees another's rebuild) — are computed lazily and cached on the
+are the objects they were built from — the declaration as the engine's own
+read-only snapshot, installed there at the build; replaced, never mutated, so
+a shallow copy never sees another's rebuild) — are computed lazily and cached on the
 mesh the first time a subsystem needs them.
 
 ### `VelocityField` — one time snapshot of the flow

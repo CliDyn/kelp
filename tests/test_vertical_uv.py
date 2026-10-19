@@ -145,31 +145,117 @@ def test_layer_linear_matches_find_layer_on_many_depths():
     assert dp.last.tolist() == want
 
 
-def test_declaration_frozen_once_used():
-    """The table keeps the declaration by identity, so the engine freezes
-    it: an in-place write after the first use raises instead of leaving a
-    stale table in force; a new array is a new declaration."""
+def test_declaration_snapshot_at_first_use():
+    """The table keeps the declaration by identity, so the engine builds it
+    from its own snapshot: an owned, read-only copy that replaces the
+    reader's array in ``mesh.metadata``.  A later write into the reader's
+    array changes nothing, a write into the snapshot raises, and a new array
+    is a new declaration (snapshot in turn)."""
     vu = _vu()
     decl = np.array([0, 2, 1, 1], dtype=np.int32)
     mesh = _mesh()
     mesh.metadata["uv_data_last"] = decl
-    vu.depth_points(mesh, "level")
-    assert not decl.flags.writeable
+    dp = vu.depth_points(mesh, "level")
+    snap = mesh.metadata["uv_data_last"]
+    assert snap is not decl and snap.base is None
+    assert snap.dtype == decl.dtype and snap.tolist() == [0, 2, 1, 1]
+    assert not snap.flags.writeable and decl.flags.writeable
+    assert mesh._uv_depth_points["level"].decl is snap
+    # the reader's own array is no longer the declaration
+    decl[:] = 3
+    assert vu.depth_points(mesh, "level") is dp
+    assert mesh.metadata["uv_data_last"] is snap
+    assert snap.tolist() == [0, 2, 1, 1]
     with pytest.raises(ValueError, match="read-only"):
-        decl[0] = 3
+        snap[0] = 3
+    # the other placement reuses the snapshot, it does not copy it again
+    vu.depth_points(mesh, "layer_linear")
+    assert mesh.metadata["uv_data_last"] is snap
+    assert mesh._uv_depth_points["layer_linear"].decl is snap
+    # a new array is a new declaration
     mesh.metadata["uv_data_last"] = np.array([3, 2, 1, 0], dtype=np.int32)
     assert vu.depth_points(mesh, "level").last.tolist() == [3, 2, 1, 0]
+
+
+@pytest.mark.parametrize("alias", ["base", "view"])
+def test_declaration_alias_cannot_change_the_table(alias):
+    """A write through the reader's base array, or through a writable view
+    of its declaration taken before the first build, reaches neither the
+    declaration in effect nor a table built later: both come from the
+    engine's snapshot.  Surface-only at the build, then "all five levels"
+    through the alias, then a rebuild (a new bed array, same values): a new
+    record with u = 1 at the surface and a finite fill 1e30 below passes the
+    record check judged against the snapshot, and the particle (jitted
+    kernels) reads 1.0, never the fill.  The other way round (five levels,
+    then the surface only through the alias) the declaration in effect
+    keeps the table's five levels."""
+    from tests.test_interp_depth_linear import _mesh as _mesh_3x3
+    from tests.test_interp_depth_linear import _run, _state
+    vu = _vu()
+
+    def declared(value):
+        """The declaration and a write through its alias."""
+        if alias == "base":
+            owner = np.full((2, 9), value, dtype=np.int32)
+
+            def write(v):
+                owner[0, :] = v
+            return owner[0], write
+        decl = np.full(9, value, dtype=np.int32)
+        view = decl[:]                 # writable, taken before the build
+
+        def write(v):
+            view[:] = v
+        return decl, write
+
+    # levels 0..40 m, every bed below the deepest level
+    mesh = _mesh_3x3(depths=np.full(9, 200.0))
+    decl, write = declared(0)          # surface only
+    mesh.metadata["uv_data_last"] = decl
+    dp = vu.depth_points(mesh, "level")
+    write(4)
+    mesh.depth = mesh.depth.copy()     # rebuild from the declaration in effect
+    u = np.full((5, 9), 1.0e30)
+    u[0] = 1.0
+    vel = VelocityField(u=u, v=np.zeros_like(u), eta=np.zeros(9),
+                        w=np.zeros((5, 9)), uv_layout="node",
+                        uv_vertical="level")
+    vu.check_depth_linear_record(vel, mesh)
+    u_p, _, ok = _run(mesh, vel, _state([(4.3, 4.2)], 30.0))
+    assert ok[0] and u_p[0] == 1.0
+    dp2 = vu.depth_points(mesh, "level")
+    assert dp2 is not dp and dp2.last.tolist() == [0] * 9
+    assert mesh.metadata["uv_data_last"].tolist() == [0] * 9
+    # judged against the snapshot: NaN below the surface is never read,
+    # NaN at the surface is refused
+    u[1:] = np.nan
+    vu.check_depth_linear_record(_field(u), mesh)
+    u[0, 3] = np.nan
+    with pytest.raises(ValueError, match=r"node 3, point 0 "):
+        vu.check_depth_linear_record(_field(u), mesh)
+
+    # the reverse: five levels at the build, the surface only through the
+    # alias afterwards — the declaration in effect is still the table's
+    mesh = _mesh_3x3(depths=np.full(9, 200.0))
+    decl, write = declared(4)
+    mesh.metadata["uv_data_last"] = decl
+    dp = vu.depth_points(mesh, "level")
+    write(0)
+    assert mesh.metadata["uv_data_last"].tolist() == [4] * 9
+    assert vu.depth_points(mesh, "level") is dp
+    assert dp.last.tolist() == [4] * 9
 
 
 @pytest.mark.parametrize("placement", ["level", "layer_linear"])
 @pytest.mark.parametrize("how", ["deepcopy", "pickle"])
 def test_copied_mesh_revalidates_its_declaration(placement, how):
     """A deep copy or an unpickled mesh (default protocol) carries a NEW,
-    WRITEABLE declaration array (numpy drops the read-only flag), while
-    its table cache still matches it by identity: the first use of the copy
-    rebuilds the table from the current values — an in-place write made
-    before it is seen — and freezes the declaration again, so a later
-    in-place write raises."""
+    WRITEABLE declaration array (numpy drops the read-only flag of the
+    snapshot), while its table cache still matches it by identity: the
+    first use of the copy rebuilds the table from the current values — an
+    in-place write made before it is seen — and installs a new read-only
+    snapshot, so a later write into the copy's old array changes nothing
+    and a write into the snapshot raises."""
     import copy
     import pickle
     vu = _vu()
@@ -183,10 +269,13 @@ def test_copied_mesh_revalidates_its_declaration(placement, how):
     decl[0] = 0                                     # unseen without the fix
     dp = vu.depth_points(clone, placement)
     assert dp.last[0] == 0 and dp0.last[0] > 0
-    assert not decl.flags.writeable
+    snap = clone.metadata["uv_data_last"]
+    assert snap is not decl and not snap.flags.writeable
+    assert snap.tolist() == [0, 2, 1, 0]
     with pytest.raises(ValueError, match="read-only"):
-        decl[1] = 0
-    assert vu.depth_points(clone, placement) is dp   # frozen again: cached
+        snap[1] = 0
+    decl[1] = 0                                     # no longer the declaration
+    assert vu.depth_points(clone, placement) is dp   # snapshot: cached
     # the original is untouched
     assert vu.depth_points(mesh, placement) is dp0
 

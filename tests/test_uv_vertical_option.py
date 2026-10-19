@@ -6,11 +6,11 @@ validates the record (prefetch windows and the shared snapshot cache
 included); the HEALPix reader declares its u/v data prefix
 (``mesh.metadata["uv_data_last"]``) and checks its raw records before it
 zeroes them; ``max_levels`` cuts the mesh on every entry point of a
-depth-linear run; the reader hook ``prepare(mesh, ds)`` runs whenever the
-mesh is not prepared for this dataset and level table (a dataset switch or a
-``max_levels`` re-cut prepares again); the output records the option
-(``uv_vertical = "linear"``).  With the option off every run stays
-bit-identical.
+depth-linear run; the reader hook ``prepare(mesh, ds)`` runs at every entry
+(``run_tracking`` right after ``open_dataset``, then each realization), with
+no memory of the dataset, mesh, levels, bed or reader it ran for before; the
+output records the option (``uv_vertical = "linear"``).  With the option off
+every run stays bit-identical.
 
 Fixtures: the 4-node FESOM2 square of ``tests/_fesom2_synth`` (levels 0, 10,
 30 m, layer centres 5 and 20 m, bed 30 m) with u = A + B·z + C·(year −
@@ -24,7 +24,6 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import io
-import re
 import warnings
 from pathlib import Path
 
@@ -1360,20 +1359,29 @@ def test_apply_max_levels_helper():
 # the reader hook prepare(mesh, ds)
 # ---------------------------------------------------------------------------
 
-def test_prepare_called_per_dataset(tmp_path, monkeypatch):
-    """``prepare`` runs once per run_tracking (two realizations), right
-    after open_dataset; on direct entries again for a second dataset on the
-    same mesh, never twice in a row for the same dataset; the dataset is
-    named by a uuid token, never an object id, and the mesh remembers the
-    dataset and the level table it is prepared for."""
+def _engine_keys(mapping):
+    """Keys the engine would have written to remember a preparation."""
+    return sorted(k for k in mapping if str(k).startswith("kelp_"))
+
+
+@pytest.mark.parametrize("num_runs", [1, 3])
+def test_prepare_runs_at_every_entry(tmp_path, monkeypatch, num_runs):
+    """``prepare`` runs at every entry, with no memory of earlier calls:
+    ``run_tracking`` calls it right after ``open_dataset`` (before the
+    pre-writer probe, no output file yet) and each realization again at its
+    entry — 1 + R calls for R realizations; a direct
+    ``run_single_realization`` or ``track_particles`` call prepares once,
+    whatever the dataset, the mesh or a time window of the dataset.  The
+    engine writes nothing into ``ds.attrs`` or ``mesh.metadata`` for it."""
     base = get_reader("fesom2")
     calls, events = [], []
-    out_files = [tmp_path / "traj_r0.nc", tmp_path / "traj_r1.nc"]
+    out_files = ([tmp_path / "traj.nc"] if num_runs == 1 else
+                 [tmp_path / f"traj_r{r}.nc" for r in range(num_runs)])
 
     class Preparing(base):
         @staticmethod
         def prepare(mesh, ds):
-            calls.append((mesh, ds))
+            calls.append((mesh, ds, dict(ds.attrs), sorted(mesh.metadata)))
             events.append(("prepare", any(f.exists() for f in out_files)))
 
         @staticmethod
@@ -1381,37 +1389,43 @@ def test_prepare_called_per_dataset(tmp_path, monkeypatch):
             events.append(("probe", None))
             return base.probe_uv_layout(ds, mode_cfg, mesh)
     monkeypatch.setattr(tracking, "get_reader", lambda name: Preparing)
-    cfg = _fesom2_cfg(tmp_path, uv_vertical="layer", num_runs=2)
+    cfg = _fesom2_cfg(tmp_path, uv_vertical="layer", num_runs=num_runs)
     _run(cfg)
-    assert len(calls) == 1
-    # right after open_dataset: before the pre-writer probe, no output yet
+    assert len(calls) == 1 + num_runs
+    # right after open_dataset: before the pre-writer probe, no output yet;
+    # then at the entry of each realization (its output file is open)
     assert events[:2] == [("prepare", False), ("probe", None)]
-    m0, d0 = calls[0]
-    tok = d0.attrs["kelp_dataset_token"]
-    assert re.fullmatch(r"[0-9a-f]{32}", tok)
-    assert m0.metadata["kelp_prepared_dataset"] == tok
-    assert m0.metadata["kelp_prepared_sigma"] is m0.sigma
-    # direct entries: a second dataset on the same mesh is prepared too
+    assert events[2:] == [("prepare", True)] * num_runs
+    assert len({id(c[0]) for c in calls}) == 1
+    assert len({id(c[1]) for c in calls}) == 1
+    for c in calls[1:]:
+        assert c[2] == calls[0][2] and c[3] == calls[0][3]
+    assert _engine_keys(calls[0][2]) == [] == _engine_keys(calls[0][0].metadata)
+    # direct entries: every call prepares
     calls.clear()
     mesh = Preparing.load_mesh(cfg.mesh)
     ds1 = Preparing.open_dataset(cfg.data.ncinput, mode_cfg=cfg.mode)
     ds2 = Preparing.open_dataset(cfg.data.ncinput, mode_cfg=cfg.mode)
+    attrs1, keys = dict(ds1.attrs), sorted(mesh.metadata)
     _rsr(mesh, ds1, Preparing, cfg.mode, SEEDS, n_steps=1)
     _rsr(mesh, ds1, Preparing, cfg.mode, SEEDS, n_steps=1)
-    assert [c[1] is ds1 for c in calls] == [True]
     _rsr(mesh, ds2, Preparing, cfg.mode, SEEDS, n_steps=1)
-    assert len(calls) == 2 and calls[1][1] is ds2
-    assert ds1.attrs["kelp_dataset_token"] != ds2.attrs["kelp_dataset_token"]
-    assert (mesh.metadata["kelp_prepared_dataset"]
-            == ds2.attrs["kelp_dataset_token"])
-    # another mesh, the same dataset: prepared for that mesh
     other = Preparing.load_mesh(cfg.mesh)
     _rsr(other, ds1, Preparing, cfg.mode, SEEDS, n_steps=1)
-    assert len(calls) == 3 and calls[2][0] is other
-    # a time window of ds1 is the same dataset (it inherits the token)
-    _rsr(other, ds1.isel(time=slice(0, 4)), Preparing, cfg.mode, SEEDS,
-         n_steps=1)
-    assert len(calls) == 3
+    window = ds1.isel(time=slice(0, 4))
+    _rsr(other, window, Preparing, cfg.mode, SEEDS, n_steps=1)
+    assert sorted(mesh.metadata) == keys == sorted(other.metadata)
+    lon0, lat0, z0 = (np.array(c, dtype=np.float64) for c in zip(*SEEDS))
+    tracking.track_particles(
+        mesh, ds1, Preparing, lon0, lat0, z0, start_time_idx=0, n_steps=1,
+        dt=DT, integrator="euler", mode=cfg.mode, uv_interp="barycentric",
+        w_interp="barycentric")
+    want = [(mesh, ds1), (mesh, ds1), (mesh, ds2), (other, ds1),
+            (other, window), (mesh, ds1)]
+    assert len(calls) == len(want)
+    assert all(c[0] is m and c[1] is d for c, (m, d) in zip(calls, want))
+    assert dict(ds1.attrs) == attrs1 and _engine_keys(ds1.attrs) == []
+    assert _engine_keys(mesh.metadata) == []
     ds1.close()
     ds2.close()
 
@@ -1483,9 +1497,9 @@ def _switch_env(tmp_path, placement):
 @pytest.mark.parametrize("order", ["ABA", "BAB"])
 def test_switching_datasets_prepares_again(tmp_path, placement, order):
     """Two datasets with different data prefixes on ONE mesh, used A → B → A
-    (and B → A → B): every switch runs ``prepare`` again, so each run reads
-    with its own dataset's declaration and the third run equals the first
-    bit for bit."""
+    (and B → A → B): every run prepares its own dataset, so each reads with
+    its own dataset's declaration and the third run equals the first bit
+    for bit."""
     mesh, dss, run, calls, u = _switch_env(tmp_path, placement)
     out = [run(name) for name in order]
     for name, r in zip(order, out):        # record 0: the 1958 file
@@ -1499,22 +1513,25 @@ def test_switching_datasets_prepares_again(tmp_path, placement, order):
 
 
 @pytest.mark.parametrize("placement", sorted(_SWITCH))
-def test_failed_prepare_leaves_the_mesh_unprepared(tmp_path, placement):
+def test_failed_prepare_then_a_succeeding_one(tmp_path, placement):
     """A → B (whose ``prepare`` replaces the declaration and then raises) →
-    A: the failed call leaves no stamp, so A is prepared again and reads
-    with its own declaration, bit for bit the first A run."""
+    A: the next run prepares A again and reads with its own declaration,
+    bit for bit the first A run; the engine wrote nothing into either
+    dataset's ``attrs`` or into ``mesh.metadata`` on the way."""
     mesh, dss, run, calls, u = _switch_env(tmp_path, placement)
+    attrs = {k: dict(ds.attrs) for k, ds in dss.items()}
     first = run("A")
     dss["B"].attrs["fail"] = True
     with pytest.raises(RuntimeError, match="prepare failed for B"):
         run("B")
-    assert "kelp_prepared_dataset" not in mesh.metadata
-    assert "kelp_prepared_sigma" not in mesh.metadata
+    del dss["B"].attrs["fail"]
     again = run("A")
     assert again["vel_u"][0, 0] == pytest.approx(u["A"], rel=0, abs=1e-15)
     for k in ("lon", "lat", "z", "vel_u"):
         assert_bitwise(again[k], first[k], k)
     assert [c[0] for c in calls] == ["A", "B", "A"]
+    assert {k: dict(ds.attrs) for k, ds in dss.items()} == attrs
+    assert _engine_keys(mesh.metadata) == []
     for ds in dss.values():
         ds.close()
 
@@ -1523,8 +1540,9 @@ def test_failed_prepare_leaves_the_mesh_unprepared(tmp_path, placement):
 def test_declaration_written_in_place_is_refused(tmp_path, placement):
     """The depth-point table holds the declaration by identity, so a
     ``prepare`` that writes INTO the declaration array would not be seen:
-    the engine freezes the array once a table uses it, and the in-place
-    write raises at the reader's own line."""
+    the declaration in effect is the engine's read-only snapshot (taken by
+    the first table), and the in-place write raises at the reader's own
+    line."""
     mesh, dss, run, calls, u = _switch_env(tmp_path, placement)
     run("A")
     assert not mesh.metadata["uv_data_last"].flags.writeable
@@ -1537,26 +1555,154 @@ def test_declaration_written_in_place_is_refused(tmp_path, placement):
 
 @pytest.mark.parametrize("placement", sorted(_SWITCH))
 def test_prepare_follows_the_kept_levels(tmp_path, placement):
-    """The same dataset twice: ``prepare`` once.  A direct call with another
-    ``max_levels`` re-cuts ``mesh.sigma`` and runs ``prepare`` again (it
-    sees the cut table); the same limit again does not; None restores the
-    table and prepares again.  The depth-point table follows the levels."""
+    """Every run prepares and the hook sees the levels in use: the same
+    dataset twice, a direct call with another ``max_levels`` (re-cuts
+    ``mesh.sigma`` before the hook), the same limit again, and None
+    (restores the table).  The depth-point table follows the levels."""
     mesh, dss, run, calls, u = _switch_env(tmp_path, placement)
     run("A")
     run("A")
-    assert calls == [("A", 3)]
     run("A", max_levels=2)
-    assert calls[-1] == ("A", 2) and len(calls) == 2
     run("A", max_levels=2)
-    assert len(calls) == 2
     run("A")
-    assert calls[-1] == ("A", 3) and len(calls) == 3
+    assert calls == [("A", 3), ("A", 3), ("A", 2), ("A", 2), ("A", 3)]
     dp = depth_points(mesh, placement)
     full = np.abs(mesh.sigma)
     np.testing.assert_array_equal(
         dp.p, full if placement == "level" else 0.5 * (full[:-1] + full[1:]))
     for ds in dss.values():
         ds.close()
+
+
+@pytest.mark.parametrize("placement", sorted(_SWITCH))
+@pytest.mark.parametrize("how", ["saved", "copied"])
+def test_dataset_derived_from_a_prepared_one_is_prepared(tmp_path, placement,
+                                                         how):
+    """A dataset saved from a prepared one and reopened, or ``copy()``-ed
+    with other attributes, is another dataset: its run prepares it and
+    reads with ITS declaration (B's), not with the one of the dataset it
+    came from (A's).  Nothing of the engine travels through the file."""
+    mesh, dss, run, calls, u = _switch_env(tmp_path, placement)
+    run("A")
+    if how == "saved":
+        path = tmp_path / "saved_A.nc"
+        dss["A"].compute().to_netcdf(path)   # in memory: no dask writer
+        derived = xr.open_dataset(path)
+    else:
+        derived = dss["A"].copy()
+    saved_attrs = _engine_keys(derived.attrs)
+    derived.attrs.update(name="B2", decl=dss["B"].attrs["decl"])
+    dss["B2"] = derived
+    out = run("B2")
+    assert out["vel_u"][0, 0] == pytest.approx(u["B"], rel=0, abs=1e-15)
+    assert [c[0] for c in calls] == ["A", "B2"]
+    assert saved_attrs == []
+    if how == "saved":
+        derived.close()
+    for name in ("A", "B"):
+        dss[name].close()
+
+
+@pytest.mark.parametrize("placement", sorted(_SWITCH))
+def test_two_readers_on_one_mesh_and_dataset(tmp_path, placement):
+    """Two readers whose ``prepare`` differs, on one mesh and one dataset:
+    each run prepares with its own reader's hook and reads with that
+    reader's declaration (A → the other reader → A again)."""
+    mesh, dss, run, calls, u = _switch_env(tmp_path, placement)
+    reader, _ = _declaring_reader(placement)
+    shallow = _SWITCH[placement][3]
+    other_calls = []
+
+    class Other(reader):
+        @staticmethod
+        def prepare(m, ds):
+            other_calls.append(ds.attrs["name"])
+            m.metadata["uv_data_last"] = np.array(shallow, dtype=np.int32)
+    first = run("A")
+    option, z = _SWITCH[placement][:2]
+    mode = _fesom2_mode(uv_vertical=option)
+    by_other = _rsr(mesh, dss["A"], Other, mode, [(0.15, 0.4, z)], n_steps=1)
+    assert by_other["vel_u"][0, 0] == pytest.approx(u["B"], rel=0,
+                                                    abs=1e-15)
+    assert other_calls == ["A"]
+    again = run("A")
+    assert [c[0] for c in calls] == ["A", "A"]
+    for k in ("lon", "lat", "z", "vel_u"):
+        assert_bitwise(again[k], first[k], k)
+    for ds in dss.values():
+        ds.close()
+
+
+@pytest.mark.parametrize("placement", ["level", "layer_linear"])
+@pytest.mark.parametrize("how", ["copy", "replace"])
+def test_prepare_follows_a_replaced_bed(placement, how):
+    """A reader whose ``prepare`` derives its declaration from
+    ``mesh.depth``: prepared on a 10 m mesh, then a shallow copy (shared
+    ``mesh.metadata``) with a 200 m bed.  The copy's run prepares the copy
+    and reads its own deep column (u = 3.0 at 30 m); the original's next
+    run prepares it again and reads its shallow one (1.0 on the levels,
+    0.5 on the layer centres)."""
+    import copy
+
+    from tests.test_interp_depth_linear import _mesh as _mesh_3x3
+    calls = []
+    native = "level" if placement == "level" else "layer"
+
+    def lower(mesh):
+        z = mesh.z_levels
+        return z if placement == "level" else z[1:]
+
+    def last_of(mesh):
+        return np.maximum(0, np.searchsorted(lower(mesh), mesh.depth,
+                                             side="right") - 1)
+
+    class BedReader:
+        native_uv_vertical = native
+
+        @staticmethod
+        def prepare(mesh, ds):
+            calls.append(float(mesh.depth[0]))
+            mesh.metadata["uv_data_last"] = last_of(mesh).astype(np.int32)
+
+        @staticmethod
+        def read_velocities(ds, timestep, mesh, mode_cfg=None, **kw):
+            z = mesh.z_levels
+            p = z if placement == "level" else 0.5 * (z[:-1] + z[1:])
+            u = np.repeat((p / 10.0)[:, None], mesh.n_nodes, axis=1)
+            u[np.arange(p.size)[:, None] > last_of(mesh)[None, :]] = np.nan
+            return VelocityField(
+                u=u, v=np.where(np.isfinite(u), 0.0, np.nan),
+                eta=np.zeros(mesh.n_nodes),
+                w=np.zeros((z.size, mesh.n_nodes)), uv_layout="node",
+                uv_vertical=native)
+    ds = xr.Dataset(coords={"time": ("time", np.arange(3) * 10.0, {
+        "units": "seconds since 2000-01-01", "calendar": "standard"})})
+    mode = ModeConfig(Fdrift3D=True, Fdrift2D=False,
+                      uv_vertical="layer" if placement == "level"
+                      else "linear")
+    numerics = NumericsConfig(dt=10.0, integrator="euler",
+                              uv_interp="barycentric", w_interp="nearest")
+
+    def run(m):
+        st = make_state(np.array([4.3]), np.array([4.2]), np.array([30.0]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            rec = tracking.run_single_realization(
+                m, ds, BedReader, st, mode, numerics, start_time_idx=0,
+                n_steps=1)
+        return rec.to_arrays()["vel_u"][0, 0]
+    mesh = _mesh_3x3(depths=np.full(9, 10.0))
+    shallow = 1.0 if placement == "level" else 0.5
+    assert run(mesh) == pytest.approx(shallow, rel=0, abs=1e-12)
+    deep_bed = np.full(9, 200.0)
+    if how == "copy":
+        clone = copy.copy(mesh)
+        clone.depth = deep_bed
+    else:
+        clone = dataclasses.replace(mesh, depth=deep_bed)
+    assert clone.metadata is mesh.metadata
+    assert run(clone) == pytest.approx(3.0, rel=0, abs=1e-12)
+    assert run(mesh) == pytest.approx(shallow, rel=0, abs=1e-12)
+    assert calls == [10.0, 200.0, 10.0]
 
 
 def test_concat_refuses_shards_with_different_option(tmp_path):

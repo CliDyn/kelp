@@ -14,7 +14,6 @@ Supports two velocity modes:
 from __future__ import annotations
 
 import time as _time
-import uuid
 import warnings
 from dataclasses import dataclass, field
 from dataclasses import replace as _dc_replace
@@ -557,51 +556,25 @@ def _apply_max_levels(mesh, mode, verbose: bool = False) -> None:
                   f"(max depth {mesh.sigma[-1]:.1f}m)")
 
 
-def _prepare_dataset(reader, mesh, ds, *, always: bool = False) -> None:
-    """Run the reader's optional ``prepare(mesh, ds)`` hook when the mesh is
-    not prepared for this dataset and its current levels.
+def _prepare_dataset(reader, mesh, ds) -> None:
+    """Run the reader's optional ``prepare(mesh, ds)`` hook.
 
-    The mesh remembers what it is CURRENTLY prepared for: after ``prepare``
-    returns, ``mesh.metadata["kelp_prepared_dataset"]`` holds the dataset's
-    token (``ds.attrs["kelp_dataset_token"]``, a ``uuid4`` hex created here
-    when absent — never an object id, which a freed object can pass on;
-    ``isel`` windows of the dataset inherit it, they are views of the same
-    data) and ``mesh.metadata["kelp_prepared_sigma"]`` the level table
-    ``mesh.sigma`` (a strong reference, compared by identity).  The hook
-    runs again when either differs: another dataset was prepared since
-    (A → B → A prepares A again, since B's ``prepare`` may have replaced
-    mesh facts such as ``uv_data_last``), or ``max_levels`` re-cut the
-    levels.  ``always`` (``run_tracking``, right after ``open_dataset``)
-    runs it unconditionally.  A dataset without ``attrs`` is prepared every
-    time.  The two stamps are removed before the hook runs and set only
-    after it returns, so a hook that raises leaves the mesh unprepared (the
-    next call prepares again).  Readers without the hook: nothing is created
-    or stored.
+    The hook runs at every call: the engine keeps no record of what a mesh
+    was prepared for (no dataset token, no level table, bed or reader
+    stamp) and writes nothing into ``ds.attrs`` or ``mesh.metadata`` for
+    it, so whatever the mesh, the dataset, the kept levels or the reader
+    of this call, the hook sees exactly them.  ``run_single_realization``
+    calls it at its entry, after the ``max_levels`` cut (the hook sees the
+    levels in use): once per realization.  ``run_tracking`` calls it once
+    more, right after ``open_dataset``, so a refusal of the hook comes
+    before the sampling probes and before any output file exists.  A hook
+    that raises leaves nothing behind in the engine.  Readers without the
+    hook: nothing happens.
     """
     prep = getattr(reader, "prepare", None)
     if prep is None:
         return
-    if getattr(mesh, "metadata", None) is None:
-        mesh.metadata = {}
-    attrs = getattr(ds, "attrs", None)
-    token = None
-    if attrs is not None:
-        token = attrs.get("kelp_dataset_token")
-        if token is None:
-            token = uuid.uuid4().hex
-            attrs["kelp_dataset_token"] = token
-    md = mesh.metadata
-    if (not always and token is not None
-            and md.get("kelp_prepared_dataset") == token
-            and md.get("kelp_prepared_sigma") is mesh.sigma):
-        return
-    # unprepared while the hook runs: a hook that replaces mesh facts and
-    # then raises must not leave the stamp of the dataset prepared before
-    md.pop("kelp_prepared_dataset", None)
-    md.pop("kelp_prepared_sigma", None)
     prep(mesh, ds)
-    md["kelp_prepared_dataset"] = token
-    md["kelp_prepared_sigma"] = mesh.sigma
 
 
 # ---------------------------------------------------------------------------
@@ -1822,11 +1795,8 @@ def run_single_realization(
     ``mode.max_levels`` to ``mesh.sigma`` itself, from the uncut table kept
     in ``mesh.metadata["sigma_full"]`` (None restores it); a mesh cut that
     way earlier is re-cut to this call's limit whatever the option.  A
-    reader's optional ``prepare(mesh, ds)`` hook runs unless the mesh is
-    prepared for this dataset and its current levels
-    (``mesh.metadata["kelp_prepared_dataset"] ==
-    ds.attrs["kelp_dataset_token"]`` and ``mesh.metadata["kelp_prepared_sigma"]
-    is mesh.sigma``), so switching datasets or ``max_levels`` prepares again.
+    reader's optional ``prepare(mesh, ds)`` hook runs at every call, after
+    that cut (``_prepare_dataset``).
     """
     from .core.release import check_particle_offset
     # None (a restart written without an offset) means an unsharded run
@@ -1910,8 +1880,8 @@ def run_single_realization(
             or getattr(reader, "native_uv_vertical", "layer") == "level"
             or "sigma_full" in (getattr(mesh, "metadata", None) or {})):
         _apply_max_levels(mesh, mode)
-    # the reader's mesh-relative dataset hook, unless the mesh is prepared
-    # for this dataset and its current levels (after the cut above)
+    # the reader's mesh-relative dataset hook, at every entry (after the
+    # cut above: it sees the levels in use)
     _prepare_dataset(reader, mesh, ds)
 
     # Mesh-derived default for ``dres_m``:
@@ -3096,9 +3066,11 @@ def run_tracking(
         _extra["diffusion"] = _d0
     ds = reader.open_dataset(config.data.ncinput, v_path=v_path, w_path=w_path,
                              mode_cfg=config.mode, **_extra)
-    # the reader's optional mesh-relative dataset hook: always for a dataset
-    # just opened (the mesh then remembers the dataset and its levels)
-    _prepare_dataset(reader, mesh, ds, always=True)
+    # the reader's optional mesh-relative dataset hook, before anything
+    # below reads the dataset on the mesh (the sampling and dry-mask probes)
+    # and before the writer exists, so its refusals leave no output file;
+    # run_single_realization runs it again at each realization's entry
+    _prepare_dataset(reader, mesh, ds)
 
     # Load initial particle seeds (delayed-release aware: an optional 4th
     # column is the release offset in seconds).  The release STATE is built
