@@ -27,7 +27,7 @@ configuration:
   - src/kelp/core/config.py:ModeConfig
   - src/kelp/readers/fesom14/reader.py:Fesom14Reader
   doc: docs/configuration.md
-  verified_at: d5d4815
+  verified_at: e478320
 coordinate_frame:
   code:
   - src/kelp/core/rotation.py:euler_matrix
@@ -107,7 +107,7 @@ dev_readers:
   - src/kelp/readers/nemo.py:NemoReader
   - src/kelp/readers/fesom14/
   doc: docs/dev/readers.md
-  verified_at: d5d4815
+  verified_at: e478320
 dev_tracking:
   code:
   - src/kelp/tracking.py:run_tracking
