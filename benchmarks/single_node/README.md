@@ -51,5 +51,5 @@ it ran on the zoom-8 seed file).
   fused 3-D RK2 step with the same u/v arrays read per layer and linearly in
   depth); method and rows in [depth_linear_cost.md](depth_linear_cost.md).
 - [fesom14_lr_cost.md](fesom14_lr_cost.md) — the FESOM 1.4 reader on the
-  published LR output: measured I/O (mesh, dataset open, record reads), the
-  step cost pending.
+  published LR output: measured I/O (mesh, dataset open, record reads) and
+  the fused 3-D RK2 step cost (17.2 ms for 1e5 particles at 128 threads).
