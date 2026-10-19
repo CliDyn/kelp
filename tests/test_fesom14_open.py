@@ -29,6 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import xarray as xr
 
 netCDF4 = pytest.importorskip("netCDF4")
 pytest.importorskip("cftime")
@@ -139,6 +140,19 @@ def _levelwise(path: Path, var: str, *, stamps, units, t0=0, bounds=None,
                           {"standard_name": "latitude"}))
     gattrs = {"output_schedule": schedule} if schedule else None
     return _write_nc(path, dims, variables, gattrs)
+
+
+def _append(path: Path, dims: dict, variables: list) -> Path:
+    """Add dimensions and variables ``[(name, dims, values)]`` to a file."""
+    with netCDF4.Dataset(str(path), "a") as nc:
+        for name, size in dims.items():
+            if name not in nc.dimensions:
+                nc.createDimension(name, size)
+        for name, vdims, values in variables:
+            values = np.asarray(values)
+            var = nc.createVariable(name, values.dtype, vdims)
+            var[...] = values
+    return path
 
 
 def _decade(d: Path, var: str, decade: int, **kw) -> Path:
@@ -338,6 +352,98 @@ def test_lazy_records(tmp_path):
                                _value("vo", np.arange(118, 122), 0, 0),
                                rtol=0, atol=1e-3)
     ds.close()
+
+
+# ---------------------------------------------------------------------------
+# Node coordinates: one-dimensional along a horizontal dimension, or refused
+# ---------------------------------------------------------------------------
+
+#: ``lon``/``lat`` written into a file of ``vo``: (new dimensions, variables)
+BAD_COORDS = {
+    "time_nodes_3d": ({}, [("lon", ("time", "nodes_3d"), np.zeros((3, N3D))),
+                           ("lat", ("time", "nodes_3d"), np.zeros((3, N3D)))]),
+    "time_nodes_3d_coordinates": (
+        {}, [("lon", ("time", "nodes_3d"), np.zeros((3, N3D))),
+             ("lat", ("time", "nodes_3d"), np.zeros((3, N3D)))]),
+    "singleton": ({"x": 1, "nodes_2d": N_NODES},
+                  [("lon", ("x", "nodes_2d"), LON[None, :]),
+                   ("lat", ("x", "nodes_2d"), LAT[None, :])]),
+    "scalar": ({}, [("lon", (), 10.0), ("lat", (), 50.0)]),
+    "other_dimension": ({"x": N_NODES}, [("lon", ("x",), LON),
+                                         ("lat", ("x",), LAT)]),
+    "lon_only": ({"nodes_2d": N_NODES}, [("lon", ("nodes_2d",), LON)]),
+    "lat_only": ({"nodes_2d": N_NODES}, [("lat", ("nodes_2d",), LAT)]),
+    "two_dimensions": ({"nodes_2d": N_NODES},
+                       [("lon", ("nodes_2d",), LON),
+                        ("lat", ("nodes_3d",), np.zeros(N3D))]),
+}
+
+
+@pytest.mark.parametrize("case", list(BAD_COORDS))
+def test_node_coordinates_of_another_shape_refused(tmp_path, case):
+    """A variable named ``lon`` or ``lat`` in a file of a consumed variable
+    is a node coordinate: one-dimensional along one horizontal dimension,
+    ``lon`` and ``lat`` together and along the same one.  Any other shape
+    (an extra time or singleton axis, a scalar, another dimension), one of
+    the two alone, or the two along different dimensions is refused,
+    naming the file, the variable and its dimensions: such coordinates
+    cannot be checked against the mesh and are never ignored, whether they
+    are data variables or coordinates of ``vo`` (its ``coordinates``
+    attribute)."""
+    for var in ("uo", "vo", "wo"):
+        path = _raw_months(tmp_path, var)
+    dims, variables = BAD_COORDS[case]
+    vo = _append(path.with_name("vo_run_19480101.nc"), dims, variables)
+    if case.endswith("_coordinates"):
+        with netCDF4.Dataset(str(vo), "a") as nc:
+            nc["vo"].coordinates = "lon lat"
+        with xr.open_dataset(vo, decode_times=False) as ds:
+            assert {"lon", "lat"} <= set(ds["vo"].coords)
+    msg = _refusal(tmp_path, MODE_3D)
+    _assert_names(msg, "vo_run_19480101.nc", "one-dimensional",
+                  "remove them from the file")
+    name = variables[-1][0] if case == "lat_only" else variables[0][0]
+    if case in ("lon_only", "lat_only"):
+        other = "lat" if case == "lon_only" else "lon"
+        _assert_names(msg, f"{name!r}", f"no {other!r}")
+    elif case == "two_dimensions":
+        _assert_names(msg, "'lon'", "('nodes_2d',)", "'lat'", "('nodes_3d',)")
+    else:
+        _assert_names(msg, "'lon'", str(variables[0][1]))
+
+
+def test_node_coordinates_change_shape_between_files_refused(tmp_path):
+    """Two job segments of each variable: the first files carry
+    one-dimensional coordinates over ``nodes_3d``, the later file of ``uo``
+    the same values over ``(time, nodes_3d)``: refused, naming that file."""
+    lon3, lat3 = np.linspace(0.0, 12.0, N3D), np.linspace(40.0, 52.0, N3D)
+    for var in ("uo", "vo", "wo"):
+        first = _raw(tmp_path, var, "1948-01-01", NOLEAP_MONTH_ENDS, runid="a")
+        _append(first, {}, [("lon", ("nodes_3d",), lon3),
+                            ("lat", ("nodes_3d",), lat3)])
+        _raw(tmp_path, var, "1949-01-01", NOLEAP_MONTH_ENDS, runid="b", t0=12)
+    _append(tmp_path / "uo_b_19490101.nc", {},
+            [("lon", ("time", "nodes_3d"), np.tile(lon3, (12, 1))),
+             ("lat", ("time", "nodes_3d"), np.tile(lat3, (12, 1)))])
+    msg = _refusal(tmp_path, MODE_3D)
+    _assert_names(msg, "uo_b_19490101.nc", "'lon'", "('time', 'nodes_3d')")
+
+
+def test_published_layout_opens(tmp_path):
+    """The published level-wise layout: float64 ``lon``/``lat`` over
+    ``ncells`` and the cell bounds ``lon_bnds``/``lat_bnds`` over
+    ``(ncells, nv)``: the bounds are not node coordinates, the files open
+    with one set of node coordinates."""
+    for var in ("uo", "vo", "wo", "zos"):
+        path = _decade(tmp_path, var, 0)
+        bounds = np.zeros((N_NODES, 6))
+        _append(path, {"nv": 6}, [("lon_bnds", ("ncells", "nv"), bounds),
+                                  ("lat_bnds", ("ncells", "nv"), bounds)])
+    with _open(tmp_path, MODE_3D) as ds:
+        assert ds.attrs["fesom14_node_coords"] == "ncells: lon lat"
+        assert ds["lon"].dtype == np.float64
+        np.testing.assert_array_equal(ds["lon"].values, LON)
+        assert "lon_bnds" not in ds.variables
 
 
 # ---------------------------------------------------------------------------

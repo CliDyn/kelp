@@ -73,13 +73,14 @@ def _time(nc, n_time):
 
 def _write_var(path: Path, var: str, lon, lat, ncol, *, levels=LEVELS,
                n_time=3, below="nan", coords=True, perm=None, edit=None,
-               two_d=False, hdim="ncells") -> Path:
+               two_d=False, hdim="ncells", coord_dtype="f8") -> Path:
     """A level-wise file ``var(time, depth, <hdim>)``: data in the top
     ``ncol[n]`` levels of each column, ``below`` under the bed (``"nan"``: a
     decoded ``_FillValue``; ``"zero"``: 0 written below the bed); with
     ``two_d``, ``var(time, <hdim>)``.  ``perm`` reorders the nodes (values
     and coordinates alike); ``edit(values)`` plants a defect in the
-    ``(time, depth, ncells)`` values before they are written."""
+    ``(time, depth, ncells)`` values before they are written;
+    ``coord_dtype`` is the type the coordinates are stored in."""
     lon, lat = np.asarray(lon, float), np.asarray(lat, float)
     ncol = np.asarray(ncol)
     n_nodes, n_lev = lon.size, len(levels)
@@ -110,7 +111,7 @@ def _write_var(path: Path, var: str, lon, lat, ncol, *, levels=LEVELS,
             v[:] = np.ma.masked_invalid(vals)
         if coords:
             for name, values in (("lon", lon), ("lat", lat)):
-                c = nc.createVariable(name, "f8", (hdim,))
+                c = nc.createVariable(name, coord_dtype, (hdim,))
                 c[:] = values
     return path
 
@@ -620,6 +621,86 @@ def test_coordinates_of_another_length(tmp_path):
             msg = _refusal(umesh, ds)
         assert "lon_nodes_2d" in msg and "6 entries" in msg, msg
         assert "5 2-D nodes and 20 3-D nodes" in msg, msg
+
+
+def test_coordinates_of_another_length_than_their_dimension(tmp_path):
+    """The velocity files carry 20 coordinates along ``nodes_2d`` (one per
+    3-D node of the uniform mesh), next to a ``zos`` whose ``nodes_2d`` has
+    five: refused at open, although 20 is the node count of the
+    velocities (the coordinates are not moved to another dimension)."""
+    lon3, lat3 = np.tile(HAND_LON, 4), np.tile(HAND_LAT, 4)
+    d = _raw_uniform(tmp_path / "twenty")
+    for var in ("uo", "vo", "wo"):
+        _write_raw(d / f"{var}.nc", var, 20, coords=(lon3, lat3),
+                   coords_dim="nodes_2d")
+    with pytest.raises(ValueError) as info:
+        _open(d)
+    msg = str(info.value)
+    assert "uo.nc" in msg and "20 entries along 'nodes_2d'" in msg, msg
+    assert "5 entries for 'zos'" in msg, msg
+
+
+#: the hand mesh moved east (lon 150.12 .. 152.12) and to the dateline
+#: (lon 178.12 .. 180.12); the digits are not those of a float32
+SHIFTS = {"east": 140.1234567, "dateline": 168.1234567}
+
+FLOAT32_CASES = [("east", "as_written"), ("dateline", "0..360"),
+                 ("dateline", "-180..180")]
+
+
+def _shifted(where: str, convention: str):
+    """The shifted mesh nodes ``(lon, lat)`` and the data longitudes in the
+    given convention; the float32 rounding of the data's coordinates is
+    beyond a fixed 1e-6 deg."""
+    lon = HAND_LON + SHIFTS[where]
+    lat = HAND_LAT + 0.1234567
+    data_lon = (np.where(lon >= 180.0, lon - 360.0, lon)
+                if convention == "-180..180" else lon)
+    rounding = max(np.abs(np.float32(data_lon) - data_lon).max(),
+                   np.abs(np.float32(lat) - lat).max())
+    assert rounding > 1e-6
+    return lon, lat, data_lon
+
+
+@pytest.mark.parametrize("where, convention", FLOAT32_CASES)
+def test_float32_coordinates_of_a_float64_mesh(tmp_path, where, convention):
+    """float32 coordinates hold the nodes of a float64 ASCII mesh to their
+    own precision (a float32 spacing is 1.5e-5 deg between 128 and 256
+    deg): accepted against the mesh, in either longitude convention.  The
+    tolerance is two spacings of the coordinates' own type at their
+    magnitude (3.05e-5 deg here), so a swap of two neighbouring nodes is
+    still refused."""
+    lon, lat, data_lon = _shifted(where, convention)
+    mesh = _mesh(_write_ascii(tmp_path / "mesh", lon, lat, EXPECTED_TRI,
+                              HAND_NCOL))
+    with _open(_levelwise(tmp_path / "f32", data_lon, lat,
+                          coord_dtype="f4")) as ds:
+        Fesom14Reader.prepare(mesh, ds)
+        assert ds["lon"].dtype == np.float32     # kept in its own type
+
+    umesh = _mesh(_write_ascii(tmp_path / "umesh", lon, lat, EXPECTED_TRI,
+                               [4] * 5))
+    d = _levelwise(tmp_path / "perm", data_lon, lat, ncol=[4] * 5,
+                   perm=[1, 0, 2, 3, 4], coord_dtype="f4")
+    with _open(d) as ds:
+        msg = _refusal(umesh, ds)
+    assert "at node 0:" in msg and "more than 3.05176e-05 deg" in msg, msg
+
+
+@pytest.mark.parametrize("where, convention", FLOAT32_CASES)
+def test_float32_and_float64_coordinates_between_files(tmp_path, where,
+                                                       convention):
+    """The velocity files with float32 coordinates, the ``zos`` file with
+    float64 ones of the same nodes: the files agree (the tolerance is that
+    of the coarser type), and the data fit the mesh."""
+    lon, lat, data_lon = _shifted(where, convention)
+    mesh = _mesh(_write_ascii(tmp_path / "mesh", lon, lat, EXPECTED_TRI,
+                              HAND_NCOL))
+    d = _levelwise(tmp_path / "mixed", data_lon, lat, coord_dtype="f4",
+                   variables=("uo", "vo", "wo", "zos"),
+                   per_var={"zos": {"coord_dtype": "f8"}})
+    with _open(d) as ds:
+        Fesom14Reader.prepare(mesh, ds)
 
 
 def test_raw_common_permutation_seen_by_3d_coordinates(tmp_path):

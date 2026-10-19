@@ -258,13 +258,21 @@ never by their names:
   `iter`: snapshots with u/v in the rotated model frame) and the older
   branch's `<runid>.<year>.oce.mean.nc` mean output (its writer is not part of
   FESOM 1.4, so neither its frame nor its time axis can be checked); files or
-  variables of different layouts, levels or node coordinates.
+  variables of different layouts, levels or node coordinates; and a variable
+  named `lon` or `lat` that is not a node coordinate the reader can check —
+  in a file of a consumed variable, `lon` and `lat` must be one-dimensional
+  along one horizontal dimension (`ncells`, `nodes_2d` or `nodes_3d`), both
+  of them and along the same one (cell bounds such as `lon_bnds` are not
+  affected); write them so or remove them from the file.
 - The checks against the mesh (sizes, the level axis, node coordinates, the
   wet mask of record 0 of every variable) run right after, before any output
   file exists. Node coordinates count from any file that carries them, along
   any of its horizontal dimensions: next to vectors over the 3-D nodes, the
   `lon`/`lat` over the 2-D nodes of a `zos` file, or of the velocity files
-  themselves, are compared with the mesh too.
+  themselves, are compared with the mesh too. The tolerance is 1e-6°, or two
+  spacings of the coordinates' own floating type at their magnitude when that
+  is more (float32 coordinates near 180°: 3.05e-5°, still far below the
+  distance between two nodes).
 
 **FESOM2 (`mesh.type: fesom2`), `ncinput` is a file or Zarr store:**
 

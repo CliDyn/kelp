@@ -124,7 +124,8 @@ _SURFACE_TOL = 1e-6
 #: largest difference (m) between ``deptho`` and the depth of the last wet level
 _DEPTHO_TOL = 0.01
 
-#: largest difference (deg) between the node coordinates of two files
+#: largest difference (deg) between the node coordinates of two files, or of
+#: the data and the mesh; coarser coordinates widen it (``_coord_tol``)
 _COORD_TOL = 1e-6
 
 #: largest difference (m) between the level coordinates of two data files
@@ -347,17 +348,17 @@ class Fesom14Reader:
             calendar of the u files; the window centre of a mean, the stamp
             of a snapshot); the level coordinate of the level-wise form; the
             node coordinates: the ``lon``/``lat`` of every file of a
-            consumed variable that has them along one of its horizontal
-            dimensions (:data:`HORIZONTAL_DIMS`, the variable's own or
-            another, e.g. ``lon(nodes_2d)`` in a file of vectors over
-            ``nodes_3d``), one set per number of nodes. A set lies along
-            the horizontal dimension of the first consumed variable with
-            that many nodes (u first), else along its dimension in its
-            file, and is named ``lon``/``lat`` along u's dimension,
-            ``lon_<dim>``/``lat_<dim>`` along another, with a suffix
-            ``_2``, ``_3``, ... when a name is taken (by a consumed
-            variable, a coordinate or a dimension); ``encoding["source"]``
-            names its file. Attributes:
+            consumed variable that has them (each one-dimensional along one
+            of the file's horizontal dimensions, :data:`HORIZONTAL_DIMS`,
+            the variable's own or another, e.g. ``lon(nodes_2d)`` in a file
+            of vectors over ``nodes_3d``), one set per number of nodes, in
+            the floating type of the file. A set lies along the horizontal
+            dimension of the first consumed variable with that many nodes
+            (u first), else along its dimension in its file, and is named
+            ``lon``/``lat`` along u's dimension, ``lon_<dim>``/``lat_<dim>``
+            along another, with a suffix ``_2``, ``_3``, ... when a name is
+            taken (by a consumed variable, a coordinate or a dimension);
+            ``encoding["source"]`` names its file. Attributes:
             ``fesom14_form`` (``"levelwise"`` or
             ``"nodes3d"``), ``fesom14_has_eta`` (``1`` or ``0``),
             ``fesom14_time_source`` (``"options"``, ``"bounds"`` or
@@ -382,9 +383,16 @@ class Fesom14Reader:
             ``dry_mask_var``); a layout that is not one of the
             two FESOM 1.4 forms; files or variables of different layouts,
             dimension sizes, levels (beyond 1e-3 m) or node coordinates
-            (beyond 1e-6 deg, either longitude convention, between files of
-            the same number of nodes); node coordinates along a dimension
-            that a consumed variable has with another length; any refusal of
+            (between files of the same number of nodes, beyond 1e-6 deg or
+            two spacings of the coordinates' own floating type at their
+            magnitude when that is more — 3.05e-5 deg for float32 at 180
+            deg —, either longitude convention); in a file of a consumed
+            variable, a variable named ``lon`` or ``lat`` (data or
+            coordinate) that is not one-dimensional along one horizontal
+            dimension, one of the two without the other, or the two along
+            different dimensions (node coordinates are never ignored); node
+            coordinates along a dimension whose length differs from theirs
+            for a consumed variable or in another file; any refusal of
             the time resolution (no source of time, a stamp off its schedule
             or convention, a gap, an overlap); variables whose resolved
             records (instants and windows) differ — compared by value, so
@@ -466,9 +474,11 @@ class Fesom14Reader:
             ``fesom14_node_coords`` lists; without that attribute,
             ``lon``/``lat`` along a horizontal dimension) with as many
             entries as neither the mesh's 2-D nodes nor its 3-D nodes, or
-            that differs from the mesh's by more than 1e-6 deg (either
-            longitude convention; a set over the 3-D nodes from the
-            coordinates of each 3-D node's 2-D node); a dataset without
+            that differs from the mesh's by more than 1e-6 deg, or two
+            spacings of the set's own floating type at its magnitude when
+            that is more (either longitude convention; a set over the 3-D
+            nodes from the coordinates of each 3-D node's 2-D node); a
+            dataset without
             records; record 0 of a variable
             whose wet mask is not the mesh's: a level-wise record with a
             value in a dry slot or none in a wet one (the ASCII mesh's index
@@ -1512,37 +1522,94 @@ class _NodeCoords:
     """One set of node coordinates found in the files of the consumed
     variables."""
 
-    lon: np.ndarray
+    lon: np.ndarray     # in the type of the file (float32 stays float32)
     lat: np.ndarray
     dim: str        # its dimension in the first file that carries it
     name: str       # a consumed variable of that file
     path: str       # that file
 
 
-def _file_node_coords(ds: xr.Dataset) -> Optional[Tuple[str, np.ndarray,
-                                                        np.ndarray]]:
-    """``(dimension, lon, lat)`` of a file whose ``lon``/``lat`` run along
-    one of its horizontal dimensions (:data:`HORIZONTAL_DIMS`), whatever
-    the dimensions of its variables; None otherwise."""
-    if not all(c in ds.variables for c in ("lon", "lat")):
+def _coord_values(da: xr.DataArray) -> np.ndarray:
+    """The values of a coordinate in their own floating type (others as
+    float64)."""
+    a = np.asarray(da.values)
+    return a if np.issubdtype(a.dtype, np.floating) else a.astype(np.float64)
+
+
+def _coord_tol(*arrays: np.ndarray) -> float:
+    """The tolerance (deg) of a comparison of node coordinates: 1e-6 deg,
+    or two spacings of an array's own floating type at its largest
+    magnitude when that is more (float32 coordinates at 180 deg: 3.05e-5
+    deg; float64 ones keep 1e-6 deg)."""
+    tol = _COORD_TOL
+    for a in arrays:
+        a = np.asarray(a)
+        if not np.issubdtype(a.dtype, np.floating):
+            continue
+        finite = np.abs(a[np.isfinite(a)])
+        if finite.size:
+            tol = max(tol, 2.0 * float(np.spacing(finite.max())))
+    return tol
+
+
+def _file_node_coords(ds: xr.Dataset, path: str
+                      ) -> Optional[Tuple[str, np.ndarray, np.ndarray]]:
+    """``(dimension, lon, lat)`` of a file that has ``lon``/``lat``, None
+    when it has neither.
+
+    A variable named ``lon`` or ``lat`` (a data or a coordinate variable)
+    is a node coordinate, whatever the dimensions of the file's other
+    variables: it must be one-dimensional along one horizontal dimension
+    (:data:`HORIZONTAL_DIMS`), and ``lon`` and ``lat`` come together along
+    the same one. Any other shape is refused, never ignored: coordinates
+    that are not checked would let a file with its nodes in another order
+    pass.
+    """
+    present = [c for c in ("lon", "lat") if c in ds.variables]
+    if not present:
         return None
-    dims = tuple(ds["lon"].dims)
-    if (len(dims) != 1 or dims[0] not in HORIZONTAL_DIMS
-            or tuple(ds["lat"].dims) != dims):
-        return None
-    return (dims[0], np.asarray(ds["lon"].values, dtype=np.float64),
-            np.asarray(ds["lat"].values, dtype=np.float64))
+    fix = ("Node coordinates are one-dimensional, one value per node along "
+           f"one horizontal dimension ({', '.join(HORIZONTAL_DIMS)}), lon and "
+           "lat together and along the same one: write them so, or remove "
+           "them from the file")
+    if len(present) == 1:
+        other = "lat" if present[0] == "lon" else "lon"
+        raise ValueError(
+            f"fesom14: {path} holds the variable {present[0]!r} (dimensions "
+            f"{tuple(ds[present[0]].dims)}) but no {other!r}; the node order "
+            f"of the data cannot be checked with one of the two. {fix}")
+    for c in present:
+        dims = tuple(ds[c].dims)
+        if len(dims) != 1 or dims[0] not in HORIZONTAL_DIMS:
+            raise ValueError(
+                f"fesom14: {path}: the variable {c!r} has the dimensions "
+                f"{dims}, so it is not a node coordinate the reader can check "
+                f"against the mesh. {fix}")
+    if ds["lon"].dims != ds["lat"].dims:
+        raise ValueError(
+            f"fesom14: {path}: the variable 'lon' runs along "
+            f"{tuple(ds['lon'].dims)} but 'lat' along {tuple(ds['lat'].dims)}. "
+            f"{fix}")
+    return (ds["lon"].dims[0], _coord_values(ds["lon"]),
+            _coord_values(ds["lat"]))
 
 
 def _check_node_coords(roles: List[_Role],
                        files: Dict[str, List[Tuple[_Head, xr.Dataset]]]
                        ) -> Dict[int, _NodeCoords]:
-    """Node coordinates ``lon``/``lat`` that a file of a consumed variable
-    carries over any of its horizontal dimensions (the variable's own or
-    another, e.g. ``nodes_2d`` in a file of vectors over ``nodes_3d``)
-    agree between every two files of the same number of nodes within 1e-6
-    deg, either longitude convention. Returns one set per number of
-    nodes, from the first file that carries it."""
+    """The node coordinates of every file of a consumed variable
+    (:func:`_file_node_coords`; along the variable's own horizontal
+    dimension or another, e.g. ``nodes_2d`` in a file of vectors over
+    ``nodes_3d``): along a dimension that a consumed variable has, as many
+    as its length, and as many as in another file along the same dimension
+    name; equal between every two files of the same number of nodes within
+    :func:`_coord_tol` of both, either longitude convention. Returns one
+    set per number of nodes, from the first file that carries it."""
+    lengths: Dict[str, Tuple[int, str]] = {}     # dim -> (length, whose)
+    for r in roles:
+        da = files[r.name][0][1][r.name]
+        for d, n in zip(da.dims[1:], da.shape[1:]):
+            lengths.setdefault(d, (n, repr(r.name)))
     refs: Dict[int, _NodeCoords] = {}
     seen = set()
     for r in roles:
@@ -1550,16 +1617,27 @@ def _check_node_coords(roles: List[_Role],
             if h.path in seen:
                 continue
             seen.add(h.path)
-            found = _file_node_coords(ds)
+            found = _file_node_coords(ds, h.path)
             if found is None:
                 continue
             dim, lon, lat = found
+            m, whose = lengths.setdefault(
+                dim, (lon.size, f"the node coordinates of {h.path}"))
+            if m != lon.size:
+                raise ValueError(
+                    f"fesom14: the node coordinates lon/lat of {h.path} have "
+                    f"{lon.size} entries along {dim!r}, but {dim!r} has {m} "
+                    f"entries for {whose}; variables and coordinates that "
+                    "share a dimension name must share its size: leave out "
+                    "the files of another mesh or layout")
             if lon.size not in refs:
                 refs[lon.size] = _NodeCoords(lon, lat, dim, r.name, h.path)
                 continue
             ref = refs[lon.size]
-            off = ~((_lon_diff(lon, ref.lon) <= _COORD_TOL)
-                    & (np.abs(lat - ref.lat) <= _COORD_TOL))
+            tol = _coord_tol(lon, lat, ref.lon, ref.lat)
+            off = ~((_lon_diff(lon, ref.lon) <= tol)
+                    & (np.abs(lat.astype(np.float64)
+                              - ref.lat.astype(np.float64)) <= tol))
             if off.any():
                 n = int(np.argmax(off))
                 raise ValueError(
@@ -1568,7 +1646,7 @@ def _check_node_coords(roles: List[_Role],
                     f"{n}: ({float(lon[n]):.7f}, {float(lat[n]):.7f}) against "
                     f"({float(ref.lon[n]):.7f}, {float(ref.lat[n]):.7f}) "
                     f"({int(off.sum())} node(s) differ by more than "
-                    f"{_COORD_TOL:g} deg, the longitude convention aside). Every "
+                    f"{tol:g} deg, the longitude convention aside). Every "
                     "variable must list the same nodes in the same order: leave "
                     "out the files of another mesh or run")
     return refs
@@ -1582,34 +1660,26 @@ def _place_node_coords(data_vars: Dict[str, xr.DataArray], u: str,
 
     A set lies along the horizontal dimension of the first consumed
     variable with its number of nodes (u first), else along its dimension
-    in the file it came from. It is named ``lon``/``lat`` along u's
-    dimension, ``lon_<dim>``/``lat_<dim>`` along another, with a suffix
-    ``_2``, ``_3``, ... when a name is taken by a consumed variable, a
-    coordinate or a dimension. Each coordinate's ``encoding["source"]`` is
-    the file it came from.
+    in the file it came from (no consumed variable has that dimension:
+    :func:`_check_node_coords` refused a length that clashes). It is named
+    ``lon``/``lat`` along u's dimension, ``lon_<dim>``/``lat_<dim>`` along
+    another, with a suffix ``_2``, ``_3``, ... when a name is taken by a
+    consumed variable, a coordinate or a dimension. The values keep the
+    type of the file; each coordinate's ``encoding["source"]`` is the file
+    it came from.
     """
-    sizes: Dict[str, Tuple[int, str]] = {}      # dim -> (size, variable)
     dim_of: Dict[int, str] = {}                 # number of nodes -> dim
-    for name, da in data_vars.items():
-        for d, n in zip(da.dims, da.shape):
-            sizes.setdefault(d, (n, name))
+    taken = set(data_vars) | set(coords)
+    for da in data_vars.values():
+        taken.update(da.dims)
         hdim = da.dims[-1]
         dim_of.setdefault(da.sizes[hdim], hdim)
-    taken = set(data_vars) | set(coords) | set(sizes)
     u_hdim = data_vars[u].dims[-1]
     entries = []
     for n in ([n for n in dim_of if n in sets]
               + [n for n in sets if n not in dim_of]):
         c = sets[n]
         dim = dim_of.get(n, c.dim)
-        if n not in dim_of and dim in sizes:
-            m, name = sizes[dim]
-            raise ValueError(
-                f"fesom14: the node coordinates lon/lat of {c.path} have {n} "
-                f"entries along {dim!r}, but {dim!r} has {m} entries for "
-                f"{name!r}; variables and coordinates that share a dimension "
-                "name must share its size: leave out the files of another "
-                "mesh or layout")
         base = ("lon", "lat") if dim == u_hdim else (f"lon_{dim}", f"lat_{dim}")
         names, k = base, 1
         while names[0] in taken or names[1] in taken:
@@ -2118,17 +2188,19 @@ def _node_coord_names(ds: xr.Dataset) -> List[Tuple[str, str, str]]:
 def _check_mesh_coords(ds: xr.Dataset, fields: List[_Field],
                        facts: _MeshFacts) -> None:
     """Every set of node coordinates of the data (:func:`_node_coord_names`)
-    equals the mesh's within ``_COORD_TOL`` (either longitude convention):
-    a set with one entry per 2-D node the mesh's nodes, a set with one
-    entry per 3-D node (ASCII mesh) the 2-D node of each 3-D node. A set
-    the dataset no longer holds is skipped."""
+    equals the mesh's within :func:`_coord_tol` of the set (either
+    longitude convention): a set with one entry per 2-D node the mesh's
+    nodes, a set with one entry per 3-D node (ASCII mesh) the 2-D node of
+    each 3-D node. A set the dataset no longer holds is skipped."""
     n_nodes = facts.lon.size
     for dim, lon_name, lat_name in _node_coord_names(ds):
         if not all(c in ds.variables and tuple(ds[c].dims) == (dim,)
                    for c in (lon_name, lat_name)):
             continue
-        lon = np.asarray(ds[lon_name].values, dtype=np.float64)
-        lat = np.asarray(ds[lat_name].values, dtype=np.float64)
+        lon = _coord_values(ds[lon_name])
+        lat = _coord_values(ds[lat_name])
+        tol = _coord_tol(lon, lat)
+        lon, lat = lon.astype(np.float64), lat.astype(np.float64)
         src = ds[lon_name].encoding.get("source")
         users = [f.name for f in fields if f.hdim == dim]
         what = (f"{lon_name}, {lat_name} over {dim!r}"
@@ -2148,8 +2220,8 @@ def _check_mesh_coords(ds: xr.Dataset, fields: List[_Field],
                 f"fesom14: the node coordinates of the data ({what}) have "
                 f"{lon.size} entries, but the mesh has {n_nodes} 2-D "
                 f"nodes{three}. {_SAME_RUN}")
-        off = ~((_lon_diff(lon, ref_lon) <= _COORD_TOL)
-                & (np.abs(lat - ref_lat) <= _COORD_TOL))
+        off = ~((_lon_diff(lon, ref_lon) <= tol)
+                & (np.abs(lat - ref_lat) <= tol))
         if not off.any():
             continue
         i = int(np.argmax(off))
@@ -2159,7 +2231,7 @@ def _check_mesh_coords(ds: xr.Dataset, fields: List[_Field],
             f"fesom14: the node coordinates of the data ({what}) differ from "
             f"the mesh's at {at}: ({float(lon[i]):.7f}, {float(lat[i]):.7f}) "
             f"against ({float(ref_lon[i]):.7f}, {float(ref_lat[i]):.7f}) "
-            f"({int(off.sum())} node(s) differ by more than {_COORD_TOL:g} deg, "
+            f"({int(off.sum())} node(s) differ by more than {tol:g} deg, "
             "the longitude convention aside). The data must list the mesh's "
             "nodes in the mesh's order; data of this mesh with the nodes in "
             "another order pass every other check. " + _SAME_RUN)
