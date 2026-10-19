@@ -4,7 +4,7 @@ What the FESOM 1.4 reader (`mesh.type: fesom14`, `docs/dev/readers.md`) costs
 on real data: the published CMIP6 monthly means of AWI-CM-1-1-LR (FESOM 1.4,
 126,859 nodes, 244,660 triangles recovered from the cell polygons, 46 levels;
 licence CC BY-SA 4.0), level-wise `(time, depth, ncells)` files, one per
-variable and decade. The I/O rows are measured; the step cost is pending.
+variable and decade. All rows are measured.
 
 ## I/O (measured 2026-10-19)
 
@@ -29,11 +29,12 @@ monthly records and `dt = 6 h` a record serves about 120 steps, so the cold read
 of ~0.9 s per record is ≈ 8 ms per step when spread over them (arithmetic from
 the rows above, not a separate measurement).
 
-## Step cost (pending)
+## Step cost (measured 2026-10-19)
 
-Not measured yet: the fused 3-D RK2 step (barycentric u/v and w, linear in time,
-u/v linear in depth on the levels) with 1e5 particles on LR. The command, for an
-otherwise idle compute node (a compute job: it needs the run owner's yes):
+The fused 3-D RK2 step (barycentric u/v and w, linear in time, u/v linear in
+depth on the levels) with 1e5 particles on LR, on an otherwise idle compute node
+(whole-run wall time 54 s, incl. 26 s for the first step: compilation and the
+first 12-record window). The command:
 
 ```bash
 export NUMBA_NUM_THREADS=<physical cores> OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
@@ -67,4 +68,4 @@ tracking kernel; `io=` separately), thread-µs per particle = step × threads /
 
 | machine | CPU | threads | particles | step [ms] | io [ms, median] | thread-µs/particle | peak RSS | measured |
 |---|---|---|---|---|---|---|---|---|
-| — | — | — | 100,000 | — | — | — | — | pending |
+| HPC compute node (exclusive) | 2× AMD EPYC 7763 (128 cores) | 128 | 100,000 | 17.2 (16.9–17.6) | 0.0 (the 12-record window is read at step 1: 2.9 s) | 22.0 | 2.1 GB | 2026-10-19, 47be1ce |

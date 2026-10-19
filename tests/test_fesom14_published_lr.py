@@ -66,8 +66,9 @@ Measured values (the pins below hold a margin) are quoted in the docstrings
 with the date they were measured on.
 
 Mutation pass (2026-10-19, on the first version of this module, whose
-3-month runs had 24 first-step probes and no late ones).  Each defect below was put into a copy of the package, one at a
-time, and this module was run against it; every defect failed the pins
+3-month runs had 24 first-step probes and no late ones).  Each defect below
+was put into a copy of the package, one at a time, and this module was run
+against it; every defect failed the pins
 named (mechanism and size from the assertion messages):
 
 - ``kelp/numerics/vertical_uv.py:_build_depth_points`` — the level points

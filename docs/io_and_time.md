@@ -42,8 +42,9 @@ needs to know which model it is reading:
   named node-based scalar fields for trajectory sampling — see `field_sampling.md`.
 
 A reader may also provide `prepare(mesh, ds)`, a check of the opened dataset
-against the mesh; every entry of a run calls it right after the dataset is
-opened (and `kelp info` once), before any output file exists. The FESOM 1.4
+against the mesh: `run_tracking` calls it right after the dataset is opened,
+before any output file exists, and each realization calls it again at its
+entry, after the `max_levels` cut (`kelp info` calls it once). The FESOM 1.4
 reader uses it to compare the sizes, the level axis, the node coordinates and
 the wet mask of the first record of every variable with the mesh.
 
