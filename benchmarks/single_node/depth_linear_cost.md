@@ -44,8 +44,14 @@ smoke test of the script, not a measurement.
 
 ## Rows
 
-Pending measurement.
+An otherwise idle HPC compute node (exclusive allocation), Python 3.13.13,
+NumPy 2.4.6, Numba 0.65.1; setup 13.6 s (lerp, incl. compilation) and 1.8 s
+(pchip). The cost of the depth rule is 4 % of the step with a linear time
+blend and 8 % with the PCHIP payload.
 
 | machine | CPU | threads | NSIDE / nodes | particles | payload | layer [ms/step] | layer_linear [ms/step] | ratio | commit | measured |
 |---|---|---|---|---|---|---|---|---|---|---|
-| — | — | — | — | — | — | — | — | — | — | pending |
+| HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | 64 / 49,152 | 100,000 | lerp | 9.774 (9.665–10.939) | 10.183 (10.092–11.101) | 1.042 | fd4e869 | 2026-10-19 |
+| HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | 64 / 49,152 | 100,000 | pchip | 15.985 (15.944–16.451) | 17.254 (17.209–17.644) | 1.079 | fd4e869 | 2026-10-19 |
+
+Median of 15 interleaved steps per placement (min–max in brackets).
