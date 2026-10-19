@@ -40,11 +40,14 @@ What is pinned, and how each pin can fail:
 - **3-D runs** (``test_lr_3d_run_three_months``, ``test_lr_pchip_run``): 2,000
   particles, RK2 barycentric, 90 days from 1951-03-01, lerp and PCHIP in
   time, sampling ``thetao``: no NaN, every particle ALIVE or BEACHED, none
-  below the bed of its nearest node or above the surface.  The PCHIP run's
-  first-step velocities at the probes equal PCHIP in time at each level
-  (``scipy.interpolate.PchipInterpolator`` on records 0-3), then the lerp in
-  depth — and differ from the reversed order (lerp in depth, then PCHIP),
-  the probes being chosen where the two orders differ.
+  below the bed of its nearest node or above the surface.  Two sets of node
+  probes: 12 released at the start and 12 released into the running runs on
+  1951-04-01 00:00, when the PCHIP window has moved on by one record.  Their
+  first-step velocities equal, in the PCHIP run, PCHIP in time at each level
+  (``scipy.interpolate.PchipInterpolator`` over the four records the window
+  holds, found from the time bounds), then the lerp in depth, and in the
+  lerp run the lerp; the probes are chosen where PCHIP differs from the
+  reversed order (lerp in depth, then PCHIP) and from the lerp.
 - **w sign** (``test_lr_w_sign_equator``): ``wo`` is upward positive in the
   files (equatorial Pacific upwelling at 50 m); the tracker's depth rate is
   its negative, and particles there rise.
@@ -62,9 +65,10 @@ Measured values (the pins below hold a margin) are quoted in the docstrings
 with the commit they were measured on.
 
 Mutation pass (2026-10-19, on this module as first committed, 9cf16f8, with
-the reader at d1d7eb5).  Each defect below was put into a copy of the
-package, one at a time, and this module was run against it; every defect
-failed the pins named (mechanism and size from the assertion messages):
+the reader at d1d7eb5; the 3-month runs then had 24 first-step probes and no
+late ones).  Each defect below was put into a copy of the package, one at a
+time, and this module was run against it; every defect failed the pins
+named (mechanism and size from the assertion messages):
 
 - ``kelp/numerics/vertical_uv.py:_build_depth_points`` — the level points
   moved half a layer down: ``test_lr_time_axis_absolute`` (3-month run, u
@@ -101,14 +105,20 @@ failed the pins named (mechanism and size from the assertion messages):
   depth lerp per snapshot first, then PCHIP (the reversed order):
   ``test_lr_pchip_run`` only (u off at 24/24 probes, up to 0.0085 m/s).
 
-Re-checked the same day after the upper bound on the PCHIP separation was
-added (``test_lr_pchip_run`` only): the reversed order still fails on its
-first step; the two central snapshots swapped once the stencil has moved
-past its first interval (``kelp/tracking.py:run_single_realization``) leave
-the first step intact and fail only the upper bound (separation 7.74 km,
-0.127 of the displacement); PCHIP silently replaced by the lerp once the
-stencil has moved (``kelp/tracking.py:_resolve_recon_stencil``) is NOT caught
-(separation 0.93 km, above the 0.85 km floor).
+Re-checked the same day on ``test_lr_pchip_run`` alone, twice, with two
+more defects.  With the upper bound on the separation added: the reversed
+order still failed on its first step; the two central snapshots swapped
+once the PCHIP window has moved past its first interval
+(``kelp/tracking.py:run_single_realization``) left the first step intact and
+failed only the upper bound (separation 7.74 km, 0.127 of the
+displacement); PCHIP silently replaced by the lerp once the window has
+moved (``kelp/tracking.py:_resolve_recon_stencil``) passed every pin
+(separation 0.93 km, above the 0.85 km floor).  With the late probes added
+(12 per set, released when the window has moved on): all three fail by
+value — the reversed order at the first-step probes (u off at 12/12, up to
+0.0085 m/s), the swapped snapshots and the fallback to the lerp at the late
+probes (u off at 12/12, up to 0.054 and 0.053 m/s) while the first-step
+probes stay exact.
 
 The pass is a scripted edit-and-rerun, not a test: most of these defects sit
 in compiled kernels and in the engine, where no monkeypatch reaches, and a
@@ -195,6 +205,11 @@ T0 = cftime.datetime(1951, 1, 16, 12, calendar=CAL)
 #: the start of the 3-month runs: between record 1 (1951-02-15 00:00) and
 #: record 2 (1951-03-16 12:00), so PCHIP has records 0..3 from the first step
 T_RUN = cftime.datetime(1951, 3, 1, 0, calendar=CAL)
+#: the release of the late probes of the 3-month runs, 31 days after the
+#: start: between record 2 (1951-03-16 12:00) and record 3 (1951-04-16
+#: 00:00), where the PCHIP window of the running runs has moved on to
+#: records 1..4
+T_LATE = cftime.datetime(1951, 4, 1, 0, calendar=CAL)
 
 #: records read here by hand (0..5: January..June 1951)
 N_REC = 6
@@ -204,6 +219,9 @@ DT_RUN = 6 * 3600.0
 STEPS_PER_DAY = 4
 N_DAYS = 90
 N_PARTICLES = 2000
+#: node probes in the 3-month runs, of each kind (first step at the start,
+#: first step after the late release); the rest of the particles is the cloud
+N_PROBES = 12
 #: the form-equivalence runs: days
 N_DAYS_FORMS = 20
 #: the half-sum run: days
@@ -212,8 +230,9 @@ N_DAYS_HALF = 30
 #: tolerance of a first-step velocity against its hand value (m/s); the
 #: weights at a node are exact up to rounding (measured: at most 1.1e-16)
 VEL_TOL = 1e-12
-#: a PCHIP probe needs time-first and depth-first values this far apart
-#: (m/s; the 24 probes chosen: at least 2.8e-3)
+#: a PCHIP probe needs its value (PCHIP in time, then lerp in depth) this far
+#: (m/s) from the reversed order and from the plain lerp in time, for u or v
+#: (the probes chosen: at least 2.9e-3)
 ORDER_GAP = 1e-4
 
 
@@ -383,14 +402,18 @@ def _pchip(values: np.ndarray, secs: np.ndarray, q: float) -> np.ndarray:
 
 def _pchip_hand(lr: _LR, var: str, nodes, z, t, *, time_first: bool = True
                 ) -> np.ndarray:
-    """``var`` at the probes and the instant ``t`` (between records 1 and
-    2): PCHIP in time over records 0..3, then lerp in depth (the reader's
-    rule) — or with ``time_first=False`` the reversed order."""
-    secs = np.array([_secs(c) for c in lr.centres[:4]])
+    """``var`` at the probes and the instant ``t``: PCHIP in time over the
+    four records around ``t`` — records i-1..i+2 for ``t`` between the
+    resolved instants of records i and i+1 (found from the files' time
+    bounds), the stencil the engine uses there — then lerp in depth (the
+    reader's rule); or with ``time_first=False`` the reversed order."""
+    i, _ = _time_weight(lr, t)
+    assert 1 <= i and i + 2 < len(lr.centres), i
+    secs = np.array([_secs(c) for c in lr.centres[i - 1:i + 3]])
     q = _secs(t)
     assert secs[1] < q < secs[2]
     k, a = _bracket(lr.levels, z)
-    snaps = lr.rec[var][:4]
+    snaps = lr.rec[var][i - 1:i + 3]
     if time_first:
         up = _pchip(np.stack([s[k, nodes] for s in snaps]).astype(np.float64),
                     secs, q)
@@ -412,14 +435,18 @@ class _Seeds:
     lat: np.ndarray
     z: np.ndarray
     node: np.ndarray            # the node a probe sits on; -1 in the cloud
+    release: np.ndarray         # release, seconds after the run's start
     kinds: Dict[str, slice]
 
     def write(self, path: Path) -> Path:
-        """Write the seed file (``lon lat z`` per line) and return its path."""
+        """Write the seed file (``lon lat z``, and the release offset in
+        seconds when any is not 0) and return its path."""
+        delayed = bool((self.release > 0.0).any())
         with open(path, "w") as f:
-            for lo, la, z in zip(self.lon, self.lat, self.z):
+            for lo, la, z, r in zip(self.lon, self.lat, self.z, self.release):
                 # repr of a Python float round-trips exactly
-                f.write(f"{float(lo)!r} {float(la)!r} {float(z)!r}\n")
+                line = f"{float(lo)!r} {float(la)!r} {float(z)!r}"
+                f.write(f"{line} {float(r)!r}\n" if delayed else f"{line}\n")
         return path
 
 
@@ -474,18 +501,29 @@ def seeds(lr: _LR) -> Dict[str, _Seeds]:
                                     "equator": (eq, np.full(eq.size, z50)),
                                     "gyre": (gy, np.full(gy.size, z50))})
 
-    # PCHIP probes: nodes where PCHIP-then-lerp and lerp-then-PCHIP differ
+    # PCHIP probes, at the start and at the late release: nodes where PCHIP
+    # in time then lerp in depth differs both from the reversed order and
+    # from the plain lerp in time (each set on its own nodes)
     cand = rng.permutation(np.flatnonzero(deep))[:6000]
     kk = np.asarray(layers)[np.arange(cand.size) % len(layers)]
     zz = _quarter_depth(levels, kk)
-    gap = np.zeros(cand.size)
-    for var in ("uo", "vo"):
-        gap = np.maximum(gap, np.abs(
-            _pchip_hand(lr, var, cand, zz, T_RUN)
-            - _pchip_hand(lr, var, cand, zz, T_RUN, time_first=False)))
-    p_nodes, p_z = _node_probes(lr, cand, layers, gap, 24)
-    assert (np.sort(gap)[::-1][:24] >= ORDER_GAP).all()
-    n_cloud = N_PARTICLES - p_nodes.size
+    picked = {}
+    taken = np.zeros(cand.size, dtype=bool)
+    for name, t in (("probes", T_RUN), ("late", T_LATE)):
+        rev = np.zeros(cand.size)          # from the reversed order, u or v
+        lin = np.zeros(cand.size)          # from the lerp in time, u or v
+        for var in ("uo", "vo"):
+            tf = _pchip_hand(lr, var, cand, zz, t)
+            rev = np.maximum(rev, np.abs(
+                tf - _pchip_hand(lr, var, cand, zz, t, time_first=False)))
+            lin = np.maximum(lin, np.abs(tf - _lerp_hand(lr, var, cand, zz, t)))
+        score = np.minimum(rev, lin)
+        score[taken] = -1.0
+        best = np.argsort(-score, kind="stable")[:N_PROBES]
+        assert (score[best] >= ORDER_GAP).all(), (name, score[best].min())
+        taken[best] = True
+        picked[name] = (cand[best], zz[best])
+    n_cloud = N_PARTICLES - 2 * N_PROBES
 
     # the cloud: element centres of deep enough elements, random depths
     tri = np.asarray(lr.mesh.elem_nodes)
@@ -496,28 +534,34 @@ def seeds(lr: _LR) -> Dict[str, _Seeds]:
     zc = rng.uniform(0.0, 1.0, n_cloud) ** 2 * np.minimum(
         0.95 * shallow[elems], 3000.0)
     cloud = (np.asarray(lr.mesh.elem_center_lon)[elems], lat_c[elems], zc)
-    months = _assemble_seeds(lr, [cloud], {"probes": (p_nodes, p_z)})
+    late = _secs(T_LATE, T_RUN)
+    months = _assemble_seeds(lr, [cloud], {
+        "probes": picked["probes"],
+        "late": picked["late"] + (np.full(N_PROBES, late),)})
     return {"axis": axis, "months": months}
 
 
 def _assemble_seeds(lr: _LR, clouds: Sequence[Tuple[np.ndarray, ...]],
-                    probes: Dict[str, Tuple[np.ndarray, np.ndarray]]
-                    ) -> _Seeds:
-    """The clouds ``(lon, lat, z)`` first, then each kind of probe
-    ``(nodes, z)`` placed exactly on its nodes."""
-    lon, lat, z, node, kinds = [], [], [], [], {}
+                    probes: Dict[str, Tuple[np.ndarray, ...]]) -> _Seeds:
+    """The clouds ``(lon, lat, z)`` first, released at the start, then each
+    kind of probe ``(nodes, z[, release seconds])`` placed exactly on its
+    nodes."""
+    lon, lat, z, node, release, kinds = [], [], [], [], [], {}
     n = 0
     for clo, cla, cz in clouds:
         lon.append(clo); lat.append(cla); z.append(cz)
         node.append(np.full(clo.size, -1))
+        release.append(np.zeros(clo.size))
         n += clo.size
-    for name, (nodes, zp) in probes.items():
+    for name, (nodes, zp, *rel) in probes.items():
         lon.append(lr.lon[nodes]); lat.append(lr.lat[nodes]); z.append(zp)
         node.append(nodes)
+        release.append(rel[0] if rel else np.zeros(nodes.size))
         kinds[name] = slice(n, n + nodes.size)
         n += nodes.size
     return _Seeds(lon=np.concatenate(lon), lat=np.concatenate(lat),
-                  z=np.concatenate(z), node=np.concatenate(node), kinds=kinds)
+                  z=np.concatenate(z), node=np.concatenate(node),
+                  release=np.concatenate(release), kinds=kinds)
 
 
 # ---------------------------------------------------------------------------
@@ -591,6 +635,19 @@ def _months_cfg(lr: _LR, seeds: Dict[str, _Seeds], d: Path, name: str, *,
                 output_freq=1, pchip=pchip, sample=sample)
 
 
+def _run_before_late(cfg: AppConfig) -> _Run:
+    """``_run`` of a run that ends before the late probes' release: the
+    engine says once that they never activate (their output is all NaN)."""
+    msg = (f"delayed release: {N_PROBES} particle(s) have a release step >= "
+           f"n_steps ({cfg.time.n_steps}); they never activate in this run "
+           "(all-NaN output).")
+    with pytest.warns(RuntimeWarning,
+                      match="^" + re.escape(msg) + r"\Z") as caught:
+        run = _run(cfg)
+    assert sum(str(w.message) == msg for w in caught) == 1
+    return run
+
+
 @pytest.fixture(scope="module")
 def axis_run(lr, seeds, tmp_path_factory) -> _Run:
     """Forward from the first instant, dt = 1 day, a record every step."""
@@ -623,10 +680,31 @@ def pchip_run(lr, seeds, tmp_path_factory) -> _Run:
 # Checks shared by the runs
 # ---------------------------------------------------------------------------
 
-def _first_step_velocity(run: _Run, sl: slice) -> Dict[str, np.ndarray]:
-    """The velocities of the first recorded step (its start position and
-    time) of the particles in ``sl``; w positive down."""
-    return {c: run.tr[f"vel_{c}"][sl, 0] for c in ("u", "v", "w")}
+def _first_step_velocity(run: _Run, sl: slice, rec: int = 0
+                         ) -> Dict[str, np.ndarray]:
+    """The velocities recorded at record ``rec`` (the step's start position
+    and time) of the particles in ``sl``; w positive down."""
+    return {c: run.tr[f"vel_{c}"][sl, rec] for c in ("u", "v", "w")}
+
+
+def _late_rec() -> int:
+    """The record of the late probes' first step: the step that starts at
+    ``T_LATE`` (a record after every step, the first after step 0)."""
+    r = _secs(T_LATE, T_RUN) / DT_RUN
+    assert r == int(r)
+    return int(r)
+
+
+def _assert_late_release(run: _Run, sl: slice) -> int:
+    """The late probes are dormant before ``T_LATE``, released at it and
+    moving from then on; returns the record of their first step."""
+    r = _late_rec()
+    st = run.tr["status"][sl]
+    assert (st[:, :r] == ParticleStatus.NOT_RELEASED).all()
+    assert (st[:, r] == ParticleStatus.ALIVE).all()
+    assert np.isnan(run.tr["vel_u"][sl, :r]).all()
+    assert run.release[sl] == [T_LATE] * (sl.stop - sl.start)
+    return r
 
 
 def _assert_hand(got: np.ndarray, want: np.ndarray, what: str) -> None:
@@ -646,18 +724,22 @@ def _assert_sane_run(lr: _LR, run: _Run) -> None:
     tr = run.tr
     st = tr["status"]
     alive = st == ParticleStatus.ALIVE
-    ok = alive | (st == ParticleStatus.BEACHED)
+    dormant = st == ParticleStatus.NOT_RELEASED      # the late probes, early
+    ok = alive | (st == ParticleStatus.BEACHED) | dormant
     assert ok.all(), (
         f"{int((~ok).sum())} particle records neither ALIVE nor BEACHED "
         f"(statuses {np.unique(st[~ok]).tolist()})")
+    assert not (np.diff(dormant.astype(np.int8), axis=1) > 0).any(), \
+        "a released particle became dormant again"
+    out = ~dormant
     for name in ("lon", "lat", "z"):
-        assert np.isfinite(tr[name]).all(), f"NaN in {name}"
+        assert np.isfinite(tr[name][out]).all(), f"NaN in {name}"
     for name in ("vel_u", "vel_v", "vel_w", "thetao"):
         if name in tr:
             assert np.isfinite(tr[name][alive]).all(), \
                 f"NaN in {name} of an ALIVE particle"
-    z = tr["z"].ravel()
-    nn = find_nearest_nodes(lr.mesh, tr["lon"].ravel(), tr["lat"].ravel())
+    z = tr["z"][out]
+    nn = find_nearest_nodes(lr.mesh, tr["lon"][out], tr["lat"][out])
     assert (z >= 0.0).all(), f"above the surface: min z {z.min()}"
     below = z - lr.bed[nn]
     assert (below <= 1e-9).all(), (
@@ -926,21 +1008,33 @@ def test_lr_w_sign_equator(lr, seeds, axis_run):
 def test_lr_3d_run_three_months(lr, seeds, lerp_run):
     """2,000 particles, 90 days from 1951-03-01, RK2 barycentric, lerp in
     time, beaching on failure, ``thetao`` sampled: no NaN, all ALIVE or
-    BEACHED, none below the bed of its nearest node."""
+    BEACHED (the late probes dormant until their release), none below the
+    bed of its nearest node.  The late probes, released on 1951-04-01 00:00
+    into the running run, first move with the lerp between records 2 and 3
+    (weight 15.5/30.5), lerped in depth."""
     run = lerp_run
     assert run.tr["lon"].shape == (N_PARTICLES, N_DAYS * STEPS_PER_DAY)
     assert run.dates[-1] == T_RUN + timedelta(days=N_DAYS)
     _assert_sane_run(lr, run)
+    s = seeds["months"]
+    sl = s.kinds["late"]
+    r = _assert_late_release(run, sl)
+    vel = _first_step_velocity(run, sl, r)
+    for comp, var, sign in (("u", "uo", 1.0), ("v", "vo", 1.0),
+                            ("w", "wo", -1.0)):
+        _assert_hand(vel[comp],
+                     sign * _lerp_hand(lr, var, s.node[sl], s.z[sl], T_LATE),
+                     f"3-month run, late probes, {comp}")
     alive = (run.tr["status"][:, -1] == ParticleStatus.ALIVE).mean()
     print(f"measured: ALIVE after {N_DAYS} days: {alive:.4f}")
     assert alive >= 0.9, alive
 
 
 #: median separation (km) of the PCHIP run from the lerp run after 30 days:
-#: measured 1.705 km (reader at d1d7eb5); pinned at half
+#: measured 1.684 km (reader at d1d7eb5); pinned at about half
 PCHIP_SEP_KM_MIN = 0.85
 #: the same separation relative to the lerp run's median 30-day displacement
-#: (61.0 km): measured 0.028; pinned below 0.1, so that a broken PCHIP cannot
+#: (60.6 km): measured 0.028; pinned below 0.1, so that a broken PCHIP cannot
 #: pass as a "large" separation
 PCHIP_SEP_FRAC_MAX = 0.1
 
@@ -948,37 +1042,50 @@ PCHIP_SEP_FRAC_MAX = 0.1
 def test_lr_pchip_run(lr, seeds, lerp_run, pchip_run):
     """The 3-month run with ``temporal_reconstruction: pchip``.
 
-    The same checks as the lerp run.  First-step velocities at the PCHIP
-    probes equal PCHIP in time at each of the two levels (records 0-3),
-    then the lerp in depth, and differ from the reversed order by at least
-    ``ORDER_GAP`` for u or v.  The median separation from the lerp run after
-    30 days stays above ``PCHIP_SEP_KM_MIN`` and below ``PCHIP_SEP_FRAC_MAX``
-    of the lerp run's median 30-day displacement (measured values with the
-    constants): after the first step only these two bounds watch the
-    stencil as it moves across the records.
+    The same checks as the lerp run.  The velocities of a probe's first step
+    equal PCHIP in time at each of the two levels around it, over the four
+    records the engine's window holds at that instant (found here from the
+    files' time bounds), then the lerp in depth — and differ by at least
+    ``ORDER_GAP`` for u or v both from the reversed order and from the plain
+    lerp in time.  Two sets: the probes released at the start (1951-03-01,
+    records 0-3) and the late probes released into the running run on
+    1951-04-01 00:00, when the window has moved on to records 1-4; so a
+    PCHIP that reads the wrong records or falls back to the lerp once the
+    window moves fails by value.  The median separation from the lerp run
+    after 30 days stays above ``PCHIP_SEP_KM_MIN`` and below
+    ``PCHIP_SEP_FRAC_MAX`` of the lerp run's median 30-day displacement
+    (measured values with the constants).
     """
     run = pchip_run
     _assert_sane_run(lr, run)
     s = seeds["months"]
-    sl = s.kinds["probes"]
-    nodes, z = s.node[sl], s.z[sl]
-    vel = _first_step_velocity(run, sl)
-    gap = np.zeros(nodes.size)
-    for comp, var, sign in (("u", "uo", 1.0), ("v", "vo", 1.0),
-                            ("w", "wo", -1.0)):
-        want = sign * _pchip_hand(lr, var, nodes, z, T_RUN)
-        _assert_hand(vel[comp], want, f"PCHIP run, {comp}")
-        if comp != "w":
-            gap = np.maximum(gap, np.abs(
-                vel[comp] - sign * _pchip_hand(lr, var, nodes, z, T_RUN,
-                                               time_first=False)))
-    assert (gap >= ORDER_GAP).all(), np.sort(gap)[:3]
+    smallest = np.inf
+    for kind, t in (("probes", T_RUN), ("late", T_LATE)):
+        sl = s.kinds[kind]
+        rec = _assert_late_release(run, sl) if kind == "late" else 0
+        nodes, z = s.node[sl], s.z[sl]
+        vel = _first_step_velocity(run, sl, rec)
+        rev = np.zeros(nodes.size)         # from the reversed order, u or v
+        lin = np.zeros(nodes.size)         # from the lerp in time, u or v
+        for comp, var, sign in (("u", "uo", 1.0), ("v", "vo", 1.0),
+                                ("w", "wo", -1.0)):
+            want = sign * _pchip_hand(lr, var, nodes, z, t)
+            _assert_hand(vel[comp], want, f"PCHIP run, {kind}, {comp}")
+            if comp != "w":
+                rev = np.maximum(rev, np.abs(vel[comp] - sign * _pchip_hand(
+                    lr, var, nodes, z, t, time_first=False)))
+                lin = np.maximum(lin, np.abs(
+                    vel[comp] - sign * _lerp_hand(lr, var, nodes, z, t)))
+        gap = np.minimum(rev, lin)
+        assert (gap >= ORDER_GAP).all(), (kind, np.sort(gap)[:3])
+        smallest = min(smallest, float(gap.min()))
 
     sep = float(np.median(_sep_km(run, lerp_run, _rec(30))))
     disp = float(np.median(_disp_km(lerp_run, _rec(30))))
     print(f"measured: PCHIP vs lerp: median separation after 30 days "
           f"{sep:.4f} km, median displacement {disp:.2f} km (ratio "
-          f"{sep / disp:.4f}); smallest depth-first gap {gap.min():.3e} m/s")
+          f"{sep / disp:.4f}); smallest gap to the reversed order and to "
+          f"the lerp {smallest:.3e} m/s")
     assert sep >= PCHIP_SEP_KM_MIN, sep
     assert sep <= PCHIP_SEP_FRAC_MAX * disp, (sep, disp)
 
@@ -1011,12 +1118,13 @@ def half_sum_run(lr, seeds, tmp_path_factory) -> _Run:
     d = tmp_path_factory.mktemp("half_sum")
     with pytest.MonkeyPatch.context() as mp:
         _half_sum_reads(mp)
-        return _run(_months_cfg(lr, seeds, d, "half_sum", days=N_DAYS_HALF))
+        return _run_before_late(_months_cfg(lr, seeds, d, "half_sum",
+                                            days=N_DAYS_HALF))
 
 
 #: the half-sum run against the level-linear run after 30 days, measured with
-#: the reader at d1d7eb5: median separation 1.654 km (pinned at half), 0.027
-#: of the median displacement of 61.0 km (pinned below 0.1: small); rank
+#: the reader at d1d7eb5: median separation 1.632 km (pinned at about half),
+#: 0.027 of the median displacement of 60.6 km (pinned below 0.1: small); rank
 #: correlation of the separation with the release-point driver 0.771
 #: (pinned at half); median separation in the strongest driver quartile
 #: 8.93 km against 0.29 km in the weakest, a ratio of 30.9 (pinned at 10)
@@ -1197,10 +1305,11 @@ def forms(lr, seeds, tmp_path_factory) -> Iterator[_Forms]:
                            "nodes_3d")
             _write_raw(raw / f"{VAR_2D}_lr_{tag}.nc", VAR_2D, epoch, ends,
                        zos[list(recs)], "nodes_2d")
-        level = _run(_months_cfg(lr, seeds, d, "levelwise",
-                                 days=N_DAYS_FORMS, pchip=True))
-        nodes3d = _run(_months_cfg(lr, seeds, d, "nodes3d", days=N_DAYS_FORMS,
-                                   data=raw, meshpath=meshdir, pchip=True))
+        level = _run_before_late(_months_cfg(
+            lr, seeds, d, "levelwise", days=N_DAYS_FORMS, pchip=True))
+        nodes3d = _run_before_late(_months_cfg(
+            lr, seeds, d, "nodes3d", days=N_DAYS_FORMS, data=raw,
+            meshpath=meshdir, pchip=True))
         yield _Forms(meshdir=meshdir, raw=raw, level=level, nodes3d=nodes3d)
     finally:
         shutil.rmtree(d, ignore_errors=True)
