@@ -707,13 +707,18 @@ def test_single_point_refuses_depth_linear(placement):
 _NEEDS_BARY = "needs uv_interp='barycentric'"
 _NO_DEPTH = ("has no depth argument (no single-point depth-linear API in "
              "this version)")
+_LAYOUT = ("on node layout (uv_layout='node') needs uv_interp='barycentric'; "
+           "this interpolator evaluates depth-linear u/v on element layout "
+           "only")
 
 
 @pytest.mark.parametrize("placement", ["level", "layer_linear"])
 def test_other_interpolators_refuse(placement):
     """Each entry refuses before any slicing: ``layer=7`` is out of range
     for the field's rows, so a slice would raise IndexError (and the
-    edge entries' node-layout refusal would come first)."""
+    edge entries' node-layout refusal would come first).  ``leastsq``
+    evaluates element-layout depth-linear u/v and refuses this node field
+    by its layout."""
     mesh = _mesh()
     vel = _field(placement)
     st = _state(DEEP_PTS, 5.0)
@@ -722,9 +727,9 @@ def test_other_interpolators_refuse(placement):
         vel.u[7, :]
     elem_ids = np.zeros(st.n_particles, dtype=np.int32)
     calls = [
-        ("interp_leastsq", _NEEDS_BARY,
+        ("interp_leastsq", _LAYOUT,
          lambda: ip.interp_leastsq(st, mesh, vel, nn, 1.0, 7)),
-        ("interp_leastsq", _NEEDS_BARY,
+        ("interp_leastsq", _LAYOUT,
          lambda: ip.interp_leastsq(
              st, mesh, vel, nn, 1.0,
              np.full(st.n_particles, 7, dtype=np.int32))),
@@ -739,7 +744,7 @@ def test_other_interpolators_refuse(placement):
         ("interp_edge_leastsq", _NEEDS_BARY,
          lambda: ip.get_interpolator("edge_leastsq", "noslip")(
              st, mesh, vel, nn, 1.0, 7)),
-        ("interp_leastsq", _NEEDS_BARY,
+        ("interp_leastsq", _LAYOUT,
          lambda: ip.get_interpolator("leastsq")(st, mesh, vel, nn, 1.0, 7)),
     ]
     for where, reason, call in calls:
