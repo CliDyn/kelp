@@ -261,9 +261,10 @@ never by their names:
   variables of different layouts, levels or node coordinates.
 - The checks against the mesh (sizes, the level axis, node coordinates, the
   wet mask of record 0 of every variable) run right after, before any output
-  file exists. Node coordinates count from any file that carries them: next to
-  vectors over the 3-D nodes, the `lon`/`lat` of a `zos` file over the 2-D
-  nodes are compared with the mesh too.
+  file exists. Node coordinates count from any file that carries them, along
+  any of its horizontal dimensions: next to vectors over the 3-D nodes, the
+  `lon`/`lat` over the 2-D nodes of a `zos` file, or of the velocity files
+  themselves, are compared with the mesh too.
 
 **FESOM2 (`mesh.type: fesom2`), `ncinput` is a file or Zarr store:**
 

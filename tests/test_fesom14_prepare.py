@@ -116,24 +116,29 @@ def _write_var(path: Path, var: str, lon, lat, ncol, *, levels=LEVELS,
 
 
 def _write_raw(path: Path, var: str, size: int, *, n_time=3, two_d=False,
-               fill_at=None, coords=None, values=None) -> Path:
+               fill_at=None, coords=None, values=None,
+               coords_dim=None) -> Path:
     """A file ``var(time, nodes_3d)`` with ``size`` entries (with
     ``two_d``: ``var(time, nodes_2d)``); ``fill_at`` = (record, entry) of a
-    raw 1e30; ``coords`` = (lon, lat) written over the same dimension;
-    ``values`` = the ``(time, size)`` values written instead of the
-    generated ones."""
+    raw 1e30; ``coords`` = (lon, lat) written over the same dimension, or
+    over ``coords_dim`` (a dimension of its own, of the coordinates'
+    length); ``values`` = the ``(time, size)`` values written instead of
+    the generated ones."""
     vals = (BASE[var] + np.arange(n_time)[:, None] + 0.001 * np.arange(size)
             if values is None else np.array(values, dtype=np.float64))
     if fill_at is not None:
         vals[fill_at] = 1e30
     dim = "nodes_2d" if two_d else "nodes_3d"
+    cdim = coords_dim or dim
     with netCDF4.Dataset(str(path), "w") as nc:
         _time(nc, n_time)
         nc.createDimension(dim, size)
+        if coords and cdim != dim:
+            nc.createDimension(cdim, len(coords[0]))
         v = nc.createVariable(var, "f4", ("time", dim))
         v[:] = vals.astype(np.float32)
         for name, values in zip(("lon", "lat"), coords or ()):
-            c = nc.createVariable(name, "f8", (dim,))
+            c = nc.createVariable(name, "f8", (cdim,))
             c[:] = values
     return path
 
@@ -437,7 +442,8 @@ def test_nodes3d_coordinates(tmp_path):
 
 
 def _raw_uniform(d: Path, perm=None, *, coords_3d=False, zos_coords=True,
-                 zos_perm=None) -> Path:
+                 zos_perm=None, vel_coords_2d=False, zos=True,
+                 sampled_2d=None) -> Path:
     """Raw data on the uniform ASCII mesh (four levels at every node, so
     the 3-D node of node ``n`` at level ``k`` is ``5 k + n``): u/v/w over
     ``nodes_3d`` and ``zos(time, nodes_2d)``.  The files list the 2-D nodes
@@ -445,8 +451,12 @@ def _raw_uniform(d: Path, perm=None, *, coords_3d=False, zos_coords=True,
     ``perm[j]`` at level ``k``; ``zos`` entry ``j`` holds node
     ``zos_perm[j]``, by default ``perm[j]``), values and coordinates alike:
     ``BASE + t + 0.01 k + 0.001 n`` for node ``n``.  ``coords_3d`` writes
-    ``lon``/``lat`` over ``nodes_3d`` into the u/v/w files, ``zos_coords``
-    over ``nodes_2d`` into the ``zos`` file."""
+    ``lon``/``lat`` over ``nodes_3d`` into the u/v/w files, ``vel_coords_2d``
+    over ``nodes_2d`` (a dimension of the file no variable uses),
+    ``zos_coords`` over ``nodes_2d`` into the ``zos`` file; without ``zos``
+    no ``zos`` file is written.  ``sampled_2d`` = the name of one more 2-D
+    field over ``nodes_2d`` (values ``7 + t + 0.001 n``, no coordinates),
+    in the order ``zos_perm``."""
     perm = np.arange(5) if perm is None else np.asarray(perm)
     zos_perm = perm if zos_perm is None else np.asarray(zos_perm)
     d.mkdir(parents=True, exist_ok=True)
@@ -456,12 +466,22 @@ def _raw_uniform(d: Path, perm=None, *, coords_3d=False, zos_coords=True,
     for var in ("uo", "vo", "wo"):
         vec = (BASE[var] + t + 0.01 * k + 0.001 * perm[None, None, :]
                ).reshape(3, 20)                 # entry 5 k + j
-        _write_raw(d / f"{var}.nc", var, 20, values=vec,
-                   coords=(lon3, lat3) if coords_3d else None)
-    zos = BASE["zos"] + np.arange(3)[:, None] + 0.001 * zos_perm[None, :]
-    _write_raw(d / "zos.nc", "zos", 5, two_d=True, values=zos,
-               coords=((HAND_LON[zos_perm], HAND_LAT[zos_perm])
-                       if zos_coords else None))
+        if vel_coords_2d:
+            _write_raw(d / f"{var}.nc", var, 20, values=vec,
+                       coords=(HAND_LON[perm], HAND_LAT[perm]),
+                       coords_dim="nodes_2d")
+        else:
+            _write_raw(d / f"{var}.nc", var, 20, values=vec,
+                       coords=(lon3, lat3) if coords_3d else None)
+    if zos:
+        vals = BASE["zos"] + np.arange(3)[:, None] + 0.001 * zos_perm[None, :]
+        _write_raw(d / "zos.nc", "zos", 5, two_d=True, values=vals,
+                   coords=((HAND_LON[zos_perm], HAND_LAT[zos_perm])
+                           if zos_coords else None))
+    if sampled_2d:
+        vals = 7.0 + np.arange(3)[:, None] + 0.001 * zos_perm[None, :]
+        _write_raw(d / f"{sampled_2d}.nc", sampled_2d, 5, two_d=True,
+                   values=vals)
     return d
 
 
@@ -513,6 +533,93 @@ def test_raw_2d_coordinates_kept_values_in_place(tmp_path):
         np.testing.assert_array_equal(got, want)
     np.testing.assert_array_equal(
         vel.eta, (BASE["zos"] + 1 + 0.001 * np.arange(5)).astype(np.float32))
+
+
+def test_raw_velocity_files_with_2d_coordinates_permuted(tmp_path):
+    """The raw velocity files carry ``lon``/``lat`` over ``nodes_2d``, a
+    dimension none of their variables uses, and there is no ``zos``; every
+    file lists the nodes with 0 and 1 swapped: those coordinates are kept
+    and compared with the mesh, and the permutation is refused."""
+    umesh = _uniform_ascii_mesh(tmp_path)
+    with _open(_raw_uniform(tmp_path / "perm", perm=[1, 0, 2, 3, 4],
+                            vel_coords_2d=True, zos=False)) as ds:
+        assert set(ds.data_vars) == {"uo", "vo", "wo"}
+        msg = _refusal(umesh, ds)
+    assert "lon_nodes_2d" in msg and "'nodes_2d'" in msg, msg
+    assert "uo.nc" in msg and "at node 0:" in msg, msg
+    assert "(11.0000000, 50.0000000) against (10.0000000, 50.0000000)" in msg
+    assert "2 node(s)" in msg and "order" in msg
+
+
+def test_raw_velocity_files_with_2d_coordinates_in_place(tmp_path):
+    """The same files in the mesh's order: the dataset keeps the 2-D nodes'
+    coordinates over ``nodes_2d`` (named in ``fesom14_node_coords``),
+    ``prepare`` passes, and every value is read at its ``(level, node)``."""
+    umesh = _uniform_ascii_mesh(tmp_path)
+    with _open(_raw_uniform(tmp_path / "ok", vel_coords_2d=True,
+                            zos=False)) as ds:
+        np.testing.assert_array_equal(ds["lon_nodes_2d"].values, HAND_LON)
+        np.testing.assert_array_equal(ds["lat_nodes_2d"].values, HAND_LAT)
+        assert ds.attrs["fesom14_node_coords"] == (
+            "nodes_2d: lon_nodes_2d lat_nodes_2d")
+        Fesom14Reader.prepare(umesh, ds)
+        vel = Fesom14Reader.read_velocities(ds, 2, umesh, MODE_3D)
+    k = np.arange(4)[:, None]
+    n = np.arange(5)[None, :]
+    for got, var in ((vel.u, "uo"), (vel.v, "vo")):
+        want = (BASE[var] + 2 + 0.01 * k + 0.001 * n).astype(np.float32)
+        np.testing.assert_array_equal(got, want)
+
+
+def test_coordinate_names_never_collide(tmp_path):
+    """A sampled 2-D field named ``lon_nodes_2d`` next to raw velocities
+    and a ``zos`` with coordinates: the coordinates take the next free pair
+    of names (``lon_nodes_2d_2``/``lat_nodes_2d_2``, listed in
+    ``fesom14_node_coords``), the field is sampled, and a permutation is
+    still refused through the renamed coordinates."""
+    umesh = _uniform_ascii_mesh(tmp_path)
+    mode = ModeConfig(Fdrift3D=True, sample_vars=["lon_nodes_2d"])
+    with _open(_raw_uniform(tmp_path / "ok", sampled_2d="lon_nodes_2d"),
+               mode) as ds:
+        assert ds["lon_nodes_2d"].dims == ("time", "nodes_2d")
+        assert ds.attrs["fesom14_node_coords"] == (
+            "nodes_2d: lon_nodes_2d_2 lat_nodes_2d_2")
+        np.testing.assert_array_equal(ds["lon_nodes_2d_2"].values, HAND_LON)
+        Fesom14Reader.prepare(umesh, ds)
+        got = Fesom14Reader.read_scalar_fields(ds, 1, umesh, ["lon_nodes_2d"],
+                                               mode)
+    np.testing.assert_array_equal(
+        got["lon_nodes_2d"], (8.0 + 0.001 * np.arange(5)).astype(np.float32))
+
+    with _open(_raw_uniform(tmp_path / "perm", perm=[1, 0, 2, 3, 4],
+                            sampled_2d="lon_nodes_2d"), mode) as ds:
+        msg = _refusal(umesh, ds)
+    assert "lon_nodes_2d_2" in msg and "at node 0:" in msg, msg
+
+
+def test_coordinates_of_another_length(tmp_path):
+    """Coordinates along ``nodes_2d`` with six entries in the velocity
+    files: next to a ``zos`` whose ``nodes_2d`` has five, refused at open
+    (files of another mesh); alone, kept and refused by ``prepare`` (the
+    mesh has neither six 2-D nor six 3-D nodes)."""
+    umesh = _uniform_ascii_mesh(tmp_path)
+    lon6, lat6 = np.append(HAND_LON, 12.5), np.append(HAND_LAT, 51.0)
+    for zos in (True, False):
+        d = _raw_uniform(tmp_path / f"six{zos}", zos=zos)
+        for var in ("uo", "vo", "wo"):
+            _write_raw(d / f"{var}.nc", var, 20, coords=(lon6, lat6),
+                       coords_dim="nodes_2d")
+        if zos:
+            with pytest.raises(ValueError) as info:
+                _open(d)
+            msg = str(info.value)
+            assert "uo.nc" in msg and "6 entries along 'nodes_2d'" in msg, msg
+            assert "5 entries for 'zos'" in msg, msg
+            continue
+        with _open(d) as ds:
+            msg = _refusal(umesh, ds)
+        assert "lon_nodes_2d" in msg and "6 entries" in msg, msg
+        assert "5 2-D nodes and 20 3-D nodes" in msg, msg
 
 
 def test_raw_common_permutation_seen_by_3d_coordinates(tmp_path):

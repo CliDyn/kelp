@@ -51,7 +51,7 @@ NOLEAP_MONTH_ENDS = [31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365]
 
 #: base value of each variable (values encode the variable)
 BASE = {"uo": 1.0, "vo": 2.0, "wo": 3.0, "thetao": 4.0, "so": 5.0,
-        "zos": 6.0, "u": 1.0, "v": 2.0, "w": 3.0}
+        "zos": 6.0, "u": 1.0, "v": 2.0, "w": 3.0, "drymask": 7.0}
 
 MODE_3D = ModeConfig(Fdrift3D=True)
 MODE_3D_TS = ModeConfig(Fdrift3D=True, sample_vars=["thetao", "so"])
@@ -623,6 +623,30 @@ def test_missing_variable_not_blamed_on_a_restart(tmp_path):
                   "run.1948.oce.nc", "restart")
     assert msg.index("holds the variable 'wo'") < msg.index("restart"), msg
     assert "no other file" not in msg, msg
+
+
+@pytest.mark.parametrize("mask", ["drymask", "zos"])
+def test_dry_mask_records_of_u(tmp_path, mask):
+    """The beaching dry mask (``dry_mask_var``) must have the records of u:
+    daily records next to monthly velocities are refused, naming
+    ``beaching.dry_mask_var`` and the variable; a mask that is also the
+    sea-surface height (``zos``) is told that leaving it out sets eta to 0.
+    With u's records the mask is opened once (``zos``: as the sea-surface
+    height too)."""
+    for var in ("uo", "vo", "wo"):
+        _raw_months(tmp_path, var)
+    _raw_days(tmp_path, mask, two_d=True)
+    msg = _refusal(tmp_path, MODE_3D, dry_mask_var=mask)
+    _assert_names(msg, f"'{mask}'", "'uo'", "beaching.dry_mask_var", MONTHLY,
+                  DAILY)
+    assert ("the sea-surface height is then 0" in msg) == (mask == "zos"), msg
+
+    _raw_months(tmp_path, mask, two_d=True)      # the same file, monthly now
+    ds = _open(tmp_path, MODE_3D, dry_mask_var=mask)
+    assert sorted(ds.data_vars) == sorted(["uo", "vo", "wo", mask])
+    assert int(ds.attrs["fesom14_has_eta"]) == int(mask == "zos")
+    assert len(ds["time"]) == 3
+    ds.close()
 
 
 def test_explicit_var_eta_missing_refused(tmp_path):
