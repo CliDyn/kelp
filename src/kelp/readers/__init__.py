@@ -11,10 +11,18 @@ A reader may also provide the optional staticmethod
 returning node-based scalar fields (vertical dim trimmed to ``mesh.sigma``)
 for trajectory sampling; ``read_velocities`` attaches them to
 ``VelocityField.scalars`` when given a ``sample_vars`` list.
+
+A reader may also provide the optional hook
+    prepare(mesh, ds) -> None
+that checks a dataset against the mesh; every entry of a run (and ``kelp
+info``) calls it through :func:`_prepare_dataset`.  A reader that resolves
+what time each record represents (``_READER_RESOLVES_TIME``) takes the
+``data.time_*`` stamp options as ``open_dataset`` keywords
+(:func:`_time_option_kwargs`).
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import warnings
 
@@ -62,6 +70,29 @@ def get_reader(name: str):
         available = ", ".join(sorted(set(_READERS) | set(_KNOWN_READERS)))
         raise KeyError(f"No reader registered for '{name}'. Available: {available}")
     return _READERS[name]
+
+
+def _prepare_dataset(reader, mesh, ds) -> None:
+    """Run the reader's optional ``prepare(mesh, ds)`` hook.
+
+    The hook runs at every call: the engine keeps no record of what a mesh
+    was prepared for (no dataset token, no level table, bed or reader
+    stamp) and writes nothing into ``ds.attrs`` or ``mesh.metadata`` for
+    it, so whatever the mesh, the dataset, the kept levels or the reader
+    of this call, the hook sees exactly them.  ``run_single_realization``
+    calls it at its entry, after the ``max_levels`` cut (the hook sees the
+    levels in use): once per realization.  ``run_tracking`` calls it once
+    more, right after ``open_dataset``, so a refusal of the hook comes
+    before the sampling probes and before any output file exists; ``kelp
+    info`` calls it once, after ``open_dataset``, as a run does.  A hook
+    that raises leaves nothing behind in the engine.  Readers without the
+    hook: nothing happens.  It lives next to the registry, not in
+    ``tracking``, so that ``kelp info`` does not import the integrators.
+    """
+    prep = getattr(reader, "prepare", None)
+    if prep is None:
+        return
+    prep(mesh, ds)
 
 
 #: exact unit tokens of a numeric time axis without an epoch
@@ -252,6 +283,109 @@ def time_axis_epoch(ds) -> Optional[Tuple[str, str]]:
         except Exception:
             return None
     return None
+
+
+#: ``data.*`` keys that say what each record's time stamp means; only the
+#: mesh types listed in ``_READER_RESOLVES_TIME`` read them
+_TIME_OPTION_KEYS = ("time_stamp", "time_window", "time_offset")
+
+#: mesh types whose reader resolves what time each record represents (the
+#: centre of its averaging window for means, the stamp for snapshots): no
+#: midpoint shift, no ``data.time_averaging``, the stamp options above
+_READER_RESOLVES_TIME = ("fesom14",)
+
+#: the output's ``time_averaging`` attribute for those readers
+RESOLVED_BY_READER = "resolved_by_reader"
+
+#: what resolved the record times, by ``ds.attrs["fesom14_time_source"]``
+_TIME_SOURCE_TEXT = {
+    "bounds": "the files' time bounds",
+    "schedule": "the files' output_schedule",
+    "options": "data.time_stamp and data.time_window",
+}
+
+
+def _time_option_kwargs(config) -> Dict[str, str]:
+    """The stamp options set in ``config.data``, as ``open_dataset`` kwargs.
+
+    Only a reader that resolves its record times takes them (``mesh.type:
+    fesom14``); it also takes the place of ``data.time_averaging``.  Called
+    before the mesh or any data is read.
+
+    Parameters
+    ----------
+    config : AppConfig
+
+    Returns
+    -------
+    dict
+        ``{key: value}`` for each of ``time_stamp``, ``time_window`` and
+        ``time_offset`` that is set (empty when none is).
+
+    Raises
+    ------
+    TypeError
+        A key is set for another mesh type; the message names every key
+        set and the mesh type.
+    ValueError
+        ``data.time_averaging`` is set for a reader that resolves its record
+        times; the message points to the stamp options.
+    """
+    data = config.data
+    kw = {k: getattr(data, k) for k in _TIME_OPTION_KEYS
+          if getattr(data, k, None) is not None}
+    mesh_type = config.mesh.type
+    if mesh_type not in _READER_RESOLVES_TIME:
+        if kw:
+            keys = ", ".join(f"data.{k}" for k in kw)
+            raise TypeError(
+                f"{keys} {'is' if len(kw) == 1 else 'are'} set, but mesh.type "
+                f"is {mesh_type!r}: the stamp options are read by the FESOM "
+                "1.4 reader only (mesh.type: fesom14). Remove "
+                f"{keys}; for this reader data.time_averaging ('mean' or "
+                "'instant') says what the time stamps are")
+        return kw
+    if getattr(data, "time_averaging", None) is not None:
+        raise ValueError(
+            f"data.time_averaging = {data.time_averaging!r} is set, but the "
+            f"{mesh_type} reader resolves what time each record represents "
+            "itself (the centre of its averaging window for means, from the "
+            "files' time bounds or output schedule), and nothing shifts its "
+            "time axis again. Remove data.time_averaging; when the files do "
+            "not say what their stamps are, set data.time_stamp (start | "
+            "centre | end | instant) and data.time_window (the averaging "
+            "window or the snapshot cadence), and data.time_offset for "
+            "stamps that sit early or late")
+    return kw
+
+
+def _describe_record_times(ds, offset: Optional[str] = None) -> Optional[str]:
+    """One summary line on record times resolved by the reader, or None.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        A dataset whose reader resolved its record times (it carries
+        ``attrs["fesom14_time_source"]``); any other gives None.
+    offset : str, optional
+        ``data.time_offset``, named when set.
+
+    Returns
+    -------
+    str or None
+        What resolved the times and the first and last instants.
+    """
+    source = getattr(ds, "attrs", {}).get("fesom14_time_source")
+    if source is None:
+        return None
+    text = (f"resolved by the reader from "
+            f"{_TIME_SOURCE_TEXT.get(source, str(source))}")
+    if offset is not None:
+        text += f", data.time_offset {offset} applied"
+    t = ds["time"].values
+    if len(t):
+        text += f"; first {t[0]}, last {t[-1]}"
+    return text
 
 
 # ---------------------------------------------------------------------------

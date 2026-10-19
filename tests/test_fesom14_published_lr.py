@@ -39,10 +39,11 @@ What is pinned, and how each pin can fail:
   weight and the velocities.
 - **3-D runs** (``test_lr_3d_run_three_months``, ``test_lr_pchip_run``): 2,000
   particles, RK2 barycentric, 90 days from 1951-03-01, lerp and PCHIP in
-  time, sampling ``thetao``: no NaN, every particle ALIVE or BEACHED, none
-  below the bed of its nearest node or above the surface.  Two sets of node
-  probes: 12 released at the start and 12 released into the running runs on
-  1951-04-01 00:00, when the PCHIP window has moved on by one record.  Their
+  time, sampling ``thetao``: no NaN, every particle ALIVE or BEACHED (the
+  late probes NOT_RELEASED before their release), none below the bed of its
+  nearest node or above the surface.  Two sets of node probes: 12 released
+  at the start and 12 released into the running runs on 1951-04-01 00:00,
+  when the PCHIP window has moved on by one record.  Their
   first-step velocities equal, in the PCHIP run, PCHIP in time at each level
   (``scipy.interpolate.PchipInterpolator`` over the four records the window
   holds, found from the time bounds), then the lerp in depth, and in the
@@ -62,11 +63,10 @@ What is pinned, and how each pin can fail:
   bit-identical trajectories.
 
 Measured values (the pins below hold a margin) are quoted in the docstrings
-with the commit they were measured on.
+with the date they were measured on.
 
-Mutation pass (2026-10-19, on this module as first committed, 9cf16f8, with
-the reader at d1d7eb5; the 3-month runs then had 24 first-step probes and no
-late ones).  Each defect below was put into a copy of the package, one at a
+Mutation pass (2026-10-19, on the first version of this module, whose
+3-month runs had 24 first-step probes and no late ones).  Each defect below was put into a copy of the package, one at a
 time, and this module was run against it; every defect failed the pins
 named (mechanism and size from the assertion messages):
 
@@ -220,7 +220,8 @@ STEPS_PER_DAY = 4
 N_DAYS = 90
 N_PARTICLES = 2000
 #: node probes in the 3-month runs, of each kind (first step at the start,
-#: first step after the late release); the rest of the particles is the cloud
+#: first step after the late release); the rest of the particles is the cloud.
+#: Only these runs' seed file has the 4th column (the late release offset)
 N_PROBES = 12
 #: the form-equivalence runs: days
 N_DAYS_FORMS = 20
@@ -718,19 +719,29 @@ def _assert_hand(got: np.ndarray, want: np.ndarray, what: str) -> None:
         f"first: got {got[bad][0]!r}, expected {want[bad][0]!r}")
 
 
-def _assert_sane_run(lr: _LR, run: _Run) -> None:
-    """No NaN; every particle ALIVE or BEACHED; none above the surface or
-    below the bed of its nearest node (the tracker's end-of-step clamp)."""
+def _assert_sane_run(lr: _LR, run: _Run, late: slice) -> None:
+    """No NaN; every particle ALIVE or BEACHED at every record, except the
+    late probes (the slice ``late`` of a 3-month run's particles), which are
+    NOT_RELEASED at the records before their release (``_late_rec()``; a
+    run that ends before it holds no other) and ALIVE or BEACHED from
+    then on; none above the surface or below the bed of its nearest node
+    (the tracker's end-of-step clamp)."""
     tr = run.tr
     st = tr["status"]
     alive = st == ParticleStatus.ALIVE
-    dormant = st == ParticleStatus.NOT_RELEASED      # the late probes, early
-    ok = alive | (st == ParticleStatus.BEACHED) | dormant
-    assert ok.all(), (
-        f"{int((~ok).sum())} particle records neither ALIVE nor BEACHED "
-        f"(statuses {np.unique(st[~ok]).tolist()})")
-    assert not (np.diff(dormant.astype(np.int8), axis=1) > 0).any(), \
-        "a released particle became dormant again"
+    dormant = np.zeros(st.shape, dtype=bool)        # where NOT_RELEASED is due
+    dormant[late, :_late_rec()] = True
+    moving = alive | (st == ParticleStatus.BEACHED)
+    early = dormant & (st != ParticleStatus.NOT_RELEASED)
+    assert not early.any(), (
+        f"{int(early.sum())} records of the late probes before their release "
+        f"on {T_LATE} not NOT_RELEASED (statuses "
+        f"{np.unique(st[early]).tolist()})")
+    bad = ~dormant & ~moving
+    assert not bad.any(), (
+        f"{int(bad.sum())} particle records neither ALIVE nor BEACHED, outside "
+        f"the late probes' records before {T_LATE} (statuses "
+        f"{np.unique(st[bad]).tolist()})")
     out = ~dormant
     for name in ("lon", "lat", "z"):
         assert np.isfinite(tr[name][out]).all(), f"NaN in {name}"
@@ -1015,7 +1026,7 @@ def test_lr_3d_run_three_months(lr, seeds, lerp_run):
     run = lerp_run
     assert run.tr["lon"].shape == (N_PARTICLES, N_DAYS * STEPS_PER_DAY)
     assert run.dates[-1] == T_RUN + timedelta(days=N_DAYS)
-    _assert_sane_run(lr, run)
+    _assert_sane_run(lr, run, seeds["months"].kinds["late"])
     s = seeds["months"]
     sl = s.kinds["late"]
     r = _assert_late_release(run, sl)
@@ -1031,7 +1042,7 @@ def test_lr_3d_run_three_months(lr, seeds, lerp_run):
 
 
 #: median separation (km) of the PCHIP run from the lerp run after 30 days:
-#: measured 1.684 km (reader at d1d7eb5); pinned at about half
+#: measured 1.684 km (2026-10-19); pinned at about half
 PCHIP_SEP_KM_MIN = 0.85
 #: the same separation relative to the lerp run's median 30-day displacement
 #: (60.6 km): measured 0.028; pinned below 0.1, so that a broken PCHIP cannot
@@ -1057,7 +1068,7 @@ def test_lr_pchip_run(lr, seeds, lerp_run, pchip_run):
     (measured values with the constants).
     """
     run = pchip_run
-    _assert_sane_run(lr, run)
+    _assert_sane_run(lr, run, seeds["months"].kinds["late"])
     s = seeds["months"]
     smallest = np.inf
     for kind, t in (("probes", T_RUN), ("late", T_LATE)):
@@ -1122,8 +1133,8 @@ def half_sum_run(lr, seeds, tmp_path_factory) -> _Run:
                                             days=N_DAYS_HALF))
 
 
-#: the half-sum run against the level-linear run after 30 days, measured with
-#: the reader at d1d7eb5: median separation 1.632 km (pinned at about half),
+#: the half-sum run against the level-linear run after 30 days, measured on
+#: 2026-10-19: median separation 1.632 km (pinned at about half),
 #: 0.027 of the median displacement of 60.6 km (pinned below 0.1: small); rank
 #: correlation of the separation with the release-point driver 0.771
 #: (pinned at half); median separation in the strongest driver quartile
@@ -1170,7 +1181,7 @@ def test_lr_level_linear_vs_half_sum(lr, seeds, lerp_run, half_sum_run):
     Measured values with the constants.
     """
     run = half_sum_run
-    _assert_sane_run(lr, run)
+    _assert_sane_run(lr, run, seeds["months"].kinds["late"])
     alive = ((run.tr["status"][:, 0] == ParticleStatus.ALIVE)
              & (lerp_run.tr["status"][:, 0] == ParticleStatus.ALIVE))
     du = np.abs(run.tr["vel_u"][alive, 0] - lerp_run.tr["vel_u"][alive, 0])

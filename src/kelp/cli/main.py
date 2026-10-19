@@ -56,7 +56,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
 def _cmd_info(args: argparse.Namespace) -> int:
     """Execute ``kelp info config.yaml``."""
     from ..core.config import load_config
-    from ..readers import get_reader
+    # the helpers a run uses too, from the registry: info never imports the
+    # tracking loop and its integrators
+    from ..readers import (get_reader, _describe_record_times,
+                           _prepare_dataset, _time_option_kwargs)
 
     config_path = Path(args.config).expanduser()
     if not config_path.exists():
@@ -70,7 +73,6 @@ def _cmd_info(args: argparse.Namespace) -> int:
         print(f"error: unknown mesh type {config.mesh.type!r}: {exc}",
               file=sys.stderr)
         return 1
-    from ..tracking import _describe_record_times, _time_option_kwargs
     try:
         # the stamp options reach open_dataset as in a run (fesom14 only)
         time_kw = _time_option_kwargs(config)
@@ -130,15 +132,14 @@ def _cmd_info(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        # the reader's mesh-relative checks, as a run makes them
-        prepare = getattr(reader, "prepare", None)
-        if prepare is not None:
-            try:
-                prepare(mesh, ds)
-            except Exception as exc:
-                print(f"error: the dataset {config.data.ncinput!r} does not "
-                      f"fit the mesh: {exc}", file=sys.stderr)
-                return 1
+        # the reader's mesh-relative checks, as a run makes them (a reader
+        # without the hook: nothing happens)
+        try:
+            _prepare_dataset(reader, mesh, ds)
+        except Exception as exc:
+            print(f"error: the dataset {config.data.ncinput!r} does not "
+                  f"fit the mesh: {exc}", file=sys.stderr)
+            return 1
         if "time" in ds.dims:
             n_time = ds.sizes["time"]
             print(f"  Time range: {n_time} steps")

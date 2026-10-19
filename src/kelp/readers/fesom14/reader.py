@@ -45,7 +45,8 @@ about themselves; the checks against the mesh belong to ``prepare``.
 :meth:`Fesom14Reader.prepare` checks a dataset against the mesh — the sizes,
 the full level axis, the node coordinates when the data carry them, and the
 wet mask of record 0 of every variable — and changes nothing. The engine
-runs it for every dataset a mesh is used with.
+runs it at every entry of a run (after ``open_dataset``, then at each
+realization).
 
 :meth:`Fesom14Reader.read_velocities` and
 :meth:`Fesom14Reader.read_scalar_fields` read one record. Every record of
@@ -213,7 +214,8 @@ class Fesom14Reader:
                 [-180, 180)), whatever the tracking frame.
             ``uv_data_last``
                 int32 ``(N,)``, the index of each column's last wet level
-                (a new array; never written into).
+                (a new array the reader never writes into or replaces; the
+                engine puts a read-only copy in its place at its first use).
             ``fesom14_idx``
                 ASCII only: the ``(N, K)`` 3-D node index table, -1 = dry.
             ``fesom14_polygon_report``
@@ -397,12 +399,16 @@ class Fesom14Reader:
     def prepare(mesh: Mesh, ds: xr.Dataset) -> None:
         """Check a dataset against the mesh; change nothing.
 
-        The engine calls this hook whenever the mesh is not prepared for the
-        dataset and its kept levels (another dataset, a ``max_levels``
-        re-cut). It only checks: neither the mesh (``sigma``, ``depth``,
-        ``metadata``, ``uv_data_last`` included) nor the dataset is changed,
-        so a second call on the same pair is harmless. The static wet mask of
-        the mesh is never re-declared from the data, only compared with it.
+        The engine calls this hook at every entry: ``run_tracking`` right
+        after :meth:`open_dataset`, then each realization after the
+        ``max_levels`` cut, and ``kelp info`` once. It only checks: neither
+        the mesh (``sigma``, ``depth``, ``metadata``, ``uv_data_last``
+        included) nor the dataset is changed, so a repeated call is
+        harmless; each reads one record per variable. The static wet mask
+        of the mesh is never re-declared from the data, only compared with
+        it; the declaration ``uv_data_last`` stays the one :meth:`load_mesh`
+        made (the engine puts a read-only copy with the same values in its
+        place at its first use).
 
         Parameters
         ----------
@@ -442,11 +448,14 @@ class Fesom14Reader:
         -----
         Only record 0 of each variable is read, lazily, one record per
         variable: the mask of a FESOM 1.4 run is static, and the reads
-        compare every record with it. A dataset whose nodes are ALL in
-        another order than the mesh's (a common permutation) can have masks
-        that agree with the mesh's (columns of equal length); only its node
-        coordinates show it, so data without ``lon``/``lat`` cannot be
-        checked for it.
+        compare every record with it. Memory: one variable at a time, at
+        the peak about 11 bytes per slot of a 3-D variable (its float32
+        record of ``K`` levels by ``N`` nodes, a copy of the magnitudes and
+        three masks), ~65 MB for 46 levels and 127k nodes. A dataset whose
+        nodes are ALL in another order than the mesh's (a common
+        permutation) can have masks that agree with the mesh's (columns of
+        equal length); only its node coordinates show it, so data without
+        ``lon``/``lat`` cannot be checked for it.
         """
         facts = _mesh_facts(mesh)
         fields = _fields(ds)

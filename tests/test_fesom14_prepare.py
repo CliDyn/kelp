@@ -7,7 +7,9 @@ already be cut by ``max_levels``), the node coordinates when the data carry
 them, and the wet mask of record 0 of every variable against the mesh's
 static mask (the ASCII mesh's 3-D node index table, or the mask a mesh from
 cell polygons was built with).  It changes nothing, so it can run any number
-of times; the engine runs it again for every other dataset.
+of times; the engine runs it at every entry (once after ``open_dataset``,
+then at each realization) and takes its own read-only copy of the reader's
+declaration ``uv_data_last`` at the first use.
 
 Meshes: the five-node ASCII mesh of ``test_fesom14_ascii_mesh`` (columns of
 4, 3, 2, 3, 1 levels at 0, 10, 25, 50 m; 13 3-D nodes), the same nodes with
@@ -21,7 +23,6 @@ Expected nodes and levels are written by hand.  All data is synthetic.
 from __future__ import annotations
 
 import contextlib
-import gc
 import io
 from pathlib import Path
 
@@ -583,11 +584,26 @@ def _rsr(mesh, ds):
             n_steps=1)
 
 
-def test_second_dataset_rechecked(tmp_path):
+def _spy_prepare(monkeypatch) -> list:
+    """Count the calls of ``Fesom14Reader.prepare``: the list gets one entry
+    per call, the time stamp of the dataset's first record."""
+    calls = []
+    real = Fesom14Reader.prepare
+
+    def spy(mesh, ds):
+        calls.append(ds["time"].values[0])
+        return real(mesh, ds)
+    monkeypatch.setattr(Fesom14Reader, "prepare", staticmethod(spy))
+    return calls
+
+
+def test_second_dataset_rechecked(tmp_path, monkeypatch):
     """One mesh, a good dataset, then a dataset whose levels differ and one
     whose nodes are all in another (common) order: each is checked again
-    and refused, directly and through ``run_single_realization`` with the
-    datasets opened as temporaries (freed between the calls)."""
+    and refused, directly and through ``run_single_realization``, which
+    prepares at its entry every time: one ``prepare`` per entry, for the
+    good dataset run twice, for the same refused dataset twice in a row and
+    for the good one again after each refusal."""
     umesh = _uniform_ascii_mesh(tmp_path)
     good = _levelwise(tmp_path / "good", ncol=[4] * 5)
     levels = _levelwise(tmp_path / "levels", ncol=[4] * 5,
@@ -600,26 +616,26 @@ def test_second_dataset_rechecked(tmp_path):
         with _open(d) as ds:
             assert what in _refusal(umesh, ds)
 
-    _rsr(umesh, _open(good))
-    for d, what in ((levels, "level 2"), (perm, "node coordinates"),
-                    (levels, "level 2")):
-        gc.collect()
+    calls = _spy_prepare(monkeypatch)
+    with _open(good) as ds:
+        _rsr(umesh, ds)
+        _rsr(umesh, ds)              # the same dataset again: prepared again
+    assert len(calls) == 2
+    for d, what in ((levels, "level 2"), (levels, "level 2"),
+                    (perm, "node coordinates"), (levels, "level 2")):
         with pytest.raises(ValueError, match=what):
             _rsr(umesh, _open(d))
-        assert "kelp_prepared_dataset" not in umesh.metadata
-        gc.collect()
         _rsr(umesh, _open(good))
-        assert "kelp_prepared_dataset" in umesh.metadata
+    assert len(calls) == 2 + 2 * 4
 
 
 def test_idempotent(tmp_path):
-    """``prepare`` twice on one pair: no error, nothing changed — the mesh's
-    level table, depths, metadata entries (the same objects) and the
-    declaration ``uv_data_last``, frozen as the engine freezes it."""
+    """``prepare`` twice on one pair, directly and through the engine's
+    ``_prepare_dataset``: no error, nothing changed — the dataset's
+    attributes, the mesh's level table, depths and metadata entries (the
+    same objects, the declaration ``uv_data_last`` included)."""
     mesh = _hand_mesh(tmp_path)
     tracking._apply_max_levels(mesh, ModeConfig(Fdrift3D=True, max_levels=3))
-    last = mesh.metadata["uv_data_last"]
-    last.setflags(write=False)
     before = dict(mesh.metadata)
     sigma, depth = mesh.sigma, mesh.depth
     depth_copy = depth.copy()
@@ -627,14 +643,47 @@ def test_idempotent(tmp_path):
         attrs = dict(ds.attrs)
         assert Fesom14Reader.prepare(mesh, ds) is None
         assert Fesom14Reader.prepare(mesh, ds) is None
-        tracking._prepare_dataset(Fesom14Reader, mesh, ds, always=True)
-        tracking._prepare_dataset(Fesom14Reader, mesh, ds, always=True)
-        assert ds.attrs.pop("kelp_dataset_token")
+        tracking._prepare_dataset(Fesom14Reader, mesh, ds)
+        tracking._prepare_dataset(Fesom14Reader, mesh, ds)
         assert ds.attrs == attrs
-    for key in ("kelp_prepared_dataset", "kelp_prepared_sigma"):
-        mesh.metadata.pop(key)
     assert mesh.metadata.keys() == before.keys()
     assert all(mesh.metadata[k] is v for k, v in before.items())
     assert mesh.metadata["uv_data_last"].tolist() == [3, 2, 1, 2, 0]
     assert mesh.sigma is sigma and mesh.depth is depth
     np.testing.assert_array_equal(mesh.depth, depth_copy)
+
+
+def test_declaration_through_runs(tmp_path, monkeypatch):
+    """The declaration in effect is the engine's snapshot with the reader's
+    values.  ``load_mesh`` declares each column's last wet level in a new
+    int32 array; the first run builds its depth table from a read-only
+    copy that takes the array's place in ``mesh.metadata`` (the reader's
+    array itself is left as it was).  The next runs, on another dataset and
+    on the first one again, prepare again (one call each) and keep that
+    snapshot: ``prepare`` never assigns a declaration.  No other entry of
+    ``mesh.metadata`` changes or appears, and the runs give the same step
+    on both datasets."""
+    mesh = _hand_mesh(tmp_path)
+    own = mesh.metadata["uv_data_last"]
+    assert own.dtype == np.int32 and own.flags.writeable
+    assert own.tolist() == [3, 2, 1, 2, 0]
+    before = dict(mesh.metadata)
+    a = _levelwise(tmp_path / "a")
+    b = _levelwise(tmp_path / "b", coords=False)
+    calls = _spy_prepare(monkeypatch)
+
+    first = _rsr(mesh, _open(a))
+    snap = mesh.metadata["uv_data_last"]
+    assert snap is not own and not snap.flags.writeable
+    assert snap.dtype == np.int32 and snap.tolist() == [3, 2, 1, 2, 0]
+    assert own.flags.writeable and own.tolist() == [3, 2, 1, 2, 0]
+    for d in (b, a):
+        again = _rsr(mesh, _open(d))
+        assert mesh.metadata["uv_data_last"] is snap
+        for name in ("lon", "lat", "z"):
+            np.testing.assert_array_equal(again.to_arrays()[name],
+                                          first.to_arrays()[name])
+    assert len(calls) == 3
+    assert mesh.metadata.keys() == before.keys()
+    assert all(mesh.metadata[k] is v for k, v in before.items()
+               if k != "uv_data_last")

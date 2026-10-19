@@ -8,6 +8,9 @@ diffusion-specific seed-override and validation tests live in
 from __future__ import annotations
 
 import io
+import os
+import subprocess
+import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -135,6 +138,27 @@ class TestCliInfo:
         # the grid-hash cell the run would use, with its window statistics
         assert "grid hash: cell" in text
         assert "(reader auto)" not in text
+
+    def test_info_imports_no_tracking_loop(self, tmp_path):
+        """``kelp info`` takes what it shares with a run (the reader hook
+        ``prepare``, the stamp options, the record-times line) from the
+        reader registry: in a fresh interpreter it neither imports
+        ``kelp.tracking`` nor the integrators."""
+        nc_path = _make_fesomc_minimal(tmp_path)
+        particles = _write_particles(tmp_path / "p.dat")
+        cfg = _write_config(tmp_path / "cfg.yaml", nc_path, particles,
+                            tmp_path / "out.nc")
+        code = ("import sys\n"
+                "from kelp.cli.main import main\n"
+                f"rc = main(['info', {str(cfg)!r}])\n"
+                "heavy = [m for m in ('kelp.tracking', "
+                "'kelp.numerics.integrators') if m in sys.modules]\n"
+                "print('RC', rc, 'IMPORTED', heavy)\n")
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)})
+        assert out.returncode == 0, out.stderr
+        assert "RC 0 IMPORTED []" in out.stdout, (out.stdout, out.stderr)
 
     def test_info_labels_an_explicit_cell(self, tmp_path):
         """Review 2026-09-22: an explicit grid_hash_cell_size was printed as
