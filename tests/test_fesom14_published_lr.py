@@ -247,9 +247,9 @@ def _files(var: str, table: str = "Omon") -> List[Path]:
     versions = sorted(glob.glob(os.path.join(_DATA, table, var, "gn", "*")))
     if not versions:
         raise FileNotFoundError(
-            f"KELP_TEST_FESOM14_DATA holds no {table}/{var}/gn/<version> "
-            "directory; it must be the member directory of the published "
-            "AWI-CM-1-1-LR hist-1950 output")
+            "KELP_TEST_FESOM14_DATA holds no version directory of the "
+            f"{table} variable {var} on the gn grid; it must be the member "
+            "directory of the published AWI-CM-1-1-LR hist-1950 output")
     return sorted(Path(f) for f in glob.glob(os.path.join(versions[-1], "*.nc")))
 
 
