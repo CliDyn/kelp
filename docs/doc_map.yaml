@@ -6,7 +6,7 @@ architecture:
   - src/kelp/core/io.py:VelocityField
   - src/kelp/core/particles.py:ParticleState
   doc: docs/architecture.md
-  verified_at: 1cea96c
+  verified_at: 65b2a00
 beaching:
   code:
   - src/kelp/numerics/beaching.py:evaluate_beaching
@@ -27,7 +27,7 @@ configuration:
   - src/kelp/core/config.py:ModeConfig
   - src/kelp/readers/fesom14/reader.py:Fesom14Reader
   doc: docs/configuration.md
-  verified_at: 1cea96c
+  verified_at: 65b2a00
 coordinate_frame:
   code:
   - src/kelp/core/rotation.py:euler_matrix
@@ -39,7 +39,7 @@ coordinate_frame:
   - src/kelp/tracking.py:_validate_restart_frame
   - src/kelp/readers/healpix.py:_apply_rotation
   doc: docs/coordinate_frame.md
-  verified_at: 1cea96c
+  verified_at: 65b2a00
 dev_config:
   code:
   - src/kelp/core/config.py:load_config
@@ -60,7 +60,7 @@ dev_core:
   - src/kelp/core/io.py:LazyLerpField
   - src/kelp/core/rotation.py:euler_matrix
   doc: docs/dev/core.md
-  verified_at: 1cea96c
+  verified_at: 65b2a00
 dev_integrators:
   code:
   - src/kelp/numerics/integrators.py:get_integrator
@@ -69,7 +69,7 @@ dev_integrators:
   - src/kelp/numerics/vertical_uv.py:check_depth_linear_record
   - src/kelp/numerics/integrators.py:_check_depth_linear_entry
   doc: docs/dev/integrators.md
-  verified_at: 1cea96c
+  verified_at: 65b2a00
 dev_mesh:
   code:
   - src/kelp/core/mesh.py:Mesh
@@ -98,7 +98,7 @@ dev_numerics:
   - src/kelp/numerics/interpolate.py:_interp_bary_elem_core_dl
   - src/kelp/numerics/vertical_uv.py:uv_wet
   doc: docs/dev/numerics.md
-  verified_at: 1cea96c
+  verified_at: 65b2a00
 dev_readers:
   code:
   - src/kelp/readers/__init__.py:get_reader
@@ -112,7 +112,7 @@ dev_readers:
   - src/kelp/readers/fesom14/
   - src/kelp/readers/fesom2.py:_elem_level_metadata
   doc: docs/dev/readers.md
-  verified_at: 1cea96c
+  verified_at: 65b2a00
 dev_tracking:
   code:
   - src/kelp/tracking.py:run_tracking
@@ -163,7 +163,7 @@ field_sampling:
   - src/kelp/tracking.py:_sample_record_fields
   - src/kelp/readers/fesom2.py:read_scalar_fields
   doc: docs/field_sampling.md
-  verified_at: 1cea96c
+  verified_at: 65b2a00
 healpix:
   code:
   - src/kelp/readers/healpix.py:build_healpix_dual_mesh
@@ -174,7 +174,7 @@ healpix:
   - src/kelp/numerics/integrators.py:_bary_fused_anchor_exact
   - src/kelp/core/mesh.py:grid_hash_dense_for_elements
   doc: docs/healpix.md
-  verified_at: 1cea96c
+  verified_at: 65b2a00
 interpolation:
   code:
   - src/kelp/numerics/interpolate.py:_interp_leastsq_core
@@ -187,7 +187,7 @@ interpolation:
   - src/kelp/numerics/interpolate.py:_interp_edge_leastsq_core_dl
   - src/kelp/numerics/interpolate.py:_interp_bary_elem_core_dl
   doc: docs/interpolation.md
-  verified_at: 1cea96c
+  verified_at: 65b2a00
 io_and_time:
   code:
   - src/kelp/readers/__init__.py:get_reader
@@ -205,7 +205,7 @@ io_and_time:
   - src/kelp/core/release.py:mask_inactive_velocity
   - src/kelp/readers/fesom14/_timeaxis.py:resolve_axis
   doc: docs/io_and_time.md
-  verified_at: 1cea96c
+  verified_at: 65b2a00
 localization:
   code:
   - src/kelp/core/mesh.py:Mesh
@@ -229,7 +229,7 @@ performance:
   - src/kelp/core/io.py:LazyLerpField
   - src/kelp/writers.py:TrajectoryWriter
   doc: docs/performance.md
-  verified_at: 1cea96c
+  verified_at: 65b2a00
 running:
   code:
   - src/kelp/tracking.py:run_tracking
@@ -253,7 +253,7 @@ time_integration:
   - src/kelp/numerics/integrators.py:_run_fused_2d_tinterp
   - src/kelp/core/io.py:LazyLerpField
   doc: docs/time_integration.md
-  verified_at: 1cea96c
+  verified_at: 65b2a00
 validation_and_performance:
   code:
   - tests/test_3d_analytical.py
@@ -274,7 +274,7 @@ velocity_interpolation:
   - src/kelp/numerics/interpolate.py:_interp_bary_elem_core_dl
   - src/kelp/numerics/vertical_uv.py:uv_wet
   doc: docs/velocity_interpolation.md
-  verified_at: 1cea96c
+  verified_at: 65b2a00
 vertical:
   code:
   - src/kelp/numerics/vertical.py:find_layer
