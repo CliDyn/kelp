@@ -6,12 +6,13 @@ The option reaches FESOM-C ``u``/``v`` (element layout: ``uv_interp``
 velocity cache marks each record ``"layer_linear"`` (prefetch windows and
 the shared snapshot cache included), the output says
 ``uv_vertical = "linear"``, and every stage reads u/v at its own sigma
-fraction ``s = clip(z / H_p, 0, 1)``.  A sigma mesh needs no element bottoms
-(every layer of every column is wet), so element data run on it; restarts
-resume bit for bit and refuse the other rule, a ``max_levels`` cut keeps
-the layers it keeps (below the last kept centre the value of that centre,
-as the layer rule reads it), and the diffusion compositions, the Az kick
-and multi-realization runs keep the option.
+fraction ``s = clip(z / H_p, 0, 1)`` — with temporal interpolation (linear
+or PCHIP in time) from the records blended at its own time.  A sigma mesh
+needs no element bottoms (every layer of every column is wet), so element
+data run on it; restarts resume bit for bit and refuse the other rule, a
+``max_levels`` cut keeps the layers it keeps (below the last kept centre
+the value of that centre, as the layer rule reads it), and the diffusion
+compositions, the Az kick and multi-realization runs keep the option.
 
 Fixture (all synthetic): the FESOM-C file of
 ``tests/test_integrators_depth_linear_sigma`` (its 3x3-node grid of 8
@@ -26,7 +27,10 @@ two elements without a coast edge, where every interpolator reproduces the
 columns exactly, so every position is the hand stage combination of
 ``_hand`` (each stage's ``s`` from its own position, time and column),
 step after step: discrete records ``DT`` apart and ``dt = DT``, so a step
-starts on a record and its RK stages blend the next one.
+starts on a record and its RK stages blend the next one.  The temporal
+interpolation test writes the surface and u/v quadratic in time instead
+(``GEO_QUAD``, ``RULE_QUAD``), where the linear blend and the PCHIP of the
+records differ, and steps ``DT / 2``.
 """
 from __future__ import annotations
 
@@ -39,6 +43,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from scipy.interpolate import PchipInterpolator
 
 xr = pytest.importorskip("xarray")
 netCDF4 = pytest.importorskip("netCDF4")
@@ -120,7 +125,7 @@ def _mode(layout="element", **kw):
 
 def _cfg(path, *, layout="element", uv_interp="leastsq", integrator="rk2",
          seeds=None, n_steps=N_STEPS, start=0, out="traj.nc", num_runs=1,
-         **kw):
+         dt=DT, **kw):
     """A run_tracking config on the file ``path``; ``kw`` goes to
     NumericsConfig when it names one of its fields, else to the mode."""
     work = Path(path).parent
@@ -134,7 +139,7 @@ def _cfg(path, *, layout="element", uv_interp="leastsq", integrator="rk2",
     num_kw.setdefault("w_interp", "barycentric")
     return AppConfig(
         mode=_mode(layout, **mode_kw),
-        numerics=NumericsConfig(dt=DT, integrator=integrator,
+        numerics=NumericsConfig(dt=dt, integrator=integrator,
                                 uv_interp=uv_interp, **num_kw),
         mesh=MeshConfig(type="fesomc", meshpath=str(path)),
         data=DataConfig(ncinput=str(path), inicloud=str(seeds_path),
@@ -244,6 +249,111 @@ def test_run_tracking_linear_fesomc(tmp_path, layout, uv_interp, integrator):
 
 
 # ---------------------------------------------------------------------------
+# Temporal interpolation
+# ---------------------------------------------------------------------------
+
+#: a surface and u/v quadratic in time, where the PCHIP of the records and
+#: their linear blend differ (the surface 0.5 m at record 2, 3.1 m at
+#: record 5); a surface level in space has the same PCHIP at every node, so
+#: the hand column is exact
+GEO_QUAD = Geo(eq=0.5)
+RULE_QUAD = Rule(quad=True)
+#: from record 2 to record 5 (of 0 .. 6) in steps of DT / 2: every step's
+#: interval has its four PCHIP records, so no step falls back to the linear
+#: blend and nothing warns
+TI_START, TI_STEPS = 2, 6
+
+
+def _in_time(mode, rec, t):
+    """Records ``rec`` (``DT`` apart from 0; any trailing shape) at ``t``
+    as the run blends them: linearly between the two around ``t``
+    (``"lerp"``), or by their PCHIP (``"pchip"``: SciPy's over every
+    record, which between records 1 and ``N_REC - 2`` has interior slopes
+    only, so it is the 4-record stencil of the run)."""
+    times = np.arange(len(rec)) * DT
+    if mode == "pchip":
+        return PchipInterpolator(times, rec, axis=0)(t)
+    i = min(int(t // DT), len(rec) - 2)
+    a = (t - times[i]) / DT
+    return (1.0 - a) * rec[i] + a * rec[i + 1]
+
+
+def _hand_run_in_time(integrator, seeds, mode, *, dt=DT / 2,
+                      start=TI_START, n_steps=TI_STEPS):
+    """:func:`_hand_run` on the file of ``GEO_QUAD`` and ``RULE_QUAD`` with
+    temporal interpolation: each stage's field is first blended in time at
+    the stage's time (:func:`_in_time` of the u/v columns at the layer
+    centres and of the surface), then read at the stage's own ``s``
+    (``np.interp`` of the columns at ``s`` clipped to the outer
+    centres)."""
+    cen = _centres(SIG_S)
+    times = np.arange(N_REC) * DT
+    cols = np.array([np.column_stack(RULE_QUAD.cols(cen, t))
+                     for t in times])                 # (record, K-1, 2)
+    eta = np.array([GEO_QUAD.eta(0.0, 0.0, t) for t in times])
+
+    def surf(x, y, t):
+        return float(_in_time(mode, eta, t))
+    lon, lat, z = (np.array(c, dtype=np.float64) for c in zip(*seeds))
+    rows = []
+    for i in range(n_steps):
+        t_s = start * DT + i * dt
+        t_k = tuple(t_s + c * dt for c in C_RK4)
+
+        def read_uv(k, s, t_k=t_k):
+            cu, cv = _in_time(mode, cols, t_k[k]).T
+            sc = min(max(s, cen[0]), cen[-1])
+            return float(np.interp(sc, cen, cu)), float(np.interp(sc, cen,
+                                                                  cv))
+        lon, lat, z, *_ = _hand(
+            integrator, SimpleNamespace(lon=lon, lat=lat, z=z), geo=GEO_QUAD,
+            sig=SIG_S, dt=dt, te=t_k, t_end=t_s + dt, surf=surf,
+            read_uv=read_uv)
+        lon = np.asarray(wrap_lon(lon), dtype=np.float64)
+        rows.append((lon, lat, z))
+    return tuple(np.array([r[j] for r in rows]).T for j in range(3))
+
+
+@pytest.mark.parametrize("mode", ["lerp", "pchip"])
+def test_temporal_interp_linear_sigma(tmp_path, mode):
+    """Temporal interpolation on FESOM-C element data under the option
+    (``leastsq``, rk2 and rk4, ``dt`` half the record spacing, from record
+    2 over three records: no step falls back, nothing warns), a surface and
+    u/v quadratic in time, W nonzero: every stage reads the records blended
+    at its own time — linearly, or by the PCHIP of the four records
+    (``numerics.temporal_reconstruction: pchip``) — at its own ``s``, from
+    its own ``H_p``.  Every position and depth equals that hand rule to
+    1e-9 m and is far from the other blend's; the output says
+    ``uv_vertical = "linear"``."""
+    path = _file(tmp_path, geo=GEO_QUAD, rule=RULE_QUAD)
+    seeds = _seeds(geo=GEO_QUAD, t=TI_START * DT)
+    recon = "pchip" if mode == "pchip" else "linear"
+    other = "lerp" if mode == "pchip" else "pchip"
+    for integrator in ("rk2", "rk4"):
+        cfg = _cfg(path, integrator=integrator, seeds=seeds, dt=DT / 2,
+                   start=TI_START, n_steps=TI_STEPS, temporal_interp=True,
+                   temporal_reconstruction=recon, out=f"{integrator}.nc")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _run(cfg)
+        runtime = [str(w.message) for w in caught
+                   if issubclass(w.category, RuntimeWarning)]
+        assert not runtime, runtime
+        t = load_trajectories(cfg.data.output_path)
+        assert (t["status"] == ParticleStatus.ALIVE).all()
+        h_lon, h_lat, h_z = _hand_run_in_time(integrator, seeds, mode)
+        _assert_metres(t["lon"], t["lat"], h_lon, h_lat)
+        assert np.all(np.abs(t["z"] - h_z) <= 1e-9), np.abs(t["z"] - h_z).max()
+        # the other blend's hand rule: 18 .. 21 m apart at the farthest
+        o_lon, o_lat, _ = _hand_run_in_time(integrator, seeds, other)
+        gap = np.max(_gap(t, {"lon": o_lon, "lat": o_lat}), axis=1)
+        assert np.all(gap > 5.0), gap
+        attrs = _global_attrs(cfg.data.output_path)
+        assert attrs["uv_vertical"] == "linear"
+        assert attrs["temporal_reconstruction"] == recon
+
+
+# ---------------------------------------------------------------------------
 # Caches, element search, restarts
 # ---------------------------------------------------------------------------
 
@@ -268,7 +378,8 @@ def test_prefetch_and_shared_cache_sigma(tmp_path, monkeypatch, layout,
     monkeypatch.setattr(tracking._VelCache, "_load_window", counting)
     pre = _cfg(path, prefetch_size=3, out="pre.nc", **kw)
     _run(pre)
-    assert len(loads) >= 2
+    # the run reads records 0 .. 4: two windows, records 0 .. 2 and 3 .. 5
+    assert loads == [0, 3], loads
     shm = tmp_path / "shm"
     shm.mkdir()
     shared = _cfg(path, shared_fields_dir=str(shm),

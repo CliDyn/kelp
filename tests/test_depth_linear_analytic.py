@@ -44,7 +44,8 @@ FESOM-C reader and run by ``run_tracking``:
   ``test_sigma_trajectory_convergence`` — ``u = G(x) cos(pi s)`` on 10, 20
   and 40 sigma layers, the two forms above (a zero dia-sigma W keeps each
   particle's ``s`` while its depth follows the sloping bed and the moving
-  surface): linear mode second order, layer mode first order.
+  surface; the profile on equal layers and on layers stretched as
+  ``s_k = (k / n)**2``): linear mode second order, layer mode first order.
 
 Fixtures (all synthetic, ``tests/_fesom2_synth``): regular grids of
 :func:`tests._fesom2_synth.grid_geometry` (0.25 deg spacing from 4E 4N,
@@ -52,9 +53,9 @@ every cell split by its SW-NE diagonal), equal element areas, element beds
 from ``zbar_e_bottom`` (partial beds included), node beds the deepest of
 their elements unless set otherwise, float64 daily records, ``w`` zero
 unless stated.  The FESOM-C files (:func:`_write_fesomc`) use the same
-grids, uniform sigma, a bed sloping in lon and lat and a surface rising and
-tilted, element ``u``/``v`` and the same columns on the nodes
-(``unode``/``vnode``).
+grids, uniform sigma (the profile also a stretched table), a bed sloping in
+lon and lat and a surface rising and tilted, element ``u``/``v`` and the
+same columns on the nodes (``unode``/``vnode``).
 
 Mutation pass (commit 204a8b4 with this module, 2026-10-20, every row;
 the depth_constant cells of M2, M6 and M8 again on b03afac, the same day,
@@ -970,6 +971,8 @@ def _sigma_bed(lon, lat):
 def _sigma_eta(t, lon, lat):
     """The surface (m): rising 0.8 m a day, tilted (linear in time, so a
     linear blend of the records is the surface at every time)."""
+    # ``+ 0.0 * lon`` broadcasts the surface to the shape of ``lon``: the
+    # field does not depend on lon
     return 0.8 * (t / DT) * (1.0 + 0.2 * (np.asarray(lat) - 5.5)) + 0.0 * lon
 
 
@@ -1195,27 +1198,43 @@ def _sigma_profile_uv(sig, g, n_rec):
     return uv
 
 
+def _sigma_table(table, n):
+    """``n + 1`` sigma interfaces, 1 at the surface, 0 at the bed: equal
+    layers (``"uniform"``), or ``s_k = (k / n)**2`` (``"stretched"``: thin
+    at the surface, the form of ``tests/test_fesomc_w_contract.SIG_S``),
+    so doubling ``n`` halves the layers of either table."""
+    if table == "uniform":
+        return np.linspace(1.0, 0.0, n + 1)
+    return 1.0 - np.linspace(0.0, 1.0, n + 1) ** 2
+
+
+@pytest.mark.parametrize("table", ["uniform", "stretched"])
 @pytest.mark.parametrize("layout,uv_interp", CASES, ids=CASE_IDS)
-def test_sigma_profile_reconstruction_order(tmp_path, layout, uv_interp):
+def test_sigma_profile_reconstruction_order(tmp_path, layout, uv_interp,
+                                            table):
     """FESOM-C: ``u = G(x) cos(pi s)`` sampled at the layer centres of 10,
-    20 and 40 equal sigma layers (``c_k = 1 - (sigma_k + sigma_{k+1}) / 2``),
-    read through the public interpolator at one point at 1601 sigma
-    fractions from the surface to the bed (linear mode: the ``s`` the
-    integrators hand it; layer mode: the layer of ``z = s H`` in the
-    column): the maximum error of linear mode falls by >= 3.5 per halving
-    of the layers (second order), of the layer mode by 1.6 .. 2.4 (first
-    order).
+    20 and 40 sigma layers (``c_k = 1 - (sigma_k + sigma_{k+1}) / 2``),
+    equal or stretched (:func:`_sigma_table`), read through the public
+    interpolator at one point at 1601 sigma fractions from the surface to
+    the bed (linear mode: the ``s`` the integrators hand it; layer mode:
+    the layer of ``z = s H`` in the column): the maximum error of linear
+    mode falls by >= 3.5 per halving of the layers (second order), of the
+    layer mode by 1.6 .. 2.4 (first order).
 
     Measured (2026-10-20, on 60d4a42; the same for the four interpolators,
     and the numbers of :func:`test_profile_reconstruction_order` with ``s``
     for ``z / H``): linear 1.003e-3, 2.512e-4, 6.283e-5 m/s (ratios 3.994,
     3.998), layer 1.275e-2, 6.394e-3, 3.200e-3 m/s (ratios 1.994,
-    1.998)."""
+    1.998).  Stretched (on 662b742, the same for the four interpolators):
+    linear 3.603e-3, 9.540e-4, 2.450e-4 m/s (ratios 3.777, 3.894; the
+    largest error at the bed, below the last centre of a bed layer twice
+    the equal one), layer 1.893e-2, 9.589e-3, 4.756e-3 m/s (ratios 1.974,
+    2.016)."""
     s = np.linspace(0.0, 1.0, 1601)
     gu, gv = _g(LON_P, LAT_P)
     errs = {"layer_linear": [], "layer": []}
     for n in N_LAYERS:
-        sig = np.linspace(1.0, 0.0, n + 1)
+        sig = _sigma_table(table, n)
         mesh = _load_fesomc(_write_fesomc(
             tmp_path / f"n{n}.nc", 9, 9, sig,
             _sigma_profile_uv(sig, _g, 1), n_rec=1))

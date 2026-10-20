@@ -757,6 +757,42 @@ def test_standalone_restart_file_carries_the_rule(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# option on: a FESOM-C sigma mesh
+# ---------------------------------------------------------------------------
+
+def test_sigma_mesh_accepted_after_load_mesh(tmp_path):
+    """A FESOM-C file of the w-contract fixture (sigma coordinates): the
+    option is accepted after ``load_mesh``, the particle moves east and the
+    run writes ``uv_vertical = "linear"`` (the run-level rule:
+    ``tests/test_uv_vertical_sigma_run.py``)."""
+    from tests.test_fesomc_w_contract import SIG_U, _grid, _write
+    n_t = 3
+    lon, lat, _tris, _nv = _grid()
+    k = SIG_U.size
+    path = _write(tmp_path / "fesomc.nc", np.arange(n_t) * 3600.0,
+                  np.zeros((n_t, lon.size)),
+                  np.zeros((n_t, k, lon.size)),
+                  u_elem=np.full((n_t, _tris.shape[0], k - 1), 0.25))
+    seeds = tmp_path / "s.dat"
+    seeds.write_text(f"{lon.mean()} {lat.mean()} 2.0\n")
+    cfg = AppConfig(
+        mode=ModeConfig(Fdrift2D=False, Fdrift3D=True,
+                        uv_vertical="linear"),
+        numerics=NumericsConfig(dt=3600.0, uv_interp="barycentric"),
+        mesh=MeshConfig(type="fesomc", meshpath=str(path)),
+        data=DataConfig(ncinput=str(path),
+                        inicloud=str(seeds),
+                        output_path=str(tmp_path / "o.nc"),
+                        time_averaging="instant"),
+        time=TimeConfig(start_time_idx=0, n_steps=2))
+    _run(cfg)
+    t = load_trajectories(cfg.data.output_path)
+    assert (t["status"] == ParticleStatus.ALIVE).all()
+    assert t["lon"][0, -1] > lon.mean()
+    assert _global_attrs(cfg.data.output_path)["uv_vertical"] == "linear"
+
+
+# ---------------------------------------------------------------------------
 # refusals
 # ---------------------------------------------------------------------------
 
@@ -793,37 +829,10 @@ class TestRefusalsAtEachSite:
             _run(cfg)
         assert not Path(cfg.data.output_path).exists()
 
-    def test_sigma_mesh_after_load_mesh(self, tmp_path):
-        # a FESOM-C file of the w-contract fixture (sigma coordinates):
-        # accepted after load_mesh, the run writes uv_vertical = "linear"
-        # (the run-level rule: tests/test_uv_vertical_sigma_run.py); a mesh
-        # neither z-level nor sigma is refused
+    def test_vertical_coord_neither_zlevel_nor_sigma(self):
+        # after load_mesh: a mesh neither z-level nor sigma is refused (a
+        # sigma mesh is accepted: test_sigma_mesh_accepted_after_load_mesh)
         from types import SimpleNamespace
-        from tests.test_fesomc_w_contract import SIG_U, _grid, _write
-        n_t = 3
-        lon, lat, _tris, _nv = _grid()
-        k = SIG_U.size
-        path = _write(tmp_path / "fesomc.nc", np.arange(n_t) * 3600.0,
-                      np.zeros((n_t, lon.size)),
-                      np.zeros((n_t, k, lon.size)),
-                      u_elem=np.full((n_t, _tris.shape[0], k - 1), 0.25))
-        seeds = tmp_path / "s.dat"
-        seeds.write_text(f"{lon.mean()} {lat.mean()} 2.0\n")
-        cfg = AppConfig(
-            mode=ModeConfig(Fdrift2D=False, Fdrift3D=True,
-                            uv_vertical="linear"),
-            numerics=NumericsConfig(dt=3600.0, uv_interp="barycentric"),
-            mesh=MeshConfig(type="fesomc", meshpath=str(path)),
-            data=DataConfig(ncinput=str(path),
-                            inicloud=str(seeds),
-                            output_path=str(tmp_path / "o.nc"),
-                            time_averaging="instant"),
-            time=TimeConfig(start_time_idx=0, n_steps=2))
-        _run(cfg)
-        t = load_trajectories(cfg.data.output_path)
-        assert (t["status"] == ParticleStatus.ALIVE).all()
-        assert t["lon"][0, -1] > lon.mean()
-        assert _global_attrs(cfg.data.output_path)["uv_vertical"] == "linear"
         with pytest.raises(ValueError,
                            match="needs a z-level or sigma mesh, this mesh "
                                  "has vertical_coord 'hybrid'"):

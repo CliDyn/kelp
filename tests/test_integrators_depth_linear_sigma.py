@@ -403,7 +403,7 @@ def test_linear_in_s_exact(tmp_path, integrator, layout, uv_interp, td,
     and depths equal the hand stage combination, each stage reading
     ``s = clip(z_k / H_k)`` at its own position and time, to 1e-9 relative
     (steady, and a lazy blend between two records with u varying in time;
-    the walk's carried elements reach ``edge_leastsq`` and element
+    the elements the walk tracks reach ``edge_leastsq`` and element
     ``barycentric``).  The answer that reads the entry ``s`` at every
     stage is far from the step."""
     geo = Geo()
