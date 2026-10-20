@@ -6,7 +6,7 @@ architecture:
   - src/kelp/core/io.py:VelocityField
   - src/kelp/core/particles.py:ParticleState
   doc: docs/architecture.md
-  verified_at: 65b2a00
+  verified_at: 9ce4a73
 beaching:
   code:
   - src/kelp/numerics/beaching.py:evaluate_beaching
@@ -15,7 +15,7 @@ beaching:
   - src/kelp/tracking.py:_apply_beaching_hook
   - src/kelp/core/mesh.py:build_boundary_info
   doc: docs/beaching.md
-  verified_at: 1cea96c
+  verified_at: 9ce4a73
 configuration:
   code:
   - src/kelp/core/config.py:load_config
@@ -39,7 +39,7 @@ coordinate_frame:
   - src/kelp/tracking.py:_validate_restart_frame
   - src/kelp/readers/healpix.py:_apply_rotation
   doc: docs/coordinate_frame.md
-  verified_at: 65b2a00
+  verified_at: 9ce4a73
 dev_config:
   code:
   - src/kelp/core/config.py:load_config
@@ -69,7 +69,7 @@ dev_integrators:
   - src/kelp/numerics/vertical_uv.py:check_depth_linear_record
   - src/kelp/numerics/integrators.py:_check_depth_linear_entry
   doc: docs/dev/integrators.md
-  verified_at: 65b2a00
+  verified_at: 9ce4a73
 dev_mesh:
   code:
   - src/kelp/core/mesh.py:Mesh
@@ -98,7 +98,7 @@ dev_numerics:
   - src/kelp/numerics/interpolate.py:_interp_bary_elem_core_dl
   - src/kelp/numerics/vertical_uv.py:uv_wet
   doc: docs/dev/numerics.md
-  verified_at: 65b2a00
+  verified_at: 9ce4a73
 dev_readers:
   code:
   - src/kelp/readers/__init__.py:get_reader
@@ -124,7 +124,7 @@ dev_tracking:
   - src/kelp/readers/__init__.py:_prepare_dataset
   - src/kelp/tracking.py:_check_linear_element_mesh
   doc: docs/dev/tracking.md
-  verified_at: 1cea96c
+  verified_at: 9ce4a73
 dev_visualization:
   code:
   - src/kelp/visualization/core.py:TrajectoryDataset
@@ -150,7 +150,7 @@ diffusion:
   - src/kelp/numerics/diffusion.py:DiffusionStepArgs
   - src/kelp/tracking.py:_resolve_composition
   doc: docs/diffusion.md
-  verified_at: 1cea96c
+  verified_at: 9ce4a73
 doc-sync:
   code:
   - docs/check_doc_sync.py
@@ -163,7 +163,7 @@ field_sampling:
   - src/kelp/tracking.py:_sample_record_fields
   - src/kelp/readers/fesom2.py:read_scalar_fields
   doc: docs/field_sampling.md
-  verified_at: 65b2a00
+  verified_at: 9ce4a73
 healpix:
   code:
   - src/kelp/readers/healpix.py:build_healpix_dual_mesh
@@ -187,7 +187,7 @@ interpolation:
   - src/kelp/numerics/interpolate.py:_interp_edge_leastsq_core_dl
   - src/kelp/numerics/interpolate.py:_interp_bary_elem_core_dl
   doc: docs/interpolation.md
-  verified_at: 65b2a00
+  verified_at: 9ce4a73
 io_and_time:
   code:
   - src/kelp/readers/__init__.py:get_reader
@@ -205,7 +205,7 @@ io_and_time:
   - src/kelp/core/release.py:mask_inactive_velocity
   - src/kelp/readers/fesom14/_timeaxis.py:resolve_axis
   doc: docs/io_and_time.md
-  verified_at: 65b2a00
+  verified_at: 9ce4a73
 localization:
   code:
   - src/kelp/core/mesh.py:Mesh
@@ -229,20 +229,20 @@ performance:
   - src/kelp/core/io.py:LazyLerpField
   - src/kelp/writers.py:TrajectoryWriter
   doc: docs/performance.md
-  verified_at: 65b2a00
+  verified_at: 9ce4a73
 running:
   code:
   - src/kelp/tracking.py:run_tracking
   - src/kelp/core/config.py:TimeConfig
   - src/kelp/cli/main.py:main
   doc: docs/running.md
-  verified_at: 1cea96c
+  verified_at: 9ce4a73
 shared_fields:
   code:
   - src/kelp/core/shared_fields.py:SharedFieldCache
   - src/kelp/tracking.py:_shared_fields_tag
   doc: docs/configuration.md
-  verified_at: 1cea96c
+  verified_at: 9ce4a73
 time_integration:
   code:
   - src/kelp/numerics/integrators.py:euler_step
@@ -274,7 +274,7 @@ velocity_interpolation:
   - src/kelp/numerics/interpolate.py:_interp_bary_elem_core_dl
   - src/kelp/numerics/vertical_uv.py:uv_wet
   doc: docs/velocity_interpolation.md
-  verified_at: 65b2a00
+  verified_at: 9ce4a73
 vertical:
   code:
   - src/kelp/numerics/vertical.py:find_layer
@@ -287,7 +287,7 @@ vertical:
   - src/kelp/numerics/vertical_uv.py:depth_points
   - src/kelp/numerics/vertical_uv.py:uv_bracket
   doc: docs/vertical.md
-  verified_at: 1cea96c
+  verified_at: 9ce4a73
 w_reconstruction:
   code:
   - src/kelp/w_reconstruct.py:reconstruct_w
