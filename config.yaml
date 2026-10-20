@@ -35,14 +35,16 @@ mode:
 
   # max_levels: 25            # 3D: keep only the upper N interfaces (>= 2)
 
-  # 3D z-level runs: how u/v vary in depth — layer = piecewise constant per
-  # layer [default], linear = linear between the layer centres (constant above
-  # the first and below a column's last wet centre; a neighbour whose bed lies
-  # above the particle is a wall, like the coast).  linear needs euler/rk2/rk4
-  # and, for node u/v (FESOM2 unod/vnod, HEALPix), numerics.uv_interp:
-  # barycentric; for FESOM2 element u/v (u/v), leastsq, edge_leastsq or
-  # barycentric and a mesh diagnostic with nlevels or zbar_e_bottom (no
-  # ice-shelf cavities).  The output then has the attribute
+  # 3D runs: how u/v vary in depth — layer = piecewise constant per layer
+  # [default], linear = linear between the layer centres (constant above the
+  # first and below a column's last wet centre; a neighbour whose bed lies
+  # above the particle is a wall, like the coast; on FESOM-C sigma meshes
+  # linear in the sigma fraction z / H, every column wet to the bed).  linear
+  # needs euler/rk2/rk4 and, for node u/v (FESOM2 unod/vnod, HEALPix,
+  # FESOM-C node u/v), numerics.uv_interp: barycentric; for element u/v
+  # (FESOM2 and FESOM-C u/v), leastsq, edge_leastsq or barycentric — FESOM2
+  # with a mesh diagnostic that has nlevels or zbar_e_bottom (no ice-shelf
+  # cavities).  The output then has the attribute
   # uv_vertical = "linear" (a misspelled key is ignored silently — check that
   # attribute).
   # uv_vertical: layer

@@ -101,20 +101,22 @@ nearest node's; direct callers without it get the nearest node's column.
 
 ### 2.1 The horizontal velocity in depth: per layer, or linear
 
-The horizontal velocity of a 3-D z-level run sits at the **layer centres**
-(FESOM2 `unod`/`vnod` on the nodes and `u`/`v` on the elements, the HEALPix
-`uo`/`vo`: `K-1` rows). By default it is **piecewise constant in depth**: every
-member of the interpolation stencil — a vertex, or an element — reads the row
-of the particle's layer (the layer of §2, found in the nearest node's column),
-so a particle crossing a level sees the velocity jump. With
+The horizontal velocity of a 3-D run sits at the **layer centres** (FESOM2
+`unod`/`vnod` on the nodes and `u`/`v` on the elements, the HEALPix `uo`/`vo`,
+FESOM-C `u`/`v` on the sigma layers: `K-1` rows). By default it is
+**piecewise constant in depth**: every member of the interpolation stencil — a
+vertex, or an element — reads the row of the particle's layer (the layer of
+§2, found in the nearest node's column; on a sigma mesh in the particle's own
+column), so a particle crossing a level sees the velocity jump. With
 `mode.uv_vertical: linear` the same data are read **linearly in depth** between
-the layer centres instead. Inside the engine the choice is a property of the
+the layer centres instead (on a sigma mesh linearly in the sigma fraction, see
+*Sigma columns* below). Inside the engine the choice is a property of the
 field, `VelocityField.uv_vertical`:
 
 | `uv_vertical` | rows of `u`/`v` | data points `p` (positive down) | how it gets there |
 |---|---|---|---|
 | `"layer"` (default) | `K-1` | — (one value per layer) | every reader; the option off |
-| `"layer_linear"` | `K-1` (node or element layout) | the layer centres `(z_k + z_{k+1}) / 2` | `mode.uv_vertical: linear`: the tracking layer marks the fields it reads |
+| `"layer_linear"` | `K-1` (node or element layout) | the layer centres `(z_k + z_{k+1}) / 2` (sigma mesh: `1 − (σ_k + σ_{k+1}) / 2`, in the sigma fraction) | `mode.uv_vertical: linear`: the tracking layer marks the fields it reads |
 | `"level"` | `K` (node layout) | the levels `\|mesh.sigma\|` | a reader whose u/v sit on the levels (`native_uv_vertical = "level"`: the FESOM 1.4 reader, `mesh.type: fesom14`); always linear in depth, the option is refused there |
 
 `depth_points(mesh, placement, layout)` (`src/kelp/numerics/vertical_uv.py`)
@@ -155,6 +157,35 @@ kept them — has no element table: the option refuses element data on it before
 the output file exists, and so it does on a mesh with ice-shelf cavities
 (`ulevels > 1` anywhere; not supported yet). A `max_levels` cut caps `last_e`
 at the last kept point; the bed stays.
+
+**Sigma columns** (FESOM-C, `vertical_coord == "sigma"`). A sigma column has
+the same layers everywhere, stretched to its own height, so the coordinate of
+the rule is the **sigma fraction** `s = z / H_p` of the particle's column (0 at
+the surface, 1 at the bed; `H_p = max(d + η, D_min)` interpolated at the
+particle as in §3) instead of the depth. The data points are the layer centres
+in `s`, `c_k = 1 − ½(σ_k + σ_{k+1})` for `k = 0 … K−2` (`mesh.sigma` is 1 at
+the surface and 0 at the bed, so the interfaces sit at `s_k = 1 − σ_k`, the
+convention of `find_layer_sigma`), and only `"layer_linear"` data are served,
+on either layout (FESOM-C `u`/`v` on the elements, or u/v on the nodes). Every
+layer of every column holds water: the table reads no bathymetry, no
+declaration and no element bottom (`last = M − 1` and `bed = +inf` for every
+column), so **every column is wet to the bed** — every stencil member is wet at
+every `s`, there are no walls at depth and none of their fallbacks, and the
+record check wants every layer of every column finite. Every member is read at
+the particle's `s`, i.e. along the sigma surface through the particle, as W is
+(§3) and as layer mode reads every member in the row of the particle's sigma
+layer: above `c_0` and below `c_{K−2}` the outer centre's value. **Each stage's
+`s` comes from its own `H_p`**: the integrators hand the interpolator
+`clip(z_stage / H_p(x_stage, t_stage), 0, 1)` of the stage's own depth,
+position and time (`integrators._sigma_frac_for_uv`; Euler the entry, RK2 the
+entry and the midpoint, RK4 all four stages), and keep metres for W, its layers
+and the clamp. A `max_levels` cut keeps the first interfaces from the surface:
+the table follows the kept `mesh.sigma`, and every column reads down to the
+last kept centre (the layer path stays in the last kept layer there). A NaN `s`
+is read as `+inf`: the bottom centre. "Exact" on a sigma mesh means **exact for
+a field linear in `s`**; on a flat bed that is also linear in `z`, but **on a
+sloping bed a field linear in `z` is not claimed**: sigma data cannot represent
+it exactly in either mode.
 
 The tables are cached on the mesh per `(placement, layout)`; a table is
 rebuilt whenever `mesh.sigma`, its bed array (`mesh.depth` for nodes,
@@ -257,9 +288,10 @@ In time-interpolated runs each stored value is blended in time FIRST, then
 read in depth, then combined horizontally (`velocity_interpolation.md` §7);
 for the 4-snapshot PCHIP the order matters. Every Runge–Kutta stage reads the
 horizontal velocity at its own stage depth (Euler: the step-entry depth; RK2:
-`z` and `z_mid`; RK4: `z`, `z_2`, `z_3`, `z_4`), unclamped: a stage below a
-member's bed meets that wall, a stage below every bed of its stencil the
-no-member-wet fallback, and a stage above the surface reads `p[0]` everywhere.
+`z` and `z_mid`; RK4: `z`, `z_2`, `z_3`, `z_4`; on a sigma mesh the stage's
+sigma fraction, clipped to `[0, 1]`), unclamped: a stage below a member's bed
+meets that wall, a stage below every bed of its stencil the no-member-wet
+fallback, and a stage above the surface reads `p[0]` everywhere.
 
 The rule reproduces the layer answer where it should. Where every member is
 wet, data uniform in depth give the layer result bit for bit wherever every
@@ -273,15 +305,25 @@ of the columns read, and a smooth profile converges at second order in the
 layer thickness, layer mode at first order
 (`tests/test_interp_depth_linear.py`,
 `tests/test_interp_depth_linear_elements.py`,
+`tests/test_depth_linear_analytic.py`). On a sigma mesh the same holds in
+`s`: data uniform in `s` give the layer result within those bounds (bit for
+bit beyond the outer centres), a field linear in `s` is reproduced exactly,
+stage by stage with each stage's own `H_p` (a moving surface and a sloping bed
+included), and a smooth profile in `s` converges at second order in the sigma
+layer thickness, layer mode at first order
+(`tests/test_integrators_depth_linear_sigma.py`,
+`tests/test_uv_vertical_sigma_run.py`, the sigma tests of
 `tests/test_depth_linear_analytic.py`).
 
-Scope: 3-D tracking on z-level meshes with `euler`, `rk2` or `rk4`, on
+Scope: 3-D tracking with `euler`, `rk2` or `rk4` on z-level meshes, on
 node-layout u/v (FESOM2 `unod`/`vnod`, the HEALPix dual geometry, FESOM 1.4)
 with `numerics.uv_interp: barycentric`, and on FESOM2 element-layout u/v
 (`u`/`v`) with `leastsq`, `edge_leastsq` (either `edge_leastsq_bc`) or
 `barycentric`; the other element-layout geometry, the HEALPix pixel geometry,
-is 2-D only. The configuration keys and refusals are in `configuration.md`
-§2.
+is 2-D only. On FESOM-C sigma meshes the same table of layouts and
+interpolators: element u/v (`u`/`v`) with `leastsq`, `edge_leastsq` or
+`barycentric`, node u/v with `barycentric` (no element bottoms needed). The
+configuration keys and refusals are in `configuration.md` §2.
 
 **FESOM 1.4 is approximated prism-wise.** FESOM 1.4 is a P1 finite-element
 model: u, v, w, T and S live on the same 3-D nodes, on the levels, and vary
@@ -353,7 +395,9 @@ differently (a steady-fallback step, `dt` not fitting the file step, between
 PCHIP steps blends the surface linearly between its start and end), and a
 resumed run reproduces the continuous one. The layer of the horizontal velocity, the depth clamp and the
 diffusion kicks use the same `H_p` (the horizontal kick keeps `s`, the Az kick
-reflects in the end-of-step column). With a linear time interpolant, a linear
+reflects in the end-of-step column); with `mode.uv_vertical: linear` the
+horizontal velocity is read at each stage's `s = clip(z / H_p, 0, 1)` instead
+of a layer (§2.1). With a linear time interpolant, a linear
 bottom and a uniform `σ̇` the discrete solution is exact
 (`tests/test_fesomc_w_contract.py::TestSigmaIntegration`: tide + slope +
 flow + flux, Euler/RK2/RK4, forward/backward, uniform and stretched σ, to
@@ -493,8 +537,9 @@ vertical pipeline around the horizontal update. Every stage dispatches on
 4. **Clamp the depth** — `clamp_depth` (z-level) or `clamp_depth_sigma` (sigma).
 
 A depth-linear horizontal velocity (§2.1) skips step 1 for `u`/`v`: each
-stage hands its depth to the interpolator instead, and no stage looks a layer
-up (W brackets the depth itself either way).
+stage hands its depth (on a sigma mesh its sigma fraction) to the interpolator
+instead, and no stage looks a layer up for `u`/`v` (W brackets the depth itself
+either way).
 
 There is one performance fork worth knowing. For z-level meshes, two
 combinations run **fused** 3-D kernels that do the whole horizontal-plus-

@@ -19,8 +19,8 @@ the tracker was developed privately from 2026-06.
   `unod`/`vnod`, the HEALPix dual geometry), `numerics.uv_interp: barycentric`
   and `euler`, `rk2` or `rk4`, steady, linearly interpolated or PCHIP in time
   (each stored value is blended in time first, then read in depth). Refused before
-  the output file is written: 2-D runs, sigma meshes, other u/v interpolators,
-  `rk45` (FESOM2 element-layout u/v: next section).
+  the output file is written: 2-D runs, other u/v interpolators, `rk45` (FESOM2
+  element-layout u/v and FESOM-C sigma meshes: the next sections).
 - Each record a run reads with the option is checked: a non-finite `u` or `v`
   above a column's last usable layer centre stops the run with the node, the
   layer and the record named. The HEALPix reader checks the raw record before it
@@ -123,6 +123,26 @@ the tracker was developed privately from 2026-06.
   exact, a smooth profile converges at second order in the layer thickness
   (layer mode at first), and a flow along a trench keeps its speed at the
   trench walls.
+
+### Added — depth-linear u/v on FESOM-C sigma meshes
+
+- `mode.uv_vertical: linear` works on FESOM-C sigma meshes (`mesh.type:
+  fesomc`): element u/v (`u`/`v`) with `leastsq`, `edge_leastsq` or
+  `barycentric`, node u/v with `barycentric`; `euler`, `rk2` or `rk4`, steady,
+  linearly interpolated or PCHIP in time, with the same companions as on FESOM2
+  (edge walk, kicks, caches, restarts, multi-realization runs, `max_levels`).
+  u/v are read linearly in the sigma fraction `s = z / H_p` of the particle's
+  column between the sigma layer centres `1 − (σ_k + σ_{k+1}) / 2`, each RK
+  stage at the `s` of its own depth and column height; every column is wet to
+  the bed (no walls at depth, no element bottoms needed), and every layer of
+  every record read must be finite (`docs/vertical.md` §2.1). Exact for a field
+  linear in `s`; on a sloping bed a field linear in `z` is not claimed. The
+  sigma path stays unfused, as in layer mode; runs without the option are bit
+  for bit unchanged. Analytic tests through `run_tracking` (the layer answer
+  for a depth-constant field, second order in the sigma layer thickness for a
+  smooth profile, layer mode first) with sigma mutants in their mutation pass;
+  `benchmarks/single_node/depth_linear_cost.py --vertical sigma` measures the
+  cost (no row yet).
 
 ### Added — FESOM 1.4 reader (`mesh.type: fesom14`)
 

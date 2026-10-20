@@ -225,15 +225,16 @@ covered in `io_and_time.md` and `configuration.md`.
 A **depth-linear** field (`uv_vertical` `"level"` or `"layer_linear"`, §7) is
 evaluated by the same layout rule: node layout (`"level"` or
 `"layer_linear"`) by `barycentric` only; element layout (`"layer_linear"`:
-FESOM2 `u`/`v` with `mode.uv_vertical: linear`) by `leastsq`, `edge_leastsq`
-and `barycentric`. `leastsq` and `edge_leastsq` refuse a depth-linear node
+FESOM2 or FESOM-C `u`/`v` with `mode.uv_vertical: linear`) by `leastsq`,
+`edge_leastsq` and `barycentric`. `leastsq` and `edge_leastsq` refuse a depth-linear node
 field with a `ValueError` naming the layout and the interpolator; the
 nearest-element read and every single-particle entry refuse any depth-linear
 field; both before reading any data. With the option on, the tracking layer
 checks the layout and the interpolator against that table at the same sites as
 above and once more at the entry of each realization, and, for element
-layout, that the mesh declares the element bottoms and has no ice-shelf
-cavities (`configuration.md`, `mode.uv_vertical`).
+layout on a z-level mesh, that the mesh declares the element bottoms and has
+no ice-shelf cavities (`configuration.md`, `mode.uv_vertical`; a sigma mesh
+needs neither).
 
 
 ## 5. What is called when
@@ -308,7 +309,11 @@ model's own interpolation on tetrahedra. Every route below reads each particle
 at its own depth `state.z` (the `layer` argument is ignored) and runs the
 record check (`check_depth_linear_record`) once per field and mesh table
 before the first read — a lazy blend is checked through its two parents,
-before anything is blended.
+before anything is blended. On a sigma mesh (FESOM-C) the routes are the same
+and `state.z` holds the stage's sigma fraction `s = clip(z / H_p, 0, 1)`,
+which the integrators put there; the table's points are the sigma layer
+centres in `s` and every column is wet to the bed (`bed = +inf`), so no member
+is ever a wall and no fallback runs (`vertical.md` §2.1, *Sigma columns*).
 
 **Node layout.** `interp_barycentric` hands such a field to
 `_interp_barycentric_dl` → `_loop_interp_bary_dl` →
@@ -327,9 +332,10 @@ when those weights sum below 1e-12; with no vertex wet, the vertex with the
 largest bed (the first on ties) at its last usable point; with every vertex
 wet, the plain sum — the arithmetic of the layer kernel (`vertical.md` §2.1).
 
-**Element layout** (`"layer_linear"`, FESOM2 `u`/`v`). Each interpolator has
-its own route, on the element table `depth_points(mesh, "layer_linear",
-"element")` (the reader's element bottoms) and the element areas
+**Element layout** (`"layer_linear"`, FESOM2 or FESOM-C `u`/`v`). Each
+interpolator has its own route, on the element table `depth_points(mesh,
+"layer_linear", "element")` (the FESOM2 reader's element bottoms; on a sigma
+mesh none) and the element areas
 (`build_elem_areas`): `interp_leastsq` → `_interp_leastsq_dl` →
 `_loop_interp_leastsq_3d_dl` → `_interp_leastsq_core_dl`;
 `interp_edge_leastsq` → `_interp_edge_leastsq_dl` →

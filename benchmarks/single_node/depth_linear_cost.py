@@ -16,7 +16,13 @@ wall).  Two legs:
   Euler step (``--integrator euler``: ``_fused_euler_step_3d`` against its
   twin ``_fused_euler_step_3d_dl``) or one unfused 3-D RK2 step
   (``--integrator rk2``: ``_rk2_step_unfused`` with the vectorised
-  ``interp_leastsq``, layer core against ``_interp_leastsq_core_dl``).
+  ``interp_leastsq``, layer core against ``_interp_leastsq_core_dl``);
+- sigma (``--vertical sigma``, either layout, ``--integrator rk2``): the
+  same horizontal meshes as a FESOM-C-like sigma mesh (a sigma table, the
+  node bathymetry as the bed of every column, a surface varying in space
+  and time), one unfused 3-D RK2 step (``_rk2_step_unfused``: node
+  ``barycentric`` or element ``leastsq`` u/v, the layer kernels against
+  their depth-linear twins read in the sigma fraction ``s = z / H_p``).
 
 The payload is the one the tracking layer builds between two records (a
 lazy blend at the step start and the next record); ``--payload pchip``
@@ -38,6 +44,7 @@ Usage (an otherwise idle node)::
 
     python benchmarks/single_node/depth_linear_cost.py \\
         [--layout node|element] [--integrator rk2|euler] \\
+        [--vertical zlevel|sigma] \\
         [--nside 64] [--particles 100000] [--steps 15] [--threads N]
         [--payload lerp|pchip]
 
@@ -60,6 +67,9 @@ REPO = Path(__file__).resolve().parents[2]
 K_INTERFACES = [0.0, 5.0, 10.0, 20.0, 30.0, 50.0, 75.0, 100.0, 150.0,
                 200.0, 300.0, 400.0, 500.0, 700.0, 900.0, 1200.0,
                 1500.0, 2000.0, 2500.0, 3000.0, 3500.0, 4000.0]
+#: the sigma table of ``--vertical sigma`` (1 at the surface, 0 at the bed;
+#: 21 layers, finer at the top, as FESOM-C tables often are)
+SIGMA_LEVELS = [1.0 - (k / 21.0) ** 1.5 for k in range(22)]
 DT = 21600.0          # s, the step of run_bench.py
 RECORD_DT = 86400.0   # s between the records
 ALPHA0 = 0.25         # the step starts a quarter into the bracket
@@ -92,10 +102,32 @@ def _mesh(nside):
                                    z_levels=np.asarray(K_INTERFACES))
 
 
+def _triangulate(dual):
+    """Every quad of the dual mesh split along its 0-2 diagonal (about six
+    triangles per node, as FESOM2's): ``(tri, c_lon, c_lat)``, the element
+    centres the normalized mean of the vertex unit vectors."""
+    import numpy as np
+    en = np.asarray(dual.elem_nodes)
+    is_tri = en[:, 3] < 0
+    quads = en[~is_tri]
+    tri = np.ascontiguousarray(np.concatenate(
+        [en[is_tri, :3], quads[:, [0, 1, 2]], quads[:, [0, 2, 3]]]),
+        dtype=np.int32)
+    lr, pr = np.deg2rad(dual.nodes_lon), np.deg2rad(dual.nodes_lat)
+    xyz = np.stack((np.cos(pr) * np.cos(lr), np.cos(pr) * np.sin(lr),
+                    np.sin(pr)), axis=1)
+    c = xyz[tri].sum(axis=1)
+    c /= np.linalg.norm(c, axis=1, keepdims=True)
+    c_lon = np.ascontiguousarray(np.degrees(np.arctan2(c[:, 1], c[:, 0])))
+    c_lat = np.ascontiguousarray(np.degrees(np.arcsin(np.clip(c[:, 2],
+                                                              -1.0, 1.0))))
+    return tri, c_lon, c_lat
+
+
 def _elem_mesh(nside):
-    """The dual mesh with every quad split along its 0-2 diagonal: a
-    triangular mesh (about six triangles per node, as FESOM2's) with
-    FESOM2-like element bottoms.
+    """The dual mesh with every quad split along its 0-2 diagonal
+    (:func:`_triangulate`): a triangular mesh with FESOM2-like element
+    bottoms.
 
     An element's bed is the first level at or below the mean bathymetry of
     its three vertices (``nlevels`` of the mesh diagnostic, at most the
@@ -107,23 +139,9 @@ def _elem_mesh(nside):
     from kelp.core.mesh import Mesh, build_node_to_elems, build_search
     from kelp.readers.fesom2 import _elem_level_metadata
     dual = _mesh(nside)
-    en = np.asarray(dual.elem_nodes)
-    is_tri = en[:, 3] < 0
-    quads = en[~is_tri]
-    tri = np.ascontiguousarray(np.concatenate(
-        [en[is_tri, :3], quads[:, [0, 1, 2]], quads[:, [0, 2, 3]]]),
-        dtype=np.int32)
+    tri, c_lon, c_lat = _triangulate(dual)
     lon = dual.nodes_lon
     lat = dual.nodes_lat
-    # element centres: the normalized mean of the vertex unit vectors
-    lr, pr = np.deg2rad(lon), np.deg2rad(lat)
-    xyz = np.stack((np.cos(pr) * np.cos(lr), np.cos(pr) * np.sin(lr),
-                    np.sin(pr)), axis=1)
-    c = xyz[tri].sum(axis=1)
-    c /= np.linalg.norm(c, axis=1, keepdims=True)
-    c_lon = np.ascontiguousarray(np.degrees(np.arctan2(c[:, 1], c[:, 0])))
-    c_lat = np.ascontiguousarray(np.degrees(np.arcsin(np.clip(c[:, 2],
-                                                              -1.0, 1.0))))
     z = np.asarray(K_INTERFACES, dtype=np.float64)
     mean_d = np.asarray(dual.depth)[tri].mean(axis=1)
     nlevels = np.minimum(np.searchsorted(z, mean_d, side="left"),
@@ -143,24 +161,61 @@ def _elem_mesh(nside):
     return mesh
 
 
+def _sigma_mesh(nside, layout):
+    """The dual mesh (node layout) or its triangulated twin (element
+    layout, :func:`_triangulate`) as a FESOM-C-like sigma mesh: the sigma
+    table ``SIGMA_LEVELS`` and the node bathymetry of :func:`_mesh` as the
+    bed (every layer of every column holds water)."""
+    import numpy as np
+    from kelp.core.mesh import Mesh, build_node_to_elems, build_search
+    dual = _mesh(nside)
+    if layout == "element":
+        tri, c_lon, c_lat = _triangulate(dual)
+    else:
+        tri = np.asarray(dual.elem_nodes)
+        c_lon, c_lat = dual.elem_center_lon, dual.elem_center_lat
+    n2e, cnt = build_node_to_elems(dual.n_nodes, tri)
+    mesh = Mesh(name="healpix-sigma", nodes_lon=dual.nodes_lon,
+                nodes_lat=dual.nodes_lat,
+                depth=np.array(dual.depth, dtype=np.float64), elem_nodes=tri,
+                elem_center_lon=c_lon, elem_center_lat=c_lat,
+                node_to_elems=n2e, node_to_elems_count=cnt,
+                sigma=np.asarray(SIGMA_LEVELS, dtype=np.float64),
+                vertical_coord="sigma")
+    build_search(mesh)
+    return mesh
+
+
+def _sigma_eta(mesh, r):
+    """The surface of record ``r`` (m): +-0.5 m, varying in space and from
+    record to record."""
+    import numpy as np
+    lr, pr = np.deg2rad(mesh.nodes_lon), np.deg2rad(mesh.nodes_lat)
+    return 0.5 * np.sin(2.0 * lr + 0.7 * r) * np.cos(pr)
+
+
 def _records(mesh, n, seed, layout="node"):
     """``n`` layer records (u/v on the K-1 layers, zero below each
-    column's last usable layer centre, w on the K levels) and their
-    layer_linear twins over the SAME arrays."""
+    column's last usable layer centre — on a sigma mesh every layer holds
+    water —, w on the K levels; on a sigma mesh the surface of
+    :func:`_sigma_eta`) and their layer_linear twins over the SAME
+    arrays."""
     import dataclasses
     import numpy as np
     from kelp.core.io import VelocityField
     from kelp.numerics.vertical_uv import depth_points
-    k = len(K_INTERFACES)
+    k = mesh.sigma.size
     nn = mesh.n_nodes
     nc = nn if layout == "node" else mesh.n_elements
+    sigma = mesh.vertical_coord == "sigma"
     lay, lin = [], []
     for r in range(n):
         rng = np.random.default_rng(seed + r)
         u = 0.3 * rng.standard_normal((k - 1, nc))
         v = 0.3 * rng.standard_normal((k - 1, nc))
         w = 2e-4 * rng.standard_normal((k, nn))
-        f = VelocityField(u=u, v=v, eta=np.zeros(nn), w=w, uv_layout=layout)
+        eta = _sigma_eta(mesh, r) if sigma else np.zeros(nn)
+        f = VelocityField(u=u, v=v, eta=eta, w=w, uv_layout=layout)
         if r == 0:
             dp = depth_points(mesh, "layer_linear", layout)
             below = np.arange(k - 1)[:, None] > dp.last[None, :]
@@ -176,7 +231,8 @@ def _records(mesh, n, seed, layout="node"):
 def _state(mesh, n, seed, in_column=False):
     """Particles at random positions (|lat| < 76 deg); depths uniform in
     0-3000 m, or (``in_column``) uniform between the surface and the
-    nearest node's depth, where the end-of-step clamp keeps them."""
+    nearest node's depth, where the end-of-step clamp keeps them (on a
+    sigma mesh: uniform in ``s``, at the bathymetry's column height)."""
     import numpy as np
     from kelp.core.mesh import find_nearest_nodes
     from kelp.core.particles import make_state
@@ -202,6 +258,11 @@ def main(argv=None) -> int:
                     help="rk2 (the default; node layout: the fused kernel, "
                          "element layout: the unfused step) or euler "
                          "(element layout only: the fused 3-D kernel)")
+    ap.add_argument("--vertical", choices=("zlevel", "sigma"),
+                    default="zlevel",
+                    help="zlevel: the 22-level table (the default); sigma: "
+                         "a FESOM-C-like sigma mesh, the unfused 3-D RK2 "
+                         "step (--integrator rk2)")
     ap.add_argument("--nside", type=int, default=64)
     ap.add_argument("--particles", type=int, default=100_000)
     ap.add_argument("--steps", type=int, default=15,
@@ -214,6 +275,9 @@ def main(argv=None) -> int:
                          "default); pchip: the 4-record PCHIP bundle (rk2 "
                          "only)")
     args = ap.parse_args(argv)
+    if args.vertical == "sigma" and args.integrator != "rk2":
+        ap.error("--vertical sigma measures the unfused 3-D RK2 step: "
+                 "--integrator rk2 only")
     if args.layout == "node" and args.integrator != "rk2":
         ap.error("--layout node measures the fused 3-D RK2 kernel: "
                  "--integrator rk2 only")
@@ -233,8 +297,13 @@ def main(argv=None) -> int:
     numba.set_num_threads(threads)
 
     element = args.layout == "element"
+    sigma = args.vertical == "sigma"
     t_build = time.perf_counter()
-    if element:
+    if sigma:
+        mesh = _sigma_mesh(args.nside, args.layout)
+        lay, lin = _records(mesh, 4, seed=11, layout=args.layout)
+        st = _state(mesh, args.particles, seed=5, in_column=True)
+    elif element:
         mesh = _elem_mesh(args.nside)
         lay, lin = _records(mesh, 4, seed=11, layout="element")
         st = _state(mesh, args.particles, seed=5, in_column=True)
@@ -256,7 +325,22 @@ def main(argv=None) -> int:
         return vel, kw
 
     # the functions a warm-up step must reach: (module, name) per placement
-    if not element:
+    if sigma:
+        ui = "leastsq" if element else "barycentric"
+        route = f"unfused 3-D RK2 on a sigma mesh, {args.layout} {ui}"
+        loop = ("_loop_interp_leastsq_3d" if element
+                else "_loop_interp_bary_3d")
+        loop_dl = ("_loop_interp_leastsq_3d_dl" if element
+                   else "_loop_interp_bary_dl")
+        want = {"layer": [(I, "_rk2_step_unfused"), (IP, loop)],
+                "layer_linear": [(I, "_rk2_step_unfused"),
+                                 (I, "_sigma_frac_for_uv"), (IP, loop_dl)]}
+
+        def step(recs):
+            vel, kw = payload(recs)
+            return I.rk2_step(st, vel, mesh, DT, 1.0, uv_interp=ui,
+                              w_interp=ui, **kw)
+    elif not element:
         route = "fused 3-D RK2, node barycentric"
         want = {"layer": [(I, ("_fused_rk2_step_3d_bary_pchip"
                                if args.payload == "pchip"
@@ -323,7 +407,15 @@ def main(argv=None) -> int:
             timings[name].append(time.perf_counter() - t0)
     med = {k: float(np.median(v)) for k, v in timings.items()}
 
-    if element:
+    if sigma:
+        geom = (f"HEALPix dual nside {args.nside}"
+                + (" split into triangles" if element else "")
+                + f" as a sigma mesh, {mesh.n_nodes:,} nodes, "
+                f"{mesh.n_elements:,} elements")
+        uvw = (f"{args.layout} {ui} u/v, {ui} W and column height, "
+               "surface +-0.5 m")
+        depths = "particle depths uniform in s within the nearest node's column"
+    elif element:
         geom = (f"HEALPix dual nside {args.nside} split into triangles, "
                 f"{mesh.n_nodes:,} nodes, {mesh.n_elements:,} elements")
         uvw = "element leastsq u/v, leastsq W"
@@ -341,7 +433,7 @@ def main(argv=None) -> int:
     print(f"commit     : {_commit()}")
     print(f"threads    : {threads} (numba.get_num_threads "
           f"{numba.get_num_threads()})")
-    print(f"workload   : {geom}, {len(K_INTERFACES)} levels, "
+    print(f"workload   : {geom}, {mesh.sigma.size} levels, "
           f"{args.particles:,} particles, {args.integrator} {args.payload} "
           f"(alpha0 {ALPHA0}), {uvw}, dt {DT:g} s, {depths}")
     print(f"alive after the step: layer {alive['layer']:,}, "

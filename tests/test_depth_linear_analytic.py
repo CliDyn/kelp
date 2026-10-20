@@ -2,12 +2,13 @@
 public run path.
 
 ``mode.uv_vertical: linear`` reads node-layout u/v (``uv_interp:
-barycentric``) and FESOM2 element-layout u/v (``leastsq``,
-``edge_leastsq``, element ``barycentric``) linearly in depth between the
-layer centres; a stencil member dry at the particle depth is a wall, like
-the coast.  This module checks the rule against answers known in closed
-form, on synthetic FESOM2 files read by the FESOM2 reader and run by
-``run_tracking`` (the profile test calls the public interpolators):
+barycentric``) and element-layout u/v (``leastsq``, ``edge_leastsq``,
+element ``barycentric``) linearly in depth between the layer centres; a
+stencil member dry at the particle depth is a wall, like the coast.  This
+module checks the rule against answers known in closed form, on synthetic
+FESOM2 files read by the FESOM2 reader and run by ``run_tracking`` (the
+profile tests call the public interpolators), and on FESOM-C sigma files
+(below):
 
 - ``test_depth_constant_same_as_layer`` — u, v independent of depth (per
   column constants, varying from column to column and in time; NaN below
@@ -31,12 +32,29 @@ form, on synthetic FESOM2 files read by the FESOM2 reader and run by
   below the bed of the shelf beside it: linear mode keeps the speed (the
   shelf is a wall), layer mode is slower (it reads the shelf's zeros).
 
+On FESOM-C sigma meshes the same rule is read in the sigma fraction
+``s = z / H_p`` between the layer centres ``1 - (sigma_k + sigma_{k+1}) /
+2``, every column wet to the bed; synthetic FESOM-C files read by the
+FESOM-C reader and run by ``run_tracking``:
+
+- ``test_sigma_depth_constant_same_as_layer`` — per-column constants: the
+  linear run equals the layer run, bit for bit beyond the outer centres,
+  within a few ulp between them.
+- ``test_sigma_profile_reconstruction_order`` and
+  ``test_sigma_trajectory_convergence`` — ``u = G(x) cos(pi s)`` on 10, 20
+  and 40 sigma layers, the two forms above (a zero dia-sigma W keeps each
+  particle's ``s`` while its depth follows the sloping bed and the moving
+  surface): linear mode second order, layer mode first order.
+
 Fixtures (all synthetic, ``tests/_fesom2_synth``): regular grids of
 :func:`tests._fesom2_synth.grid_geometry` (0.25 deg spacing from 4E 4N,
 every cell split by its SW-NE diagonal), equal element areas, element beds
 from ``zbar_e_bottom`` (partial beds included), node beds the deepest of
 their elements unless set otherwise, float64 daily records, ``w`` zero
-unless stated.
+unless stated.  The FESOM-C files (:func:`_write_fesomc`) use the same
+grids, uniform sigma, a bed sloping in lon and lat and a surface rising and
+tilted, element ``u``/``v`` and the same columns on the nodes
+(``unode``/``vnode``).
 
 Mutation pass (commit 204a8b4 with this module, 2026-10-20, every row;
 the depth_constant cells of M2, M6 and M8 again on b03afac, the same day,
@@ -47,17 +65,29 @@ Each defect went into a full copy of the checkout, one at a time, with a
 fresh Numba cache, and this module ran against it; the unmutated copy
 passed 45 of 45, the sources before the element work (28b20c9) failed 38
 (element data refused; node layout: a shallow vertex read at its own
-bed).  Red tests (parametrised cells) and the mechanism, from the
-assertion messages:
+bed).  Every row again on 60d4a42 with the sigma tests, the same day,
+together with ``tests/test_integrators_depth_linear_sigma.py`` (the sigma
+step by hand: "step" below), plus the sigma mutants M13 .. M18 (M5 on the
+stage-2 coordinate the sigma work introduced): the unmutated copy passed
+368 cells of the two modules (4 skipped), the sources before the sigma
+work (4013cb4) failed 323 — every sigma cell, 20 here and 303 of the step
+(sigma meshes refused; the step's spies find no ``_sigma_frac_for_uv``) —
+and passed the 45 z-level cells.  M1 .. M12 turned the same cells of this
+module red as before, plus the sigma cells named below; the others leave
+every sigma cell green (a sigma column is wet at every ``s``: no walls, no
+declaration, no bed).  Red tests (parametrised cells) and the mechanism,
+from the assertion messages:
 
 =====  ===========================  =======================================
 id     red tests                    mutant -> mechanism
 =====  ===========================  =======================================
 M1     linear_in_depth_exact 18,    ``uv_at`` weights swapped -> linear
-       profile 4, trajectory 4      mode 6.4 % off the closed form (1.8 %
-                                    with W), first order in both tests
-                                    (node RK2 is not red: its fused twin
-                                    blends in line, not through ``uv_at``)
+       profile 4, trajectory 4,     mode 6.4 % off the closed form (1.8 %
+       sigma_profile 4,             with W), first order in both tests
+       sigma_trajectory 4,          (node RK2 is not red: its fused twin
+       step 212                     blends in line, not through ``uv_at``);
+                                    in ``s`` first order too (ratios 1.99
+                                    .. 2.09), the step off its hand stages
 M2     depth_constant 12,           ``uv_wet``: ``<=`` -> ``<`` -> the
        profile 4                    particle at its members' bed loses them
                                     all: 0.014 .. 0.040 deg off the layer
@@ -70,8 +100,10 @@ M4     trench[leastsq]              the ``leastsq`` too-few fallback
                                     returns zero -> the particle at the
                                     trench end stops (``vel_u`` 0)
 M5     linear_in_depth_exact        RK2 stage 2 at the entry depth -> 1.5 %
-       [element-*-rk2-w] 3          off ``u(z0) T + B W T^2 / 2`` (node
-                                    RK2 runs its fused twin)
+       [element-*-rk2-w] 3,         off ``u(z0) T + B W T^2 / 2`` (node
+       step 92 (rk2)                RK2 runs its fused twin); on a sigma
+                                    mesh the entry depth in metres: stage
+                                    2 reads the bottom centre
 M6     depth_constant[element] 9    the element table without the
                                     declaration -> the record check meets
                                     the NaN below an element's last point
@@ -82,8 +114,10 @@ M8     depth_constant 12            ``bed = lower[last]`` -> the particle
                                     the bed loses every member: 0.008 ..
                                     0.025 deg off the layer run
 M9     linear_in_depth_exact 20,    ``uv_bracket`` reads the nearest
-       profile 4, trajectory 4      centre (the layer path's values) ->
-                                    1.1 .. 3.6 % off, ratios 1.95 .. 2.00
+       profile 4, trajectory 4,     centre (the layer path's values) ->
+       sigma_profile 4,             1.1 .. 3.6 % off, ratios 1.95 .. 2.00
+       sigma_trajectory 4,          (in ``s``: the layer mode's errors to
+       step 212                     the digit)
 M10    trench[edge_leastsq] 2       a dry edge neighbour kept as a member
        (free and no slip)           (no ghost) -> 23 % slow; no slip:
                                     0.56 U off the hand fit
@@ -92,10 +126,43 @@ M11    trench[leastsq],             a dry element kept in the wet-member
                                     the ``leastsq`` trench end 44 %
 M12    trench[barycentric-node]     every vertex counted wet -> the shelf
                                     nodes' last value: 21 % slow
+M13    step 68 (rk2; stage_s 8)     RK2 stage 2 reads its depth in the
+                                    ENTRY column, ``z_mid / H_1`` -> the
+                                    stage-2 ``s`` 1.3 % off the hand stage
+                                    ``s``, the step 3.5e-4 off (this
+                                    module runs RK4 only: green)
+M14    sigma_trajectory 4,          ``_sigma_frac_for_uv`` returns metres
+       step 261                     -> every read clipped to the bottom
+                                    centre: 35.6 km RMS at every
+                                    resolution (ratios 0.99), the step 68 %
+                                    off; the profile (the interpolators
+                                    given ``s``) and the depth-constant
+                                    field (``s`` cannot show) green
+M15    sigma_depth_constant 9,      the table's points at the upper
+       sigma_profile 4,             interfaces ``1 - sigma_k``, not the
+       sigma_trajectory 4,          centres -> first order (ratios 1.99 ..
+       step 233                     2.00), the step 7.5 % off; the particle
+                                    at ``s = 0.02`` now between two points:
+                                    1 ulp off the layer run
+M16    step 76 (rk2; stage_s 8)     RK2 stage 2 reads the ENTRY ``s`` ->
+                                    10 % off the hand stage ``s``, the step
+                                    4 % off (this module: green, RK4 only)
+M17    sigma_trajectory 4,          RK4 stages 2 .. 4 read the entry depth
+       step 76 (rk4; stage_s 8)     in their own column, ``z_0 / H_k`` ->
+                                    the stage ``s`` up to 21 % off, the
+                                    step 4 % off; the trajectory's
+                                    time-step error 64 % of its error
+                                    (88.9 of 139.9 m on 10 layers)
+M18    step 76 (euler)              Euler hands the depth in metres -> the
+                                    bottom centre for every particle, 76 %
+                                    off (this module: green, its Euler
+                                    cells hold ``s``-independent data)
 =====  ===========================  =======================================
 """
 from __future__ import annotations
 
+import contextlib
+import io
 from pathlib import Path
 
 import numpy as np
@@ -112,9 +179,13 @@ from kelp.core.mesh import find_nearest_nodes  # noqa: E402
 from kelp.core.particles import ParticleStatus, make_state  # noqa: E402
 from kelp.numerics import interpolate as ip  # noqa: E402
 from kelp.numerics.vertical import find_layers  # noqa: E402
+from kelp.numerics.vertical_sigma import find_layers_sigma  # noqa: E402
+from kelp.readers import get_reader  # noqa: E402
 from kelp.writers import load_trajectories  # noqa: E402
 from tests import _fesom2_synth as synth  # noqa: E402
 from tests._bitwise import assert_bitwise  # noqa: E402
+from tests.test_integrators_depth_linear_sigma import (  # noqa: E402
+    _centres as _sigma_centres)
 from tests.test_uv_vertical_elements_run import (  # noqa: E402
     _global_attrs, _load_mesh, _node_beds, _run)
 
@@ -299,22 +370,29 @@ def _quadrant_beds(lo, la):
                     np.where(lo < 6.0, 60.0, 50.0))
 
 
-def _const_field(mesh, layout, bed, n_rec):
-    """Per-column constants (vary from column to column and in time), the
-    same at every usable point of a column, NaN below it; u and v within
+def _const_cols(n, n_rec):
+    """Per-column constants ``(records, columns)`` of the depth-constant
+    fields: varying from column to column and in time, within
     ``C_BINADE`` (0.032 .. 0.062 m/s over six records)."""
-    n = mesh.n_nodes if layout == "node" else mesh.n_elements
     j = np.arange(n, dtype=np.float64)
+    r = np.arange(n_rec, dtype=np.float64)[:, None]
     cu = 0.047 + 0.01 * np.sin(1.7 * j + 0.3)
     cv = 0.047 + 0.01 * np.cos(1.3 * j)
     du = 0.001 * np.cos(0.9 * j)
     dv = -0.001 * np.sin(0.7 * j)
+    return cu + r * du, cv + r * dv
+
+
+def _const_field(mesh, layout, bed, n_rec):
+    """Per-column constants (:func:`_const_cols`), the same at every usable
+    point of a column, NaN below it."""
+    n = mesh.n_nodes if layout == "node" else mesh.n_elements
+    cu, cv = _const_cols(n, n_rec)
     last = _hand_last(LEVELS_C, bed)
     n_lay = len(LEVELS_C) - 1
     usable = np.arange(n_lay)[:, None] <= last[None, :]
-    r = np.arange(n_rec, dtype=np.float64)[:, None, None]
-    u = np.where(usable[None], cu + r * du, np.nan)
-    v = np.where(usable[None], cv + r * dv, np.nan)
+    u = np.where(usable[None], cu[:, None, :], np.nan)
+    v = np.where(usable[None], cv[:, None, :], np.nan)
     return u, v
 
 
@@ -868,3 +946,360 @@ def test_trench_wall_keeps_speed(tmp_path, layout, uv_interp, bc):
     x_lay, _ = _east_north(t_l["lon"][:n_main, -1], t_l["lat"][:n_main, -1],
                            lon0[:n_main], lat0[:n_main])
     assert np.all(x_lay < 0.9 * x_lin), x_lay / x_lin
+
+
+# ---------------------------------------------------------------------------
+# FESOM-C sigma meshes: the same rule in the sigma fraction s = z / H_p
+# ---------------------------------------------------------------------------
+
+# The dia-sigma W of every sigma file is zero: a particle keeps its sigma
+# fraction ``s``, and its depth ``z = s H_p`` follows the sloping bed and
+# the moving surface (``_sigma_bed``, ``_sigma_eta``).
+
+#: the time axis of the FESOM-C files (records ``DT`` apart from 0)
+SIGMA_TIME_UNITS = "seconds since 2000-01-01 00:00:00"
+
+
+def _sigma_bed(lon, lat):
+    """Node beds of the sigma files (m): sloping in lon and lat, 90 .. 510 m
+    over 4E..7E, 4N..7N."""
+    return 300.0 + 80.0 * (np.asarray(lon) - 5.5) + 60.0 * (np.asarray(lat)
+                                                            - 5.5)
+
+
+def _sigma_eta(t, lon, lat):
+    """The surface (m): rising 0.8 m a day, tilted (linear in time, so a
+    linear blend of the records is the surface at every time)."""
+    return 0.8 * (t / DT) * (1.0 + 0.2 * (np.asarray(lat) - 5.5)) + 0.0 * lon
+
+
+def _sigma_col(lon, lat, t):
+    """The column height ``H = bed + eta`` (no column here is near
+    ``Dmin``)."""
+    return _sigma_bed(lon, lat) + _sigma_eta(t, lon, lat)
+
+
+def _write_fesomc(path, nx, ny, sig, uv, *, n_rec):
+    """A FESOM-C file in the layout of ``tests/test_fesomc_w_contract`` on
+    the grid of :func:`tests._fesom2_synth.grid_geometry` (``nx`` x ``ny``
+    nodes from 4E 4N, 0.25 deg; the triangles closed by their first vertex
+    in ``nv``): sigma interfaces ``sig`` (1 at the surface, 0 at the bed),
+    node beds :func:`_sigma_bed`, equal element areas, ``n_rec`` records
+    ``DT`` apart with the surface :func:`_sigma_eta` and a zero dia-sigma
+    ``w``.  ``uv(x, y) -> (u, v)``, each ``(n_rec, K-1, x.size)``, gives the
+    columns at the element centres (``u``/``v``, ``(time, nele,
+    sigmam1)``) and at the nodes (``unode``/``vnode``)."""
+    lon, lat, tri = synth.grid_geometry(nx, ny, GRID0, GRID0, STEP)
+    lon_e, lat_e = _elem_centres(nx, ny)
+    sig = np.asarray(sig, dtype=np.float64)
+    t = np.arange(n_rec, dtype=np.float64) * DT
+    ue, ve = uv(lon_e, lat_e)
+    un, vn = uv(lon, lat)
+
+    def lay(a):
+        return np.ascontiguousarray(np.transpose(a, (0, 2, 1)),
+                                    dtype=np.float64)
+    ds = xr.Dataset(
+        {"lon": (["node"], lon), "lat": (["node"], lat),
+         "depth": (["node"], _sigma_bed(lon, lat)),
+         "nv": (["nele", "four"],
+                np.column_stack([tri, tri[:, :1]]).astype(np.int32)),
+         "lon_elem": (["nele"], lon_e), "lat_elem": (["nele"], lat_e),
+         "elem_area": (["nele"], np.full(tri.shape[0], AREA)),
+         "sigma_lev": (["sigma"], sig),
+         "u": (["time", "nele", "sigmam1"], lay(ue)),
+         "v": (["time", "nele", "sigmam1"], lay(ve)),
+         "unode": (["time", "node", "sigmam1"], lay(un)),
+         "vnode": (["time", "node", "sigmam1"], lay(vn)),
+         "w": (["time", "node", "sigma"], np.zeros((n_rec, lon.size,
+                                                    sig.size))),
+         "eta": (["time", "node"],
+                 np.array([_sigma_eta(ti, lon, lat) for ti in t]))},
+        coords={"time": ("time", t, {"units": SIGMA_TIME_UNITS})})
+    ds.to_netcdf(path)
+    return Path(path)
+
+
+def _load_fesomc(path):
+    with contextlib.redirect_stdout(io.StringIO()):
+        mesh = get_reader("fesomc").load_mesh(
+            MeshConfig(type="fesomc", meshpath=str(path)))
+    assert mesh.vertical_coord == "sigma"
+    return mesh
+
+
+def _cfg_fesomc(path, seeds, *, out, layout, uv_interp, integrator="rk4",
+                uv_vertical="linear", n_steps=4, dt=DT, **num):
+    """A run_tracking config on the FESOM-C file ``path`` (element u/v
+    ``u``/``v`` or node u/v ``unode``/``vnode`` by ``layout``); ``num`` goes
+    to NumericsConfig (``w_interp`` defaults to ``"barycentric"``, which
+    gives the column height of a plane bed and surface exactly)."""
+    work = Path(path).parent
+    seeds_path = work / f"seeds_{out}.dat"
+    seeds_path.write_text("".join(f"{lo:.17g} {la:.17g} {z:.17g}\n"
+                                  for lo, la, z in seeds))
+    num.setdefault("w_interp", "barycentric")
+    var_u, var_v = ("unode", "vnode") if layout == "node" else ("u", "v")
+    return AppConfig(
+        mode=ModeConfig(Fdrift2D=False, Fdrift3D=True, var_u=var_u,
+                        var_v=var_v, var_w="w", var_eta="eta",
+                        uv_vertical=uv_vertical),
+        numerics=NumericsConfig(dt=dt, integrator=integrator,
+                                uv_interp=uv_interp, **num),
+        mesh=MeshConfig(type="fesomc", meshpath=str(path)),
+        data=DataConfig(ncinput=str(path), inicloud=str(seeds_path),
+                        output_path=str(work / out),
+                        time_averaging="instant"),
+        time=TimeConfig(start_time_idx=0, n_steps=n_steps),
+    )
+
+
+def _sigma_seeds(lon, lat, s):
+    """``(lon, lat, z)`` at the sigma fractions ``s`` of the columns at
+    the start (t = 0)."""
+    lon, lat = np.asarray(lon, float), np.asarray(lat, float)
+    z = np.asarray(s, float) * _sigma_col(lon, lat, 0.0)
+    return [(float(a), float(b), float(c)) for a, b, c in zip(lon, lat, z)]
+
+
+def _sigma_end_s(t, n_steps, dt):
+    """The sigma fraction of every particle after each step, ``z / H`` in
+    the column at its position and time."""
+    times = dt * np.arange(1, n_steps + 1, dtype=np.float64)[None, :]
+    return t["z"] / _sigma_col(t["lon"], t["lat"], times)
+
+
+# ---------------------------------------------------------------------------
+# Sigma: a depth-constant field gives the layer answer
+# ---------------------------------------------------------------------------
+
+#: uniform sigma, 10 layers: centres 0.05 .. 0.95
+SIG_C = np.linspace(1.0, 0.0, 11)
+#: (lon, lat, s, kind) on the 13 x 13 grid (4E..7E): "data" = beyond the
+#: outer centres (``s`` kept along the path, W = 0): every member reads a
+#: stored value, bit for bit the layer run; "blend" = between two centres,
+#: within a few ulp
+CONST_SIGMA_SEEDS = [
+    (5.10, 5.20, 0.0, "data"),        # at the surface
+    (5.30, 5.70, 0.02, "data"),
+    (5.60, 5.35, 0.33, "blend"),
+    (5.85, 5.60, 0.5, "blend"),
+    (5.40, 5.90, 0.61, "blend"),
+    (5.70, 5.10, 0.97, "data"),
+    (5.20, 5.45, 0.995, "data"),
+]
+
+
+@pytest.mark.parametrize("integrator", INTEGRATORS)
+@pytest.mark.parametrize("layout,uv_interp", CASES, ids=CASE_IDS)
+def test_sigma_depth_constant_same_as_layer(tmp_path, layout, uv_interp,
+                                            integrator):
+    """FESOM-C: u, v independent of ``s`` (per-column constants, varying
+    from column to column and in time), a sloping bed and a moving surface:
+    the linear run equals the layer run — bit for bit for the particles
+    beyond the outer centres (every member reads a stored value at every
+    stage), elsewhere every position within 4 ulp (longitude: within one
+    rounding of the per-step wrap); every step starts at the same position
+    in both runs, and every velocity is within the interpolator's ulp bound
+    of ``max|c|`` (the constants lie in one binade, so that ulp is the
+    field's).
+
+    Measured (2026-10-20, on 60d4a42): every position of every run bit for
+    bit the layer run's; up to 2 of the 56 velocities of a run differ, by
+    at most 4 ulp of ``max|c|`` (``leastsq``, RK2; 2 with Euler and RK4),
+    2 (element ``barycentric``), none (``edge_leastsq``, node
+    ``barycentric``); ``s`` kept to 3.7e-15, the depths at ``s > 0``
+    moving 0.12 m or more per step."""
+    n_rec = N_STEPS_C + 2
+    n_lay = SIG_C.size - 1
+
+    def uv(x, y):
+        cu, cv = _const_cols(x.size, n_rec)
+        return (np.repeat(cu[:, None, :], n_lay, axis=1),
+                np.repeat(cv[:, None, :], n_lay, axis=1))
+    path = _write_fesomc(tmp_path / "fesomc.nc", NL, NL, SIG_C, uv,
+                         n_rec=n_rec)
+    s0 = np.array([s[2] for s in CONST_SIGMA_SEEDS])
+    seeds = _sigma_seeds([s[0] for s in CONST_SIGMA_SEEDS],
+                         [s[1] for s in CONST_SIGMA_SEEDS], s0)
+    runs = {}
+    for mode in ("linear", "layer"):
+        runs[mode] = _traj(_cfg_fesomc(
+            path, seeds, out=f"{mode}.nc", layout=layout,
+            uv_interp=uv_interp, integrator=integrator, uv_vertical=mode,
+            n_steps=N_STEPS_C))
+    lin, lay = runs["linear"], runs["layer"]
+    assert _global_attrs(Path(path).parent / "linear.nc")[
+        "uv_vertical"] == "linear"
+    # W = 0: every particle keeps its s, so the data particles stay beyond
+    # the outer centres, the others between them; the depths follow the
+    # sloping bed and the moving surface
+    s_end = _sigma_end_s(lin, N_STEPS_C, DT)
+    assert np.all(np.abs(s_end - s0[:, None]) <= 1e-12)
+    assert np.all(np.abs(np.diff(lin["z"], axis=1))[s0 > 0] > 0.05)
+    cen = _sigma_centres(SIG_C)
+    exact = np.array([s[3] == "data" for s in CONST_SIGMA_SEEDS])
+    assert np.all((s0[exact] < cen[0]) | (s0[exact] > cen[-1]))
+    assert np.all((s0[~exact] > cen[0]) & (s0[~exact] < cen[-1]))
+    for k in ("lon", "lat", "z", "vel_u", "vel_v"):
+        assert_bitwise(lin[k][exact], lay[k][exact], k)
+    for k in ("lat", "z"):
+        assert np.all(np.abs(lin[k] - lay[k])
+                      <= 4 * np.spacing(np.abs(lay[k]))), k
+    lon_tol = np.maximum(4 * np.spacing(np.abs(lay["lon"])),
+                         _wrap_quantum(lay["lon"]))
+    assert np.all(np.abs(lin["lon"] - lay["lon"]) <= lon_tol), (
+        np.abs(lin["lon"] - lay["lon"]) / _wrap_quantum(lay["lon"]))
+    # velocities at the step starts, where both runs stand at the same place
+    lon0 = np.array([s[0] for s in seeds])[:, None]
+    lat0 = np.array([s[1] for s in seeds])[:, None]
+    same = ((np.concatenate([lon0, lin["lon"][:, :-1]], axis=1)
+             == np.concatenate([lon0, lay["lon"][:, :-1]], axis=1))
+            & (np.concatenate([lat0, lin["lat"][:, :-1]], axis=1)
+               == np.concatenate([lat0, lay["lat"][:, :-1]], axis=1)))
+    assert same.all(), np.argwhere(~same)
+    key = (uv_interp if uv_interp != "barycentric"
+           else f"barycentric-{layout}")
+    # every constant in one binade (the elements' columns include the
+    # nodes': the same sequence, longer)
+    ulp = np.spacing(C_BINADE[0])
+    for c in _const_cols(2 * (NL - 1) ** 2, n_rec):
+        mag = np.abs(c)
+        assert C_BINADE[0] <= mag.min() and mag.max() < C_BINADE[1]
+    tol = VEL_ULP[key] * ulp
+    for k in ("vel_u", "vel_v"):
+        gap = np.abs(lin[k] - lay[k])
+        assert np.all(gap <= tol), (k, gap.max() / ulp)
+
+
+# ---------------------------------------------------------------------------
+# Sigma: the order of the reconstruction and of the run
+# ---------------------------------------------------------------------------
+
+def _profile_s(s):
+    """The smooth profile in ``s``: ``cos(pi s)`` (flat at the surface and
+    at the bed, so reading the outer centres there is second order)."""
+    return np.cos(np.pi * np.asarray(s))
+
+
+def _sigma_profile_uv(sig, g, n_rec):
+    """``uv(x, y)`` of :func:`_write_fesomc`: ``g(x, y) cos(pi c_k)`` at the
+    layer centres ``c_k`` of ``sig``."""
+    f = _profile_s(_sigma_centres(sig))[None, :, None]
+
+    def uv(x, y):
+        gu, gv = g(x, y)
+        shape = (n_rec, f.shape[1], np.size(x))
+        return (np.broadcast_to(f * gu[None, None, :], shape).copy(),
+                np.broadcast_to(f * gv[None, None, :], shape).copy())
+    return uv
+
+
+@pytest.mark.parametrize("layout,uv_interp", CASES, ids=CASE_IDS)
+def test_sigma_profile_reconstruction_order(tmp_path, layout, uv_interp):
+    """FESOM-C: ``u = G(x) cos(pi s)`` sampled at the layer centres of 10,
+    20 and 40 equal sigma layers (``c_k = 1 - (sigma_k + sigma_{k+1}) / 2``),
+    read through the public interpolator at one point at 1601 sigma
+    fractions from the surface to the bed (linear mode: the ``s`` the
+    integrators hand it; layer mode: the layer of ``z = s H`` in the
+    column): the maximum error of linear mode falls by >= 3.5 per halving
+    of the layers (second order), of the layer mode by 1.6 .. 2.4 (first
+    order).
+
+    Measured (2026-10-20, on 60d4a42; the same for the four interpolators,
+    and the numbers of :func:`test_profile_reconstruction_order` with ``s``
+    for ``z / H``): linear 1.003e-3, 2.512e-4, 6.283e-5 m/s (ratios 3.994,
+    3.998), layer 1.275e-2, 6.394e-3, 3.200e-3 m/s (ratios 1.994,
+    1.998)."""
+    s = np.linspace(0.0, 1.0, 1601)
+    gu, gv = _g(LON_P, LAT_P)
+    errs = {"layer_linear": [], "layer": []}
+    for n in N_LAYERS:
+        sig = np.linspace(1.0, 0.0, n + 1)
+        mesh = _load_fesomc(_write_fesomc(
+            tmp_path / f"n{n}.nc", 9, 9, sig,
+            _sigma_profile_uv(sig, _g, 1), n_rec=1))
+        x, y = _cols(mesh, layout)
+        cu, cv = _g(x, y)
+        f = _profile_s(_sigma_centres(sig))[:, None]
+        lon, lat = np.full(s.size, LON_P), np.full(s.size, LAT_P)
+        nn = find_nearest_nodes(mesh, lon, lat)
+        h = np.asarray(mesh.depth)[nn]
+        for placement in errs:
+            vel = VelocityField(
+                u=f * cu[None, :], v=f * cv[None, :],
+                eta=np.zeros(mesh.n_nodes),
+                w=np.zeros((sig.size, mesh.n_nodes)), uv_layout=layout,
+                uv_vertical=placement)
+            if placement == "layer":
+                st = make_state(lon, lat, s * h)
+                layer = find_layers_sigma(mesh.sigma, st.z, nn, mesh.depth,
+                                          vel.eta, st.alive_mask,
+                                          H_particle=h)
+            else:
+                st = make_state(lon, lat, s.copy())
+                layer = 0
+            U, V, ok = _INTERP_FN[uv_interp](st, mesh, vel, nn, 1.0, layer)
+            assert ok.all()
+            p = _profile_s(s)
+            errs[placement].append(max(np.abs(U - gu * p).max(),
+                                       np.abs(V - gv * p).max()))
+    lin, lay = np.array(errs["layer_linear"]), np.array(errs["layer"])
+    r_lin, r_lay = lin[:-1] / lin[1:], lay[:-1] / lay[1:]
+    assert np.all(r_lin >= 3.5), (lin, r_lin)
+    assert np.all((r_lay >= 1.6) & (r_lay <= 2.4)), (lay, r_lay)
+
+
+@pytest.mark.parametrize("layout,uv_interp", CASES, ids=CASE_IDS)
+def test_sigma_trajectory_convergence(tmp_path, layout, uv_interp):
+    """FESOM-C: ``u = G(x) cos(pi s)``, a zero dia-sigma W (every particle
+    keeps its ``s`` while its depth follows the sloping bed and the moving
+    surface), 50 particles at equally spaced ``s`` (the column without its
+    ends), RK4 over four days on 10, 20 and 40 sigma layers: the RMS
+    distance of the end positions from the reference solution of
+    :func:`test_trajectory_convergence` (the same ``G``, depth factor
+    ``cos(pi s)``) falls by >= 3.5 per halving of the layers in linear mode
+    and by 1.6 .. 2.4 in layer mode; the time-step error (``dt`` against
+    ``dt / 2``) is below 1 % of either mode's error.
+
+    Measured (2026-10-20, on 60d4a42; the same for the four interpolators,
+    and the numbers of the z-level test): linear 182.5, 45.66, 11.42 m
+    (ratios 3.997, 3.998), layer 1860, 955.3, 476.7 m (ratios 1.947,
+    2.004); the time-step error at most 5.2e-6 of the linear error, 1.2e-7
+    of the layer error; ``s`` kept to 4.4e-16 while the depths moved up to
+    22 m; displacements up to 30 km."""
+    s = np.linspace(0.0, 1.0, N_DEPTHS + 2)[1:-1]
+    seeds = _sigma_seeds(np.full(s.size, TRAJ_START[0]),
+                         np.full(s.size, TRAJ_START[1]), s)
+    z0 = np.array([q[2] for q in seeds])
+    T = N_STEPS_T * DT
+    ref_lon, ref_lat = _reference(_profile_s(s), T)
+    errs = {"linear": [], "layer": []}
+    for n in N_LAYERS:
+        sig = np.linspace(1.0, 0.0, n + 1)
+        work = tmp_path / f"n{n}"
+        work.mkdir()
+        path = _write_fesomc(work / "fesomc.nc", NL, NL, sig,
+                             _sigma_profile_uv(sig, _traj_g, N_STEPS_T + 2),
+                             n_rec=N_STEPS_T + 2)
+        for mode in errs:
+            ends = []
+            for k, dt in enumerate((DT, DT / 2)):
+                n_steps = N_STEPS_T * (k + 1)
+                t = _traj(_cfg_fesomc(path, seeds, out=f"{mode}{k}.nc",
+                                      layout=layout, uv_interp=uv_interp,
+                                      uv_vertical=mode, n_steps=n_steps,
+                                      dt=dt, temporal_interp=True))
+                # W = 0: s kept to rounding, z moved with the column
+                s_end = _sigma_end_s(t, n_steps, dt)
+                assert np.all(np.abs(s_end - s[:, None]) <= 1e-12)
+                assert np.abs(t["z"][:, -1] - z0).max() > 10.0
+                ends.append((t["lon"][:, -1], t["lat"][:, -1]))
+            err = _rms_gap(*ends[0], ref_lon, ref_lat)
+            err_t = _rms_gap(*ends[0], *ends[1])
+            assert err_t < 0.01 * err, (mode, n, err_t, err)
+            errs[mode].append(err)
+    lin, lay = np.array(errs["linear"]), np.array(errs["layer"])
+    r_lin, r_lay = lin[:-1] / lin[1:], lay[:-1] / lay[1:]
+    assert np.all(r_lin >= 3.5), (lin, r_lin)
+    assert np.all((r_lay >= 1.6) & (r_lay <= 2.4)), (lay, r_lay)

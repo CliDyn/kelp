@@ -50,8 +50,9 @@ it ran on the zoom-8 seed file).
 - `depth_linear_cost.py` — the step cost of `mode.uv_vertical: linear` (one
   3-D step with the same u/v arrays read per layer and linearly in depth: the
   fused node-barycentric RK2 step, or with `--layout element` the fused
-  element-`leastsq` Euler step or the unfused element RK2 step); method and
-  rows in [depth_linear_cost.md](depth_linear_cost.md).
+  element-`leastsq` Euler step or the unfused element RK2 step, or with
+  `--vertical sigma` the unfused RK2 step on a sigma mesh); method and rows in
+  [depth_linear_cost.md](depth_linear_cost.md).
 - [fesom14_lr_cost.md](fesom14_lr_cost.md) — the FESOM 1.4 reader on the
   published LR output: measured I/O (mesh, dataset open, record reads) and
   the fused 3-D RK2 step cost (17.2 ms for 1e5 particles at 128 threads).

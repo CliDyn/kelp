@@ -95,8 +95,10 @@ Paths are below `src/kelp/`.
   kernels with a Python fallback. Node-layout u/v need `barycentric` (the fail-fast
   is in [tracking.md](tracking.md)); so does a depth-linear node field
   (`uv_vertical` `"level"`/`"layer_linear"`), while a depth-linear element field
-  (`"layer_linear"`, FESOM2 `u`/`v`) is read by `leastsq`, `edge_leastsq` and
-  `barycentric`; a stencil member dry at the particle depth is a wall. Trap: the
+  (`"layer_linear"`, FESOM2 or FESOM-C `u`/`v`) is read by `leastsq`,
+  `edge_leastsq` and `barycentric`; a stencil member dry at the particle depth
+  is a wall (on a sigma mesh every member is wet: the fields are read in the
+  sigma fraction that the integrators hand them). Trap: the
   depth-linear cores copy blocks of the layer cores on purpose (no layer kernel
   changed) — change both together (the list is in [numerics.md](numerics.md)).
   Notes: [numerics.md](numerics.md); the time-blending kernel twins the fused
@@ -105,7 +107,8 @@ Paths are below `src/kelp/`.
   per mesh, placement and layout (`depth_points`: the points and, per node or per
   element, the last usable point and the physical bed; the element table from the
   FESOM2 reader's declaration `mesh.metadata["uv_data_last_elem"]` / `["elem_bed"]`;
-  cached on the mesh by object identity), the bracket, read and wet test
+  on a sigma mesh the layer centres in the sigma fraction, every column wet to the
+  bed; cached on the mesh by object identity), the bracket, read and wet test
   (`uv_bracket`, `uv_at`, `uv_wet`, njit) and the record check
   (`check_depth_linear_record`, `is_checked`: u/v finite down to each column's last
   usable point; the field is stamped with the table object). Trap: the cache and

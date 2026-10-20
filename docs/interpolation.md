@@ -480,7 +480,10 @@ $$ \ell_i = \max\Big(0,\ \min\big(M-1,\ \max(\{k : \mathrm{lower}_k \le d_i\} \c
 the node's bed depth and `D_i` an optional reader declaration; per element
 `ℓ_e = max(0, min(M-1, D_e))`, `D_e` the element's last wet layer that the
 FESOM2 reader declares from the mesh diagnostic (`vertical.md` §2.1).
-Points below `ℓ_c` are never read.
+Points below `ℓ_c` are never read. On a sigma mesh (FESOM-C) `z` is the
+sigma fraction `s = z/H_p ∈ [0, 1]` of the particle's column, the points are
+the sigma layer centres `p_k = 1 − (σ_k + σ_{k+1})/2`, and `ℓ_c = M − 1`,
+`d_c = +∞` for every column (every member wet).
 
 A member is wet while `z <= d_c`, its physical bed (a node's `mesh.depth`, an
 element's declared bed). The wet members enter the interpolator of §1 with

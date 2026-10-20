@@ -129,10 +129,11 @@ README reference and [`configuration.md`](configuration.md); the mechanics are i
   at release, then cross edges; identical results, faster) —
   [`localization.md`](localization.md) §7.
 - **Horizontal velocity linear in depth** (`mode.uv_vertical: linear`, 3-D
-  z-level runs: node-layout u/v with `uv_interp: barycentric`, FESOM2
-  element-layout u/v with `leastsq`, `edge_leastsq` or `barycentric` on a mesh
-  diagnostic with `nlevels` or `zbar_e_bottom`; the output then has the
-  global attribute `uv_vertical = "linear"`) —
+  runs on z-level meshes and on FESOM-C sigma meshes, where it is linear in
+  the sigma fraction: node-layout u/v with `uv_interp: barycentric`,
+  element-layout u/v with `leastsq`, `edge_leastsq` or `barycentric` — FESOM2
+  on a mesh diagnostic with `nlevels` or `zbar_e_bottom`, FESOM-C as it is;
+  the output then has the global attribute `uv_vertical = "linear"`) —
   [`vertical.md`](vertical.md) §2.1.
 
 ## Output and restart

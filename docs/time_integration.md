@@ -351,8 +351,10 @@ million-particle runs; the result is bit-identical, only parallel.) The stage
 state also carries the stage DEPTH (`_interp_uv_at(..., zs=)`): a depth-linear
 `u`/`v` (`mode.uv_vertical: linear`, `vertical.md` §2.1) is read at each
 stage's own depth — Euler at the entry depth, RK2 at `z` and `z_mid`, RK4 at
-`z`, `z_2`, `z_3`, `z_4` — and such a stage looks no layer up; layer
-interpolators never read the depth, so layer runs are unchanged.
+`z`, `z_2`, `z_3`, `z_4`; on a sigma mesh at the stage's sigma fraction
+`clip(z / H_p, 0, 1)` in its own column (`_sigma_frac_for_uv`) — and such a
+stage looks no layer up; layer interpolators never read the depth, so layer
+runs are unchanged.
 
 **The lazy two-snapshot blend.** In temporal-interpolation mode strictly between
 snapshots, `_build_vel_payload` returns a `LazyLerpField`
@@ -434,9 +436,9 @@ the integrator, whether the run is 3-D, the vertical coordinate, and
   `make_stage_vels_recon` and the interpolator registry.
 
 Before any of this, every step function runs `_check_depth_linear_entry`: a
-depth-linear field is refused for `rk45`, a sigma mesh, a field without `w`, and
-a layout and `uv_interp` outside the table of the interpolators that evaluate
-it (node layout: `barycentric`; element layout: `leastsq`, `edge_leastsq`,
+depth-linear field is refused for `rk45`, a mesh neither z-level nor sigma, a
+field without `w`, and a layout and `uv_interp` outside the table of the
+interpolators that evaluate it (node layout: `barycentric`; element layout: `leastsq`, `edge_leastsq`,
 `barycentric`); the fields of one
 step (`vel`, `vel_next`, each PCHIP snapshot) must share one placement, and each
 passes the record check once. For a layer field it reads only the placement

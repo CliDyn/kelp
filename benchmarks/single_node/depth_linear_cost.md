@@ -5,7 +5,7 @@ points per stencil member (a vertex, or an element) instead of one, searches
 the member's column for the bracket and tests the member against its bed (a
 member dry at the particle depth is a wall). `depth_linear_cost.py` measures
 what that costs in the hot path: one 3-D step timed with the SAME u/v arrays
-read two ways, `"layer"` and `"layer_linear"`. Two legs:
+read two ways, `"layer"` and `"layer_linear"`. Three legs:
 
 - **node layout** (`--layout node`, the default): one fused node-barycentric
   3-D RK2 step with a linear time blend — `_fused_rk2_step_3d_bary_tinterp`
@@ -16,7 +16,13 @@ read two ways, `"layer"` and `"layer_linear"`. Two legs:
   `_fused_euler_step_3d_dl`) or one unfused 3-D RK2 step (`--integrator rk2`:
   `_rk2_step_unfused` with the vectorised `interp_leastsq`, the layer core
   against `_interp_leastsq_core_dl`; `--payload pchip`: with the 4-record PCHIP
-  bundle).
+  bundle);
+- **sigma** (`--vertical sigma`, `--integrator rk2`, either layout): the same
+  horizontal meshes as a FESOM-C-like sigma mesh, one unfused 3-D RK2 step
+  (`_rk2_step_unfused`; node `barycentric` or element `leastsq` u/v, the layer
+  kernels against their depth-linear twins, which read u/v in the sigma
+  fraction `s = z / H_p` of each stage, `_sigma_frac_for_uv`; no fused kernel
+  serves sigma meshes in either rule).
 
 ## Method
 
@@ -38,6 +44,15 @@ read two ways, `"layer"` and `"layer_linear"`. Two legs:
   depth, where the end-of-step clamp keeps them; at NSIDE 64 about 16 % of them
   then have a dry element in their `leastsq` ring and about 4 % fewer than three
   wet ones (the area-mean fallback).
+- Sigma leg: the dual mesh (node layout) or its triangulated twin (element
+  layout) with `vertical_coord = "sigma"`, a 22-interface sigma table finer at
+  the top (`σ_k = 1 − (k/21)^1.5`), the node bathymetry above as the bed and a
+  surface of ±0.5 m varying in space and from record to record; every layer of
+  every column holds water (random u/v everywhere, no dry slots, no walls at
+  depth). W and the column height `H_p` by the layout's own interpolator
+  (`barycentric` for nodes, `leastsq` for elements). Particle depths uniform
+  between the surface and the nearest node's bathymetry, so the sigma
+  fractions spread over the whole column.
 - `dt = 21600 s`, the step starting a quarter into a one-day record bracket: a
   lazy blend of two records plus the next record (`--payload pchip`: the
   4-record PCHIP bundle, RK2 only — Euler reads the step-start field).
@@ -63,6 +78,11 @@ python benchmarks/single_node/depth_linear_cost.py --layout element --integrator
     --nside 64 --particles 100000 --steps 15 --threads 128
 python benchmarks/single_node/depth_linear_cost.py --layout element --integrator rk2 \
     --nside 64 --particles 100000 --steps 15 --threads 128 [--payload pchip]
+# sigma mesh (FESOM-C-like), unfused 3-D RK2: element leastsq and node barycentric
+python benchmarks/single_node/depth_linear_cost.py --vertical sigma --layout element \
+    --integrator rk2 --nside 64 --particles 100000 --steps 15 --threads 128 [--payload pchip]
+python benchmarks/single_node/depth_linear_cost.py --vertical sigma --layout node \
+    --integrator rk2 --nside 64 --particles 100000 --steps 15 --threads 128 [--payload pchip]
 ```
 
 Run it on an otherwise idle node; `--nside 16 --particles 1000 --steps 3` is a
