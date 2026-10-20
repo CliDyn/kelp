@@ -1667,7 +1667,7 @@ class HealpixReader:
             from ..numerics.vertical_uv import check_depth_linear_record
             check_depth_linear_record(
                 SimpleNamespace(u=u, v=v, uv_vertical="layer_linear",
-                                _dl_token=None),
+                                uv_layout="node", _dl_token=None),
                 mesh, record=_record_label(ds, timestep))
 
         if getattr(mesh, "rotation_angles", None) is not None:

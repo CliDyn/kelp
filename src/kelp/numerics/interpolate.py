@@ -1131,7 +1131,7 @@ def _interp_leastsq_dl(
         point).
     """
     placement = getattr(vel, "uv_vertical", "layer")
-    if getattr(vel, "uv_layout", "node") != "element":
+    if getattr(vel, "uv_layout", "element") != "element":
         _reject_depth_linear(vel, "interp_leastsq", _DL_LAYOUT)
     # the record check first: a LazyLerpField is checked through its
     # parents (shape and finite prefix) before anything below blends it
@@ -3085,7 +3085,7 @@ def _interp_edge_leastsq_dl(
         non-finite value at a usable point).
     """
     placement = getattr(vel, "uv_vertical", "layer")
-    if getattr(vel, "uv_layout", "node") != "element":
+    if getattr(vel, "uv_layout", "element") != "element":
         _reject_depth_linear(vel, "interp_edge_leastsq", _DL_LAYOUT)
     bc_code = _bc_to_int(bc)
     # the record check first: a LazyLerpField is checked through its

@@ -26,7 +26,7 @@ from .core.config import (
     resolve_time_params,
 )
 from .numerics.diffusion import DiffusionStepArgs
-from .numerics.integrators import get_integrator
+from .numerics.integrators import _DL_ELEMENT_UV_INTERP, get_integrator
 from .core.geometry import DEG2RAD
 from .core.io import LazyLerpField, VelocityField
 from .core.mesh import Mesh, find_containing_elements, find_nearest_nodes
@@ -358,13 +358,67 @@ def _apply_beaching_hook(state, prev_status, mesh, vel, run_cfg, wet_streak,
 #: values of ``mode.uv_vertical`` (== core.config._VALID_UV_VERTICAL_OPTION)
 _UV_VERTICAL_OPTIONS = ("layer", "linear")
 
+#: ``mode.uv_vertical: linear`` on a z-level mesh: the u/v interpolators
+#: that evaluate a depth-linear field, per u/v layout (the integrators'
+#: entry table, ``integrators._check_depth_linear_entry``)
+_LINEAR_UV_INTERP = {"node": ("barycentric",),
+                     "element": _DL_ELEMENT_UV_INTERP}
 
-def _linear_option_layout_error(uv_layout) -> ValueError:
+
+def _linear_uv_interp_table() -> str:
+    return "; ".join(
+        f"{layout} layout: " + ", ".join(repr(n) for n in names)
+        for layout, names in _LINEAR_UV_INTERP.items())
+
+
+def _linear_option_layout_error(uv_layout, uv_interp=None) -> ValueError:
+    """The refusal of ``mode.uv_vertical: linear`` for a u/v layout outside
+    the table, or (``uv_interp`` given) an interpolator outside the
+    layout's row."""
+    if uv_layout not in _LINEAR_UV_INTERP:
+        return ValueError(
+            "mode.uv_vertical: 'linear' needs node or element layout u/v, "
+            f"got uv_layout={uv_layout!r} (drop the option)")
     return ValueError(
-        "mode.uv_vertical: 'linear' needs node layout u/v (uv_layout="
-        "'node': FESOM2 unod/vnod, the HEALPix dual geometry), got "
-        f"uv_layout={uv_layout!r}; element-centre u/v stay piecewise "
-        "constant in depth (drop the option)")
+        f"mode.uv_vertical: 'linear' on {uv_layout} layout u/v (uv_layout="
+        f"{uv_layout!r}) needs numerics.uv_interp "
+        + " or ".join(repr(n) for n in _LINEAR_UV_INTERP[uv_layout])
+        + f", got {uv_interp!r}")
+
+
+def _check_linear_element_mesh(mesh) -> None:
+    """Refuse ``mode.uv_vertical: linear`` on element-layout u/v where the
+    mesh cannot support it: no element bottoms
+    (``mesh.metadata["uv_data_last_elem"]`` / ``["elem_bed"]``, which the
+    FESOM2 reader sets from the mesh diagnostic's ``nlevels`` or
+    ``zbar_e_bottom``), or ice-shelf cavities
+    (``mesh.metadata["elem_ulevels"]`` above 1 anywhere).  The message
+    names the mesh file (``mesh.metadata["meshpath"]``).
+    """
+    md = getattr(mesh, "metadata", None) or {}
+    meshpath = md.get("meshpath")
+    where = f"mesh {meshpath!r}" if meshpath else "this mesh"
+    missing = [k for k in ("uv_data_last_elem", "elem_bed")
+               if md.get(k) is None]
+    if missing:
+        raise ValueError(
+            "mode.uv_vertical: 'linear' on element-layout u/v needs each "
+            f"element's bottom, and {where} declares none ("
+            + " and ".join(f"mesh.metadata[{k!r}]" for k in missing)
+            + " not set): the mesh diagnostic has neither nlevels nor "
+            "zbar_e_bottom (an ASCII mesh directory never has them); use "
+            "the run's full fesom.mesh.diag.nc, or re-extract the region "
+            "with utils/extract_fesom_region.py, which keeps them")
+    ulevels = md.get("elem_ulevels")
+    if ulevels is not None:
+        cav = np.flatnonzero(np.asarray(ulevels) > 1)
+        if cav.size:
+            raise ValueError(
+                "ice-shelf cavities are not supported by mode.uv_vertical: "
+                f"linear on element data yet: {where} has ulevels > 1 at "
+                f"{cav.size} element(s) (first: element {int(cav[0])}, "
+                f"ulevels {int(np.asarray(ulevels)[cav[0]])}); run without "
+                "the option")
 
 
 def _check_uv_vertical_option(option: str, *, fdrift3d: bool, mesh, uv_interp,
@@ -373,12 +427,16 @@ def _check_uv_vertical_option(option: str, *, fdrift3d: bool, mesh, uv_interp,
 
     Checked after the mesh is loaded (``run_tracking``) and at the entry of
     ``run_single_realization``: the value, and for ``"linear"`` 3-D
-    tracking, a z-level mesh, ``numerics.uv_interp: barycentric`` (the only
-    interpolator that evaluates depth-linear u/v) and a reader whose u/v are
-    layer-centred (a reader that stores them on levels,
-    ``native_uv_vertical = "level"``, is depth-linear without the option).
-    The layout is checked where it is known (the pre-writer probe, the
-    step-0 guard and the cache marking).
+    tracking, a z-level mesh, a ``numerics.uv_interp`` of the layout table
+    (node layout: ``barycentric``; element layout: ``leastsq``,
+    ``edge_leastsq``, ``barycentric`` — the interpolators that evaluate
+    depth-linear u/v) and a reader whose u/v are layer-centred (a reader
+    that stores them on levels, ``native_uv_vertical = "level"``, is
+    depth-linear without the option).  The layout itself, its row of the
+    table and an element mesh's bottoms are checked where the layout is
+    known (``_validate_uv_compat``: the pre-writer probe, the entry probe
+    of ``run_single_realization``, the step-0 guard; and the cache
+    marking).
     """
     if option not in _UV_VERTICAL_OPTIONS:
         raise ValueError(
@@ -396,11 +454,11 @@ def _check_uv_vertical_option(option: str, *, fdrift3d: bool, mesh, uv_interp,
             "mode.uv_vertical: 'linear' needs a z-level mesh, this mesh has "
             f"vertical_coord {coord!r} (sigma layers, e.g. FESOM-C, are not "
             "supported)")
-    if uv_interp != "barycentric":
+    if not any(uv_interp in names for names in _LINEAR_UV_INTERP.values()):
         raise ValueError(
-            "mode.uv_vertical: 'linear' needs numerics.uv_interp: "
-            "'barycentric' (the only u/v interpolator that evaluates "
-            f"depth-linear fields), got {uv_interp!r}")
+            "mode.uv_vertical: 'linear' needs a u/v interpolator that "
+            f"evaluates depth-linear fields ({_linear_uv_interp_table()}), "
+            f"got numerics.uv_interp {uv_interp!r}")
     if getattr(reader, "native_uv_vertical", "layer") == "level":
         name = getattr(reader, "__name__", type(reader).__name__)
         raise ValueError(
@@ -436,7 +494,9 @@ def _mark_depth_linear(vel, option: str, mesh, *, record: str = ""):
       no check — the default path stays bit-identical);
     - option ``"linear"``, field ``"layer"``: a shallow copy carrying
       ``uv_vertical="layer_linear"`` (the same arrays), refused for a 2-D
-      field (no w or 1-D u) and for a layout other than ``"node"``;
+      field (no w or 1-D u), for a layout other than ``"node"`` or
+      ``"element"``, and for element layout on a mesh without the element
+      bottoms or with ice-shelf cavities (:func:`_check_linear_element_mesh`);
     - a field already ``"layer_linear"`` with option ``"linear"``: returned
       as is;
     - a ``"level"`` field (a reader whose data sit on levels): kept as is
@@ -455,7 +515,8 @@ def _mark_depth_linear(vel, option: str, mesh, *, record: str = ""):
         ``mode.uv_vertical``: ``"layer"`` or ``"linear"``.
     mesh : Mesh
         The mesh the run evaluates the field on (not read for a layer
-        field with option ``"layer"``).
+        field with option ``"layer"``); element layout: its metadata
+        holds the element bottoms.
     record : str, keyword-only
         Names the record in a refusal, e.g. ``"time index 12"``.
 
@@ -491,9 +552,11 @@ def _mark_depth_linear(vel, option: str, mesh, *, record: str = ""):
                     "mode.uv_vertical: 'linear' needs a 3-D field (u/v on "
                     "the layers and a w field)"
                     + (f"; {record}" if record else ""))
-            if getattr(vel, "uv_layout", "element") != "node":
-                raise _linear_option_layout_error(
-                    getattr(vel, "uv_layout", "element"))
+            layout = getattr(vel, "uv_layout", "element")
+            if layout not in _LINEAR_UV_INTERP:
+                raise _linear_option_layout_error(layout)
+            if layout == "element":
+                _check_linear_element_mesh(mesh)
             vel = _as_layer_linear(vel)
     else:
         raise ValueError(
@@ -920,17 +983,26 @@ def _path_fingerprint(path) -> list:
 
 # --- u/v interpolation x layout compatibility (spec 2026-06-06) ---
 def _validate_uv_compat(uv_layout: str, uv_interp: str,
-                        uv_vertical_option: str = "layer") -> None:
+                        uv_vertical_option: str = "layer", *,
+                        mesh=None) -> None:
     """leastsq / edge_leastsq are element-centre math and cannot consume
     node-based velocities — fail with the actionable fix.  With
-    ``mode.uv_vertical: linear`` the u/v must also be node-based."""
+    ``mode.uv_vertical: linear`` the layout and the interpolator must be
+    in the layout table (node layout: ``barycentric``; element layout:
+    ``leastsq``, ``edge_leastsq``, ``barycentric``), and element-layout
+    u/v need a ``mesh`` (when given) with the element bottoms and no
+    ice-shelf cavities (:func:`_check_linear_element_mesh`)."""
     if uv_layout == "node" and uv_interp in ("leastsq", "edge_leastsq"):
         raise ValueError(
             "node-based velocities (uv_layout='node', e.g. FESOM2 "
             "unod/vnod) require numerics.uv_interp: 'barycentric' — "
             f"{uv_interp!r} interpolates element-centre values.")
-    if uv_vertical_option == "linear" and uv_layout != "node":
-        raise _linear_option_layout_error(uv_layout)
+    if uv_vertical_option != "linear":
+        return
+    if uv_interp not in _LINEAR_UV_INTERP.get(uv_layout, ()):
+        raise _linear_option_layout_error(uv_layout, uv_interp)
+    if uv_layout == "element" and mesh is not None:
+        _check_linear_element_mesh(mesh)
 
 
 # --- rotated-frame boundary (spec 2026-06-06: Seeds / Output / Checkpoints) ---
@@ -1771,7 +1843,10 @@ def run_single_realization(
     Notes
     -----
     ``mode.uv_vertical: "linear"`` (layer-centred u/v linear in depth) gets
-    the refusals of ``run_tracking`` here too.  A depth-linear run (the
+    the refusals of ``run_tracking`` here too, the layout ones (the layout
+    table, an element mesh's bottoms and cavities) from the reader's
+    ``probe_uv_layout`` right after the ``prepare`` hook, before any read
+    and before anything is written.  A depth-linear run (the
     option, or a reader with ``native_uv_vertical = "level"``) applies
     ``mode.max_levels`` to ``mesh.sigma`` itself, from the uncut table kept
     in ``mesh.metadata["sigma_full"]`` (None restores it); a mesh cut that
@@ -1864,6 +1939,14 @@ def run_single_realization(
     # the reader's mesh-relative dataset hook, at every entry (after the
     # cut above: it sees the levels in use)
     _prepare_dataset(reader, mesh, ds)
+    probe_fn = getattr(reader, "probe_uv_layout", None)
+    if uv_vertical_option == "linear" and probe_fn is not None:
+        # the layout facts of run_tracking's pre-writer probe, for direct
+        # callers too: before any read and before anything is written to
+        # a caller's writer (metadata only)
+        _validate_uv_compat(probe_fn(ds, mode, mesh), uv_interp_resolved,
+                            uv_vertical_option=uv_vertical_option,
+                            mesh=mesh)
 
     # Mesh-derived default for ``dres_m``:
     # median element edge length, clipped to [100 m, 50 km], computed
@@ -2301,7 +2384,8 @@ def run_single_realization(
         if step_i == 0:
             _validate_uv_compat(getattr(vel, "uv_layout", "element"),
                                 uv_interp_resolved,
-                                uv_vertical_option=uv_vertical_option)
+                                uv_vertical_option=uv_vertical_option,
+                                mesh=mesh)
 
         # Downgrade to steady if tracking dt exceeds the bracket
         # (start-between-snapshots, end-of-range, irregular spacing).
@@ -3336,10 +3420,13 @@ def run_tracking(
     # the step-0 in-loop guard as backstop.
     probe_fn = getattr(reader, "probe_uv_layout", None)
     if probe_fn is not None:
+        # mode.uv_vertical: linear also refuses element u/v on a mesh
+        # without the element bottoms or with ice-shelf cavities here
         _validate_uv_compat(probe_fn(ds, config.mode, mesh),
                             config.numerics.uv_interp,
                             uv_vertical_option=_uv_vertical_option(
-                                config.mode))
+                                config.mode),
+                            mesh=mesh)
     if config.numerics.uv_interp != "leastsq":
         print(f"  uv_interp:         {config.numerics.uv_interp}")
     if (getattr(mesh, "metadata", None)

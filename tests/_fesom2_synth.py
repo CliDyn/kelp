@@ -1,7 +1,8 @@
 """Synthetic FESOM2 fixtures for reader tests — no external data.
 
 A 4-node square split into 2 triangles, with the mesh-diag variables our
-loader needs, emitted in each of the three diag conventions; plus a
+loader needs, emitted in each of the three diag conventions (or any other
+triangulation, e.g. the regular grid of :func:`grid_geometry`); plus a
 multi-year per-variable file set in the ``<var>.fesom.<year>.nc`` layout.
 """
 from __future__ import annotations
@@ -22,6 +23,47 @@ ZBAR_NEG = np.array([0.0, -10.0, -30.0])          # 3 interfaces, negative-down
 ELEM_AREA = np.array([0.5, 0.5])
 ZBAR_N_BOTTOM_NEG = np.array([-30.0, -30.0, -30.0, -30.0])
 DEG2RAD = np.pi / 180.0
+
+
+def grid_geometry(nx: int, ny: int, lon0: float, lat0: float,
+                  step: float):
+    """A regular lon/lat grid of ``nx`` x ``ny`` nodes from ``(lon0, lat0)``
+    with spacing ``step`` (degrees), each cell split by the diagonal from
+    its south-west to its north-east corner, so every interior node has six
+    triangles, point-symmetric about it.
+
+    Returns
+    -------
+    lon, lat : ndarray, shape (nx * ny,)
+        Node coordinates (degrees), row by row from the south-west corner.
+    tri : ndarray of int32, shape (2 * (nx - 1) * (ny - 1), 3)
+        1-based, counter-clockwise triangles, two per cell.
+    """
+    ii, jj = np.meshgrid(np.arange(nx), np.arange(ny))
+    lon = (lon0 + step * ii).ravel().astype(np.float64)
+    lat = (lat0 + step * jj).ravel().astype(np.float64)
+    tris = []
+    for j in range(ny - 1):
+        for i in range(nx - 1):
+            sw = j * nx + i
+            se, ne, nw = sw + 1, sw + nx + 1, sw + nx
+            tris.append((sw, se, ne))
+            tris.append((sw, ne, nw))
+    return lon, lat, np.asarray(tris, dtype=np.int32) + 1
+
+
+def _nod_in_elem(tri_1based: np.ndarray, n_nodes: int):
+    """``nod_in_elem2D`` ``(nod, N)`` (1-based element ids, 0-padded) and
+    ``nod_in_elem2D_num`` ``(nod,)`` of a triangulation."""
+    rings = [[] for _ in range(n_nodes)]
+    for e, row in enumerate(np.asarray(tri_1based) - 1):
+        for nd in row:
+            rings[int(nd)].append(e + 1)
+    num = np.array([len(r) for r in rings], dtype=np.int32)
+    table = np.zeros((n_nodes, max(1, int(num.max()))), dtype=np.int32)
+    for i, r in enumerate(rings):
+        table[i, :len(r)] = r
+    return table, num
 
 
 def _level_vars(elem_dim: str, nod_dim: str, *, nlevels=None, ulevels=None,
@@ -52,7 +94,8 @@ def write_meshdiag(path: Path, convention: str, *,
                    corrupt_nodes: list[int] | None = None,
                    zbar=None, zbar_n_bottom=None,
                    nlevels=None, ulevels=None, zbar_e_bottom=None,
-                   nlevels_nod2D=None) -> Path:
+                   nlevels_nod2D=None, geometry=None,
+                   elem_area=None) -> Path:
     """convention in {'core2', 'comp', 'ugrid'}.
 
     start_index : optional UGRID ``face_nodes`` start_index attribute.  When
@@ -80,28 +123,46 @@ def write_meshdiag(path: Path, convention: str, *,
         levels, 1-based; its first level; its bed, written negative);
         ``nlevels_nod2D`` the per-node ``(4,)`` count.  ``None`` (default)
         writes none of them, as before.
+    geometry : optional ``(lon, lat, tri_1based)`` in place of the 4-node
+        square (e.g. from :func:`grid_geometry`); ``nod_in_elem2D`` is built
+        from it, ``zbar_n_bottom`` defaults to the deepest level at every
+        node, and the level variables above take one value per element
+        (``nlevels_nod2D`` one per node).
+    elem_area : optional ``(E,)`` element areas (default ``ELEM_AREA``, or
+        1.0 per element with ``geometry``).
     """
     zbar_neg = ZBAR_NEG if zbar is None else np.asarray(zbar, dtype=np.float64)
-    bottom_neg = (ZBAR_N_BOTTOM_NEG if zbar_n_bottom is None
+    if geometry is None:
+        lon_deg, lat_deg, tri = LON_DEG, LAT_DEG, TRI_1BASED
+        n2e, n2e_num = NOD_IN_ELEM_1BASED, NOD_IN_ELEM_NUM
+        area = ELEM_AREA if elem_area is None else elem_area
+        default_bottom = ZBAR_N_BOTTOM_NEG
+    else:
+        lon_deg, lat_deg, tri = (np.asarray(a) for a in geometry)
+        n2e, n2e_num = _nod_in_elem(tri, lon_deg.size)
+        area = (np.ones(tri.shape[0]) if elem_area is None else elem_area)
+        default_bottom = np.full(lon_deg.size, -abs(zbar_neg[-1]))
+    area = np.asarray(area, dtype=np.float64)
+    bottom_neg = (default_bottom if zbar_n_bottom is None
                   else np.asarray(zbar_n_bottom, dtype=np.float64))
     levels = dict(nlevels=nlevels, ulevels=ulevels,
                   zbar_e_bottom=zbar_e_bottom, nlevels_nod2D=nlevels_nod2D)
     if convention == "core2":
         if nodes_units is not None and "degree" in nodes_units.lower():
-            packed = np.stack([LON_DEG, LAT_DEG])      # already degrees
+            packed = np.stack([lon_deg, lat_deg])      # already degrees
         else:
-            packed = np.stack([LON_DEG * DEG2RAD, LAT_DEG * DEG2RAD])
+            packed = np.stack([lon_deg * DEG2RAD, lat_deg * DEG2RAD])
         nodes_var = (("n2", "nod_n"), packed)
         ds = xr.Dataset(
             {
                 # packed coords, dims (n2, nod_n) — radians unless labelled
                 "nodes": nodes_var,
-                "elem": (("n3", "elem_n"), TRI_1BASED.T),          # (3, E)
+                "elem": (("n3", "elem_n"), tri.T),          # (3, E)
                 "zbar": (("nl",), zbar_neg),                        # negative
-                "elem_area": (("elem_n",), ELEM_AREA),
+                "elem_area": (("elem_n",), area),
                 "zbar_n_bottom": (("nod_n",), bottom_neg),
-                "nod_in_elem2D": (("N", "nod_n"), NOD_IN_ELEM_1BASED.T),
-                "nod_in_elem2D_num": (("nod_n",), NOD_IN_ELEM_NUM),
+                "nod_in_elem2D": (("N", "nod_n"), n2e.T),
+                "nod_in_elem2D_num": (("nod_n",), n2e_num),
                 **_level_vars("elem_n", "nod_n", **levels),
             }
         )
@@ -110,32 +171,32 @@ def write_meshdiag(path: Path, convention: str, *,
     elif convention == "comp":
         ds = xr.Dataset(
             {
-                "lon": (("nod2",), LON_DEG),
-                "lat": (("nod2",), LAT_DEG),
-                "elements": (("n3", "elem"), TRI_1BASED.T),         # (3, E)
+                "lon": (("nod2",), lon_deg),
+                "lat": (("nod2",), lat_deg),
+                "elements": (("n3", "elem"), tri.T),         # (3, E)
                 "nz": (("nz",), np.abs(zbar_neg)),                  # positive
-                "elem_area": (("elem",), ELEM_AREA),
+                "elem_area": (("elem",), area),
                 "zbar_n_bottom": (("nod2",), np.abs(bottom_neg)),
-                "nod_in_elem2D": (("N", "nod2"), NOD_IN_ELEM_1BASED.T),
-                "nod_in_elem2D_num": (("nod2",), NOD_IN_ELEM_NUM),
+                "nod_in_elem2D": (("N", "nod2"), n2e.T),
+                "nod_in_elem2D_num": (("nod2",), n2e_num),
                 **_level_vars("elem", "nod2", **levels),
             }
         )
     elif convention == "ugrid":
         if start_index is None:
-            conn = TRI_1BASED                          # 1-based, no attr
+            conn = tri                                 # 1-based, no attr
         else:
-            conn = (TRI_1BASED - 1 + int(start_index)).astype(np.int32)
+            conn = (tri - 1 + int(start_index)).astype(np.int32)
         ds = xr.Dataset(
             {
-                "lon": (("nod2",), LON_DEG),
-                "lat": (("nod2",), LAT_DEG),
+                "lon": (("nod2",), lon_deg),
+                "lat": (("nod2",), lat_deg),
                 "face_nodes": (("elem", "n3"), conn),               # (E, 3)
                 "nz": (("nz",), np.abs(zbar_neg)),
-                "elem_area": (("elem",), ELEM_AREA),
+                "elem_area": (("elem",), area),
                 "zbar_n_bottom": (("nod2",), np.abs(bottom_neg)),
-                "nod_in_elem2D": (("nod2", "N"), NOD_IN_ELEM_1BASED),
-                "nod_in_elem2D_num": (("nod2",), NOD_IN_ELEM_NUM),
+                "nod_in_elem2D": (("nod2", "N"), n2e),
+                "nod_in_elem2D_num": (("nod2",), n2e_num),
                 **_level_vars("elem", "nod2", **levels),
             }
         )
@@ -203,7 +264,9 @@ def write_multiyear(dirpath: Path, var: str, years_lengths: dict[int, int],
                     *, node_layout: bool = True, vertical: str | None = "nz1",
                     units_years: dict[int, int] | None = None,
                     values: Callable[[int, int], np.ndarray] | None = None,
-                    continuous_time: bool = False):
+                    continuous_time: bool = False,
+                    n_space: int | None = None, n_levels: int | None = None,
+                    dtype=np.float32):
     """Write <var>.fesom.<year>.nc files with per-file 'seconds since <year>'.
 
     years_lengths: {1958: 3, 1959: 3, 1960: 4} -> n time records per file.
@@ -219,10 +282,15 @@ def write_multiyear(dirpath: Path, var: str, years_lengths: dict[int, int],
         (a file's first record is one day after the previous file's last),
         all files counting from the first year's 1 January; default: each
         file counts its records from its own year's 1 January.
+    n_space, n_levels: optional sizes for another mesh than the 4-node
+        square (nodes or elements by ``node_layout``; level interfaces, so
+        ``'nz1'`` has ``n_levels - 1`` layers); default 4 nodes / 2
+        elements and 3 interfaces.
+    dtype: the stored dtype (default float32, as FESOM2 writes it).
     """
-    nod = 4
     space_dim = "nod2" if node_layout else "elem"
-    nspace = 4 if node_layout else 2
+    nspace = n_space if n_space is not None else (4 if node_layout else 2)
+    n_int = 3 if n_levels is None else int(n_levels)
     units_years = units_years or {}
     first_year = min(years_lengths) if years_lengths else None
     day0 = 0          # records before this file (continuous_time only)
@@ -236,21 +304,22 @@ def write_multiyear(dirpath: Path, var: str, years_lengths: dict[int, int],
             day0 += ntime
         coords = {"time": ("time", secs)}
         if vertical == "nz1":
-            shape = (ntime, 2, nspace); dims = ("time", "nz1", space_dim)
+            shape = (ntime, n_int - 1, nspace)
+            dims = ("time", "nz1", space_dim)
         elif vertical == "nz":
-            shape = (ntime, 3, nspace); dims = ("time", "nz", space_dim)
+            shape = (ntime, n_int, nspace); dims = ("time", "nz", space_dim)
         else:
             shape = (ntime, nspace); dims = ("time", space_dim)
-        data = np.full(shape, 0.1, dtype=np.float32)
+        data = np.full(shape, 0.1, dtype=dtype)
         if values is not None:
             if len(shape) == 3:
                 for k in range(shape[1]):
                     data[:, k, :] = np.broadcast_to(
-                        np.asarray(values(year, k), dtype=np.float32),
+                        np.asarray(values(year, k), dtype=dtype),
                         (ntime, nspace))
             else:
                 data[:] = np.broadcast_to(
-                    np.asarray(values(year, 0), dtype=np.float32),
+                    np.asarray(values(year, 0), dtype=dtype),
                     (ntime, nspace))
         ds = xr.Dataset({var: (dims, data)}, coords=coords)
         units_year = units_years.get(

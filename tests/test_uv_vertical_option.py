@@ -771,9 +771,24 @@ class TestRefusalsAtEachSite:
             ModeConfig(Fdrift2D=False, Fdrift3D=True, uv_vertical="level")
         assert ModeConfig().uv_vertical == "layer"
 
-    def test_uv_interp_after_load_mesh(self, tmp_path):
+    def test_uv_interp_table(self, tmp_path):
+        # after load_mesh the layout is not known yet: every interpolator
+        # of the table passes (node: barycentric; element: leastsq,
+        # edge_leastsq, barycentric), another one is refused naming them
+        mesh = _zmesh()
+        for name in ("leastsq", "edge_leastsq", "barycentric"):
+            tracking._check_uv_vertical_option(
+                "linear", fdrift3d=True, mesh=mesh, uv_interp=name,
+                reader=None)
+        with pytest.raises(ValueError,
+                           match="node layout: 'barycentric'; element "
+                                 "layout: 'leastsq', 'edge_leastsq', "
+                                 "'barycentric'"):
+            tracking._check_uv_vertical_option(
+                "linear", fdrift3d=True, mesh=mesh, uv_interp="cubic",
+                reader=None)
+        # node data with leastsq: refused at the pre-writer probe
         cfg = _fesom2_cfg(tmp_path, uv_interp="leastsq")
-        cfg.data.ncinput = str(tmp_path / "missing")   # never opened
         with pytest.raises(ValueError, match="barycentric"):
             _run(cfg)
         assert not Path(cfg.data.output_path).exists()
@@ -827,26 +842,57 @@ class TestRefusalsAtEachSite:
         old = trk.get_reader
         trk.get_reader = lambda name: Probing
         try:
-            with pytest.raises(ValueError, match="node layout"):
+            # element u/v on a mesh diagnostic without nlevels or
+            # zbar_e_bottom: refused before the writer, naming the mesh
+            with pytest.raises(ValueError,
+                               match="neither nlevels nor zbar_e_bottom"):
                 _run(cfg)
+            assert probes == ["element"]
+            assert not Path(cfg.data.output_path).exists()
+            # with the element bottoms the probe accepts element u/v
+            synth.write_meshdiag(Path(cfg.mesh.meshpath), "ugrid",
+                                 nlevels=[3, 3])
+            _run(cfg)
         finally:
             trk.get_reader = old
-        assert probes == ["element"]
-        assert not Path(cfg.data.output_path).exists()
+        assert probes[1:2] == ["element"]
+        assert _global_attrs(cfg.data.output_path)["uv_vertical"] == "linear"
 
     def test_step0_backstop(self):
-        tracking._validate_uv_compat("element", "barycentric")
-        tracking._validate_uv_compat("node", "barycentric",
-                                     uv_vertical_option="linear")
-        with pytest.raises(ValueError, match="node layout"):
-            tracking._validate_uv_compat("element", "barycentric",
+        # the layout table: node -> barycentric; element -> leastsq,
+        # edge_leastsq, barycentric (option on and off alike)
+        for option in ("layer", "linear"):
+            tracking._validate_uv_compat("node", "barycentric",
+                                         uv_vertical_option=option)
+            for name in ("leastsq", "edge_leastsq", "barycentric"):
+                tracking._validate_uv_compat("element", name,
+                                             uv_vertical_option=option)
+            for name in ("leastsq", "edge_leastsq"):
+                with pytest.raises(ValueError, match="barycentric"):
+                    tracking._validate_uv_compat("node", name,
+                                                 uv_vertical_option=option)
+        with pytest.raises(ValueError, match="uv_layout='pixel'"):
+            tracking._validate_uv_compat("pixel", "leastsq",
                                          uv_vertical_option="linear")
+        # with the mesh: element u/v need its element bottoms
+        with pytest.raises(ValueError,
+                           match="neither nlevels nor zbar_e_bottom"):
+            tracking._validate_uv_compat("element", "leastsq",
+                                         uv_vertical_option="linear",
+                                         mesh=_zmesh())
+        tracking._validate_uv_compat("element", "leastsq",
+                                     uv_vertical_option="layer",
+                                     mesh=_zmesh())
 
     def test_direct_call_refused_before_any_read(self, tmp_path):
+        # node u/v with leastsq: the reader's layout probe refuses it at the
+        # entry, before any read
         cfg = _fesom2_cfg(tmp_path)
         reader, mesh, ds = _fesom2_env(cfg)
 
         class Never:
+            probe_uv_layout = staticmethod(reader.probe_uv_layout)
+
             def read_velocities(self, *a, **k):
                 raise AssertionError("read before the refusal")
         numerics = NumericsConfig(dt=DT, integrator="euler",
@@ -878,7 +924,9 @@ class TestRefusalsAtEachSite:
             mark(level, "linear", None, record="r")
         with pytest.raises(ValueError, match="3-D"):
             mark(flat, "linear", None, record="r")
-        with pytest.raises(ValueError, match="node layout"):
+        # element u/v: a mesh without the element bottoms is refused
+        with pytest.raises(ValueError,
+                           match="neither nlevels nor zbar_e_bottom"):
             mark(elem, "linear", None, record="r")
         with pytest.raises(ValueError, match="uv_vertical"):
             mark(layer, "cubic", None, record="r")

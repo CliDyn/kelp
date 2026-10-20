@@ -15,7 +15,7 @@ placement x time_dir x elem_search x Numba on / off   the gate allows, else
 euler x the same (PCHIP configured)                   rule, LINEAR in time
 rk2 fused: anchor heal, terminal splice               rule
 rk45 x depth-linear                                   refused
-uv_interp leastsq / edge_leastsq x depth-linear       refused
+uv_interp leastsq / edge_leastsq x depth-linear       refused on node u/v
 split uniform Kh + az_const diffusion                 rule (advection part)
 em / m1 in split, combined, split_rk (3-D)            refused
 beaching with resuspension                            rule for alive
@@ -711,18 +711,18 @@ def test_non_barycentric_uv_interp_refused(placement, uv_interp, integrator):
 @pytest.mark.parametrize("uv_interp", ["leastsq", "edge_leastsq"])
 def test_non_barycentric_uv_interp_refused_by_the_option(tmp_path,
                                                          uv_interp):
-    """The option with a non-barycentric interpolator is refused right
-    after the mesh is loaded (the data are never opened, no output)."""
+    """The option with a non-barycentric interpolator on node-layout u/v
+    is refused at the pre-writer layout probe (no output).  Right after the
+    mesh is loaded the layout is not known yet, and both interpolators are
+    in the layout table (element layout)."""
     o = _option()
     from kelp import tracking
-    with pytest.raises(ValueError, match="needs numerics.uv_interp: "
-                                         "'barycentric'"):
-        tracking._check_uv_vertical_option(
-            "linear", fdrift3d=True, mesh=o._zmesh(), uv_interp=uv_interp,
-            reader=None)
+    tracking._check_uv_vertical_option(
+        "linear", fdrift3d=True, mesh=o._zmesh(), uv_interp=uv_interp,
+        reader=None)
     cfg = o._fesom2_cfg(tmp_path, uv_interp=uv_interp)
-    cfg.data.ncinput = str(tmp_path / "missing")
-    with pytest.raises(ValueError, match="barycentric"):
+    with pytest.raises(ValueError, match="node-based velocities .* require "
+                                         "numerics.uv_interp: 'barycentric'"):
         o._run(cfg)
     assert not Path(cfg.data.output_path).exists()
 

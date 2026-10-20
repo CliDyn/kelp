@@ -585,8 +585,10 @@ def _check_components(vel, dp: DepthPoints, placement: str, record: str,
 
 def _layout_of(vel) -> str:
     """The table layout of ``vel``: its ``uv_layout``; a field-like object
-    without one counts as node layout (a reader's raw-record check)."""
-    return getattr(vel, "uv_layout", "node")
+    without one counts as element layout, the default of
+    :class:`~kelp.core.io.VelocityField` (a reader's raw-record check
+    states its layout)."""
+    return getattr(vel, "uv_layout", "element")
 
 
 def check_depth_linear_record(vel, mesh: Mesh, *, record: str = "") -> None:
@@ -612,7 +614,7 @@ def check_depth_linear_record(vel, mesh: Mesh, *, record: str = "") -> None:
         A ``"level"`` or ``"layer_linear"`` field with u/v of shape
         ``(M, C)`` (``M`` = the table's points, ``C`` = mesh nodes for
         ``uv_layout="node"``, mesh elements for ``"element"``).  A
-        field-like object without ``uv_layout`` counts as node layout.
+        field-like object without ``uv_layout`` counts as element layout.
     mesh : Mesh
         The z-level mesh the field is evaluated on.
     record : str, optional

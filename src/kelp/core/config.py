@@ -46,10 +46,12 @@ class ModeConfig:
     # Vertical rule for layer-centred horizontal velocity (3-D only):
     # "layer" = piecewise constant per layer (the default), "linear" =
     # linear in depth between the layer centres, constant above the first
-    # centre and below a column's last wet centre.  Node-layout u/v on a
-    # z-level mesh with numerics.uv_interp: barycentric only (FESOM2
-    # unod/vnod, HEALPix dual geometry); the output attribute
-    # ``uv_vertical = "linear"`` records that it was on.
+    # centre and below a column's last wet centre.  On a z-level mesh:
+    # node-layout u/v with numerics.uv_interp: barycentric (FESOM2
+    # unod/vnod, HEALPix dual geometry), element-layout u/v with leastsq,
+    # edge_leastsq or barycentric (FESOM2 u/v; the mesh diagnostic must
+    # hold nlevels or zbar_e_bottom, no ice-shelf cavities); the output
+    # attribute ``uv_vertical = "linear"`` records that it was on.
     uv_vertical: str = "layer"
 
     def __post_init__(self) -> None:
