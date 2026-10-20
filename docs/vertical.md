@@ -196,7 +196,9 @@ bed, which could speed it up. One rule, applied by each interpolator the way it
 treats the coast:
 
 - node `barycentric`: a dry vertex is left out of the barycentric sum and the
-  weights of the wet vertices are renormalised to sum to one;
+  weights of the wet vertices are renormalised to sum to one (a negative
+  weight — a particle just outside an edge, which containment accepts —
+  counted as zero, so the result stays between the wet vertex values);
 - `leastsq`: a dry element is left out of the plane fit over the nearest
   node's ring, as the elements beyond a coast are absent from a coastal node's
   ring;
@@ -207,7 +209,8 @@ treats the coast:
   as the coast does;
 - element `barycentric`: a dry element is left out of each vertex's
   area-weighted mean; a vertex with no wet element is left out and the
-  barycentric weights of the other vertices are renormalised.
+  barycentric weights of the other vertices are renormalised (a negative
+  one counted as zero, as for nodes).
 
 With every member wet the result is exactly the layer interpolator's
 arithmetic (metric, summation order, singular guard) on the depth-linear

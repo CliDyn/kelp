@@ -38,7 +38,9 @@ from ``zbar_e_bottom`` (partial beds included), node beds the deepest of
 their elements unless set otherwise, float64 daily records, ``w`` zero
 unless stated.
 
-Mutation pass (commit 204a8b4 with this module, 2026-10-20, every row).
+Mutation pass (commit 204a8b4 with this module, 2026-10-20, every row;
+the depth_constant cells of M2, M6 and M8 again on b03afac, the same day,
+after the field's constants moved into one binade: the same cells red).
 Each defect went into a full copy of the checkout, one at a time, with a
 fresh Numba cache, and this module ran against it; the unmutated copy
 passed 44 of 44, the sources before the element work (28b20c9) failed 37
@@ -56,7 +58,7 @@ M1     linear_in_depth_exact 18,    ``uv_at`` weights swapped -> linear
                                     blends in line, not through ``uv_at``)
 M2     depth_constant 12,           ``uv_wet``: ``<=`` -> ``<`` -> the
        profile 4                    particle at its members' bed loses them
-                                    all: 0.04 .. 0.09 deg off the layer
+                                    all: 0.014 .. 0.040 deg off the layer
                                     run; the profile's bed point reads a
                                     fallback (linear ratios 0.93 .. 1.17)
 M3     trench[leastsq]              a dry ring element kept in the
@@ -75,8 +77,8 @@ M7     linear_in_depth_exact        the fused Euler twin reads the layer
        [element-leastsq-euler-w0]   row -> the layer answer, 3.6 % off
 M8     depth_constant 12            ``bed = lower[last]`` -> the particle
                                     between a partial bed's last level and
-                                    the bed loses every member: 0.01 ..
-                                    0.08 deg off the layer run
+                                    the bed loses every member: 0.008 ..
+                                    0.025 deg off the layer run
 M9     linear_in_depth_exact 20,    ``uv_bracket`` reads the nearest
        profile 4, trajectory 4      centre (the layer path's values) ->
                                     1.1 .. 3.6 % off, ratios 1.95 .. 2.00
@@ -279,9 +281,13 @@ CONST_SEEDS = [
 ]
 
 #: ulp of max|c| allowed between two velocities of the same position: the
-#: plane fits 8, element barycentric 4, node barycentric 2
+#: plane fits 8, element barycentric 4, node barycentric 2 (``max|c|`` of
+#: the stencil's members; every constant lies in one binade, so its ulp is
+#: that of any stencil)
 VEL_ULP = {"leastsq": 8, "edge_leastsq": 8, "barycentric-element": 4,
            "barycentric-node": 2}
+#: the binade of every constant of the depth-constant field (m/s)
+C_BINADE = (2.0 ** -5, 2.0 ** -4)
 
 
 def _quadrant_beds(lo, la):
@@ -292,13 +298,14 @@ def _quadrant_beds(lo, la):
 
 def _const_field(mesh, layout, bed, n_rec):
     """Per-column constants (vary from column to column and in time), the
-    same at every usable point of a column, NaN below it."""
+    same at every usable point of a column, NaN below it; u and v within
+    ``C_BINADE`` (0.032 .. 0.062 m/s over six records)."""
     n = mesh.n_nodes if layout == "node" else mesh.n_elements
     j = np.arange(n, dtype=np.float64)
-    cu = 0.05 + 0.03 * np.sin(1.7 * j + 0.3)
-    cv = 0.03 + 0.03 * np.cos(1.3 * j)
-    du = 0.004 * np.cos(0.9 * j)
-    dv = -0.003 * np.sin(0.7 * j)
+    cu = 0.047 + 0.01 * np.sin(1.7 * j + 0.3)
+    cv = 0.047 + 0.01 * np.cos(1.3 * j)
+    du = 0.001 * np.cos(0.9 * j)
+    dv = -0.001 * np.sin(0.7 * j)
     last = _hand_last(LEVELS_C, bed)
     n_lay = len(LEVELS_C) - 1
     usable = np.arange(n_lay)[:, None] <= last[None, :]
@@ -317,13 +324,16 @@ def test_depth_constant_same_as_layer(tmp_path, layout, uv_interp,
     column's last usable point: the linear run equals the layer run — bit
     for bit for the particles whose members all read stored values, and
     elsewhere every position within 4 ulp (longitude: within one rounding
-    of the per-step wrap, which is coarser), every velocity of an equal
-    position within the interpolator's ulp bound of ``max|c|``.
+    of the per-step wrap, which is coarser); every step starts at the same
+    position in both runs, and every velocity is within the interpolator's
+    ulp bound of the stencil's ``max|c|`` (the constants lie in one binade,
+    so that ulp is the field's).
 
-    Measured (2026-10-20, 204a8b4): every position of every run bit for bit
-    the layer run's; 1 to 3 velocities per run differ, by at most 2 ulp of
-    ``max|c|`` (``leastsq``), 1.5 (``edge_leastsq``), 1 (element
-    ``barycentric``), 0.125 (node ``barycentric``)."""
+    Measured (2026-10-20, b03afac with these constants): every position of
+    every run bit for bit the layer run's; up to 4 of the 64 velocities of
+    a run differ, by at most 3 ulp of ``max|c|`` (``leastsq``), 2
+    (``edge_leastsq``), 2 (element ``barycentric``); node ``barycentric``
+    none."""
     elem_bed = _quadrant_beds(*_elem_centres(NC, NC))
     mesh_path = _write_mesh(tmp_path / "fesom.mesh.diag.nc", NC, NC,
                             LEVELS_C, elem_bed)
@@ -352,8 +362,9 @@ def test_depth_constant_same_as_layer(tmp_path, layout, uv_interp,
                          _wrap_quantum(lay["lon"]))
     assert np.all(np.abs(lin["lon"] - lay["lon"]) <= lon_tol), (
         np.abs(lin["lon"] - lay["lon"]) / _wrap_quantum(lay["lon"]))
-    # velocities at the step starts where both runs stand at the same place
-    # (record 0: the release)
+    # velocities at the step starts, where both runs stand at the same place
+    # (record 0: the release) — at every step: the velocities differ by far
+    # less than a position ulp moves in a step
     lon0 = np.array([s[0] for s in seeds])[:, None]
     lat0 = np.array([s[1] for s in seeds])[:, None]
     start_l = np.concatenate([lon0, lin["lon"][:, :-1]], axis=1)
@@ -361,14 +372,19 @@ def test_depth_constant_same_as_layer(tmp_path, layout, uv_interp,
     same = ((start_l == start_c)
             & (np.concatenate([lat0, lin["lat"][:, :-1]], axis=1)
                == np.concatenate([lat0, lay["lat"][:, :-1]], axis=1)))
-    assert same[:, 0].all()
+    assert same.all(), np.argwhere(~same)
     key = (uv_interp if uv_interp != "barycentric"
            else f"barycentric-{layout}")
-    cmax = max(np.nanmax(np.abs(u)), np.nanmax(np.abs(v)))
-    tol = VEL_ULP[key] * np.spacing(cmax)
+    # every constant in one binade: the ulp of any stencil's max|c|
+    ulp = np.spacing(C_BINADE[0])
+    for c in (u, v):
+        mag = np.abs(c[np.isfinite(c)])
+        assert C_BINADE[0] <= mag.min() and mag.max() < C_BINADE[1]
+        assert np.spacing(mag.min()) == np.spacing(mag.max()) == ulp
+    tol = VEL_ULP[key] * ulp
     for k in ("vel_u", "vel_v"):
-        gap = np.abs(lin[k] - lay[k])[same]
-        assert np.all(gap <= tol), (k, gap.max() / np.spacing(cmax))
+        gap = np.abs(lin[k] - lay[k])
+        assert np.all(gap <= tol), (k, gap.max() / ulp)
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +627,10 @@ def test_trajectory_convergence(tmp_path, layout, uv_interp):
         for mode in errs:
             ends = []
             for k, dt in enumerate((DT, DT / 2)):
+                # dt / 2 sub-steps the daily records, which needs
+                # temporal_interp (discrete mode refuses a dt other than
+                # the record step); both runs then take the time-aware
+                # RK4, on this steady field the classical one
                 t = _traj(_cfg(mesh_path, data, seeds, out=f"{mode}{k}.nc",
                                uv_interp=uv_interp, uv_vertical=mode,
                                n_steps=N_STEPS_T * (k + 1), dt=dt,

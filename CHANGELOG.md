@@ -78,7 +78,8 @@ the tracker was developed privately from 2026-06.
   previous section, which is in no release yet: a member of the
   interpolation stencil (a vertex, or an element) whose bed lies above the
   particle is a wall, like the coast. It is left out of the barycentric sum
-  (the weights of the wet vertices renormalised) or of the `leastsq` fit; for
+  (the weights of the wet vertices renormalised, a negative one — a particle
+  just outside an edge — counted as zero) or of the `leastsq` fit; for
   `edge_leastsq` its edge is a boundary edge with the `edge_leastsq_bc` ghost;
   for element `barycentric` it is left out of each vertex mean. Not a zero
   velocity, which would brake every particle along the wall, and no longer the
@@ -95,12 +96,13 @@ the tracker was developed privately from 2026-06.
 - Element bottoms: the FESOM2 reader reads `nlevels`, `zbar_e_bottom` and
   `ulevels` from the mesh diagnostic (NetCDF or Zarr) when present and
   declares each element's bed and last wet layer in `mesh.metadata`
-  (`elem_bed`, `uv_data_last_elem`; `elem_ulevels`). A level variable that is
-  not one finite value per element, or holds levels outside `1..K`, refuses the
-  mesh at load, in layer runs too. `utils/extract_fesom_region.py` keeps
-  `nlevels`, `ulevels`, `zbar_e_bottom` and `nlevels_nod2D` in the subset mesh
-  when the source has them; a subset written before must be extracted again to
-  use the option on element data.
+  (`elem_bed`, `uv_data_last_elem`; `elem_ulevels`). A level variable the
+  reader uses (`zbar_e_bottom`, else `nlevels`; and `ulevels`) that is not one
+  finite value per element, or holds levels outside `1..K`, refuses the mesh at
+  load, in layer runs too, naming the file and the fix.
+  `utils/extract_fesom_region.py` keeps `nlevels`, `ulevels`, `zbar_e_bottom`
+  and `nlevels_nod2D` in the subset mesh when the source has them; a subset
+  written before must be extracted again to use the option on element data.
 - Refused before the output file exists, naming the mesh file: element data on
   a mesh without element bottoms (a diagnostic with neither `nlevels` nor
   `zbar_e_bottom`, an ASCII mesh directory, an older subset), meshes with

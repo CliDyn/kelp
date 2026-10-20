@@ -28,8 +28,9 @@ element at its last usable point.
 ``_loop_interp_bary_elem_dl`` -> ``_interp_bary_elem_core_dl``): each vertex
 value is the area-weighted mean of its wet ring elements at the particle
 depth; a vertex without one is left out and the weights of the others
-renormalised (their equal-weight mean when those weights sum below
-1e-12); no vertex left, the containing element at its last usable point.
+renormalised, a negative one counted as zero (their equal-weight mean when
+those weights sum below 1e-12); no vertex left, the containing element at
+its last usable point.
 
 All synthetic: the 5x5-node test mesh of ``test_3d_analytical`` (32
 triangles, 0.5 deg spacing, centred at 5E 5N) with levels
@@ -163,8 +164,9 @@ def _run(mesh, vel, st, td=1.0, layer=0):
 
 def _values_at(mesh, vel, z):
     """Every element's depth-linear value at ``z`` (the kernel's read:
-    ``uv_bracket`` + ``uv_at``); NaN for an element whose column is empty
-    there is impossible (the read never passes ``last``)."""
+    ``uv_bracket`` + ``uv_at``, a NaN ``z`` read as ``+inf``), wet or dry;
+    never NaN, since the read never passes the element's last usable
+    point."""
     dp = _table(mesh)
     zq = np.inf if np.isnan(z) else z
     uz = np.empty(mesh.n_elements)
@@ -262,7 +264,6 @@ def test_depth_constant_matches_layer():
     pts, nds = _interior_points(rng, 6)
     between = sorted(set(rng.uniform(5.0, 125.0, size=14).tolist())
                      - set(P.tolist()))
-    worst = 0.0
     for td in (1.0, -1.0):
         for z_set, exact in ((DIRECT_Z, True), (between, False)):
             for z in z_set:
@@ -282,9 +283,7 @@ def test_depth_constant_matches_layer():
                     ulp_v = np.spacing(np.max(np.abs(CV[ring])))
                     du = abs(U[i] - Ur) / ulp_u
                     dv = abs(V[i] - Vr) / ulp_v
-                    worst = max(worst, du, dv)
                     assert du <= 8.0 and dv <= 8.0, (z, i, du, dv)
-    assert worst <= 8.0
 
 
 def test_linear_in_depth_exact():
@@ -1283,6 +1282,56 @@ def test_bary_elem_at_dry_vertex_equal_mean():
             uz, _ = _values_at(mesh, vel, z)
             wet_a = [m for m in _ring(mesh, others[0]) if m not in RING]
             assert abs(ua - np.mean(uz[wet_a])) > 1e-6
+
+
+def test_bary_elem_negative_weight_convex():
+    """A particle just outside an edge of its element (the edge walk's
+    pre-validated element 19 = vertices 12, 17, 16; containment accepts
+    weights down to -1e-6), vertex 12 without a wet element (its ring's
+    beds 30 m, particle at 45 m), vertex 16's weight -1e-7: the negative
+    wet weight counts as zero, so the value is vertex 17's mean, a convex
+    blend of the remaining vertex values — not the renormalised mixed-sign
+    sum, which leaves their hull (by 2e-7 of the difference at the middle
+    of the edge, by 3e4 of it next to vertex 12, where the two weights sum
+    to 3e-12).  With every element wet (at 30 m) the layer core with the
+    negative weight, bit for bit."""
+    bed = np.full(32, 150.0)
+    bed[RING] = 30.0
+    areas = np.random.default_rng(79).uniform(1.0e9, 5.0e9, size=32)
+    mesh = _mesh(bed, areas=areas)
+    vel = _linear_field(mesh)
+    tri = [int(nd) for nd in mesh.elem_nodes[19]]
+    assert tri == [CENTRE, 17, 16]
+    # (w12, w17, w16) = (., w17, -1e-7): lon = 5 + 5e-8,
+    # lat = 5 + (w17 + w16) / 2
+    pts = [(5.0 + 5.0e-8, 5.25), (5.0 + 5.0e-8, 5.0 + 1.5e-12)]
+    for x, y in pts:
+        lam = _lam(mesh, tri, x, y)
+        assert abs(lam[2] + 1.0e-7) < 1e-12 and lam[1] > 0.0, lam
+        assert lam[1] + lam[2] > 1e-12           # renormalised, not equal
+    elems = np.full(len(pts), 19, dtype=np.int32)
+    for td in (1.0, -1.0):
+        U, V, ok, _ = _run_bary(mesh, vel, _state(pts, 45.0), td,
+                                elems=elems)
+        assert ok.all()
+        assert _vertex_mean(mesh, vel, CENTRE, 45.0) is None
+        (u17, v17), (u16, v16) = (_vertex_mean(mesh, vel, nd, 45.0)
+                                  for nd in (17, 16))
+        for got, a, b in ((U, u16, u17), (V, v16, v17)):
+            assert abs(a - b) > 1e-3
+            ulp = 2.0 * np.spacing(max(abs(a), abs(b)))
+            assert np.all(np.abs(got - td * b) <= ulp), (td, got, b)
+            lo, hi = sorted((td * a, td * b))
+            assert np.all((got >= lo - ulp) & (got <= hi + ulp)), got
+    # every element wet: the layer core with the negative weight
+    U, V, ok, nn = _run_bary(mesh, vel, _state(pts, 30.0), elems=elems)
+    assert ok.all()
+    uz, vz = _values_at(mesh, vel, 30.0)
+    for i, (x, y) in enumerate(pts):
+        Ur, Vr, okr = _layer_bary(mesh, x, y, nn[i], 1.0, uz, vz, hint=19)
+        assert okr
+        assert_bitwise(np.array([U[i], V[i]]), np.array([Ur, Vr]),
+                       f"all wet i={i}")
 
 
 def test_bary_elem_all_rings_dry_reads_containing_element():

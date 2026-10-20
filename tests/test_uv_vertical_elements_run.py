@@ -7,7 +7,7 @@ direct entry points: the velocity cache marks each element record
 included), the output says ``uv_vertical = "linear"``, restarts resume bit
 for bit and refuse the other rule, a ``max_levels`` cut keeps every element
 wet down to its bed (reading its last kept point), and the diffusion
-compositions and multi-realization runs carry it.  Refused before the
+compositions and multi-realization runs keep it.  Refused before the
 writer: a mesh without the element bottoms (the mesh diagnostic has
 neither ``nlevels`` nor ``zbar_e_bottom``; an ASCII mesh directory) and a
 mesh with ice-shelf cavities (``ulevels > 1``).
@@ -133,11 +133,15 @@ def _hand_run(integrator, seeds, n_steps, *, dt=DT, t0=0.0,
 
 
 def _assert_metres(lon, lat, h_lon, h_lat, tol=1e-9):
-    """Every position within ``tol`` metres of the hand position."""
-    dx = (np.abs(lon - h_lon) * np.cos(h_lat * DEG2RAD)
-          * METERS_PER_DEG_LAT)
+    """Every position within ``tol`` metres of the hand position; the
+    longitude within ``tol`` and one rounding of the per-step wrap
+    ``((lon + 180) % 360) - 180`` (the spacing of ``lon + 180``, about
+    3.1e-9 m at 5E: coarser than ``tol``), which both sides apply."""
+    m_lon = np.cos(h_lat * DEG2RAD) * METERS_PER_DEG_LAT
+    dx = np.abs(lon - h_lon) * m_lon
     dy = np.abs(lat - h_lat) * METERS_PER_DEG_LAT
-    assert np.all(dx <= tol) and np.all(dy <= tol), (dx.max(), dy.max())
+    tol_x = tol + np.spacing(np.abs(h_lon) + 180.0) * m_lon
+    assert np.all(dx <= tol_x) and np.all(dy <= tol), (dx.max(), dy.max())
 
 
 def _node_beds(tri, elem_bed, n_nodes):
@@ -311,18 +315,26 @@ def test_run_tracking_linear_elements(tmp_path, uv_interp, integrator):
 @pytest.mark.parametrize("mode", ["lerp", "pchip"])
 @pytest.mark.parametrize("uv_interp", INTERPS)
 def test_temporal_interp_linear_elements(tmp_path, uv_interp, mode):
-    """Temporal interpolation, dt half a record, rk4: the stages blend the
-    records at their own times (linearly, or by PCHIP, which reproduces a
-    field linear in time); every position equals the hand rule to 1e-9 m."""
+    """Temporal interpolation, dt half a record, rk4, from record 1 over
+    four records (records 0..5 read: PCHIP has its four records in every
+    interval, so no step falls back to linear and nothing warns): the
+    stages blend the records at their own times (linearly, or by PCHIP,
+    which reproduces a field linear in time); every position equals the
+    hand rule to 1e-9 m (longitude: and one rounding of the wrap)."""
     env = _env(tmp_path)
     recon = "pchip" if mode == "pchip" else "linear"
     cfg = _cfg(env, integrator="rk4", uv_interp=uv_interp, dt=DT / 2,
-               n_steps=8, temporal_interp=True,
+               n_steps=8, start=1, temporal_interp=True,
                temporal_reconstruction=recon)
-    _run(cfg)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _run(cfg)
+    runtime = [str(w.message) for w in caught
+               if issubclass(w.category, RuntimeWarning)]
+    assert not runtime, runtime
     t = load_trajectories(cfg.data.output_path)
     assert (t["status"] == ParticleStatus.ALIVE).all()
-    h_lon, h_lat = _hand_run("rk4", SEEDS, 8, dt=DT / 2)
+    h_lon, h_lat = _hand_run("rk4", SEEDS, 8, dt=DT / 2, t0=1.0)
     _assert_metres(t["lon"], t["lat"], h_lon, h_lat)
 
 
@@ -538,7 +550,7 @@ def test_walk_equals_local_run(tmp_path, integrator, bc):
 def test_restart_with_option(tmp_path, uv_interp):
     """A run cut at a checkpoint and resumed under the option equals the
     continuous run bit for bit (positions, velocities, record times, the
-    final restart); the checkpoint carries ``"linear"`` and resuming it
+    final restart); the checkpoint records ``"linear"`` and resuming it
     without the option is refused."""
     env = _env(tmp_path, elem_bed=_wall_beds())
     reader, mesh, ds = _open(env)

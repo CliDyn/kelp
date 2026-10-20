@@ -132,12 +132,17 @@ def test_nlevels_as_float_accepted():
       "ulevels": np.array([1, 1], dtype=np.int32)}, ["'ulevels'", "(3,)"]),
 ])
 def test_malformed_levels_refused(variables, words):
+    """Each refusal names the mesh file, the variable, what is wrong, and
+    the fix."""
     with pytest.raises(ValueError) as err:
         _declare(variables, 3, meshpath="some/fesom.mesh.diag.nc")
     msg = str(err.value)
     assert "some/fesom.mesh.diag.nc" in msg
     for word in words:
         assert word in msg, msg
+    assert msg.endswith(
+        "; use the run's full fesom.mesh.diag.nc, or re-extract the region "
+        "with utils/extract_fesom_region.py"), msg
 
 
 # ---------------------------------------------------------------------------

@@ -1136,10 +1136,14 @@ def _check_depth_linear_entry(vel, mesh, uv_interp: str, integrator: str, *,
         return
     where = f"{integrator}_step"
     if integrator == "rk45":
+        # node layout needs barycentric too; element layout takes any of
+        # its interpolators
+        use = ("euler, rk2 or rk4 with uv_interp='barycentric'"
+               if getattr(vel, "uv_layout", "element") == "node"
+               else "euler, rk2 or rk4")
         _reject_depth_linear(
             vel, where, "is not supported by the rk45 integrator (2-D only "
-            "in this version); use euler, rk2 or rk4 with "
-            "uv_interp='barycentric'")
+            f"in this version); use {use}")
     if mesh.vertical_coord != "zlevel":
         _reject_depth_linear(
             vel, where, "needs a z-level mesh (vertical_coord 'zlevel'), "
@@ -1811,7 +1815,8 @@ def _fused_euler_step_3d_dl(
         V_out[i] = VV
 
         # W for EVERY alive particle, before the u/v verdict (as the
-        # layer kernel: the unfused path computes it with mask=alive)
+        # layer kernel: the unfused path computes it with mask=alive and
+        # it is also the vel_w diagnostic of a particle that dies here)
         if w_method == _W_LEASTSQ:
             WW, _ = _interp_w_leastsq_single(
                 lons[i], lats[i], z_particles[i], node_i,

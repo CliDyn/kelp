@@ -235,13 +235,12 @@ class VelocityField:
         depth), ``"level"`` (on the levels, ``(K, N)``, node layout,
         linear in depth) or ``"layer_linear"`` (layer centres
         ``(K-1, ·)``, node or element layout, evaluated linearly in
-        depth).  The
-        constructor checks a 3-D field's u rows against ``w`` (only when
-        ``u`` is 2-D and ``w`` is present), so a dropped or wrong flag
-        raises instead of mis-placing the data; a 2-D field (``u`` 1-D)
-        is always ``"layer"``.  ``lerp``, ``LazyLerpField``, the PCHIP
-        reconstruction and the shared cache carry it and refuse mixed
-        placements.
+        depth).  The constructor checks a 3-D field's u rows against
+        ``w`` (only when ``u`` is 2-D and ``w`` is present), so a dropped
+        or wrong flag raises instead of mis-placing the data; a 2-D field
+        (``u`` 1-D) is always ``"layer"``.  ``lerp``, ``LazyLerpField``,
+        the PCHIP reconstruction and the shared cache keep it and refuse
+        mixed placements.
 
     Notes
     -----

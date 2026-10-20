@@ -607,8 +607,10 @@ def test_entry_table():
     ``barycentric`` only; element layout with ``leastsq``, ``edge_leastsq``
     and ``barycentric`` (each accepted and record-checked) and nothing
     else; an unknown layout refused; rk45, a 2-D field and a sigma mesh
-    refused for element fields with every interpolator; element fields on
-    a mesh without the element bottoms refused by the record check."""
+    refused for element fields with every interpolator (the rk45 message
+    advises euler, rk2 or rk4; for a node field with
+    ``uv_interp='barycentric'``); element fields on a mesh without the
+    element bottoms refused by the record check."""
     chk = I._check_depth_linear_entry
     mesh = _mesh()
     # node layout: barycentric only
@@ -620,6 +622,11 @@ def test_entry_table():
             chk(node, mesh, other, "rk2")
     assert chk(node, mesh, "barycentric", "rk2") is None
     assert vu.is_checked(node, mesh)
+    with pytest.raises(ValueError, match=_PRE.format("rk45") + (
+            r"is not supported by the rk45 integrator \(2-D only in this "
+            r"version\); use euler, rk2 or rk4 with "
+            r"uv_interp='barycentric'$")):
+        chk(node, mesh, "barycentric", "rk45")
     # element layout: the three interpolators
     for interp in INTERPS:
         for name in ("euler", "rk2", "rk4"):
@@ -644,8 +651,12 @@ def test_entry_table():
     flat = VelocityField(u=el.u, v=el.v, eta=el.eta, w=None,
                          uv_layout="element", uv_vertical="layer_linear")
     for interp in INTERPS:
+        # the advice names the integrators that work, and no interpolator
+        # (every one in the element row works)
         with pytest.raises(ValueError, match=_PRE.format("rk45")
-                           + r"is not supported by the rk45 integrator"):
+                           + r"is not supported by the rk45 integrator "
+                             r"\(2-D only in this version\); use euler, "
+                             r"rk2 or rk4$"):
             chk(el, mesh, interp, "rk45")
         with pytest.raises(ValueError, match=_PRE.format("rk2")
                            + r"needs a z-level mesh \(vertical_coord "

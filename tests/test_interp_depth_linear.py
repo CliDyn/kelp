@@ -7,9 +7,9 @@ containment, weights and 2-ring fallback as the node-layout
 ``_interp_barycentric_core``, with each vertex value read linearly in depth
 between the bracketing data points of that vertex (clipped to
 ``p[0] .. p[last_i]``), and a vertex whose bed lies above the particle left
-out as a wall (the other weights renormalised; their equal-weight mean when
-those weights vanish; below every bed of the triangle the deepest vertex at
-its last point).  Every other u/v interpolator refuses a depth-linear field
+out as a wall (the other weights renormalised, a negative one counted as
+zero; their equal-weight mean when those weights vanish; below every bed of
+the triangle the deepest vertex at its last point).  Every other u/v interpolator refuses a depth-linear field
 at entry.
 
 All synthetic: the 3x3 test mesh of ``test_3d_analytical`` with levels
@@ -461,6 +461,66 @@ def test_dry_vertex_zero_weight_equal_mean(placement):
     want_v = np.mean([A_V + B_V * 20.0 + OFF_V[nd] for nd in others])
     assert _rel(U[0], want_u) < 1e-13, U
     assert _rel(V[0], want_v) < 1e-13, V
+
+
+def test_dry_vertex_negative_weight_convex():
+    """A particle just outside an edge of its element (the edge walk's
+    pre-validated element; containment accepts weights down to -1e-6):
+    triangle ``[1, 2, 4]`` (element 2), node 2 dry (bed 30 m, particle at
+    45 m), node 1's weight -1e-7.  The negative wet weight counts as zero,
+    so the value is node 4's, a convex blend of the wet vertices — not
+    ``(w1 u1 + w4 u4) / (w1 + w4)``, which leaves the hull of the wet
+    values (by 2e-7 of ``u4 - u1`` at the middle of the edge, by 3e4 of it
+    next to node 2, where ``w1 + w4`` is 3e-12).  With node 2 wet (at its
+    bed) the plain sum keeps the negative weight: the layer kernel's
+    arithmetic, bit for bit."""
+    depths = np.full(9, 200.0)
+    depths[2] = 30.0
+    mesh = _mesh(depths)
+    placement = "layer_linear"
+    vel = _field_varying(mesh, placement, column=(2, 1000.0))
+    dp = vu.depth_points(mesh, placement)
+    tri = (1, 2, 4)
+    assert [int(nd) for nd in mesh.elem_nodes[2]] == list(tri)
+    # (w1, w2, w4) = (-1e-7, ., w4): lon = 6 - (w1 + w4), lat = 4 + w4
+    pts = [(5.5, 4.5 + 1.0e-7), (6.0 - 3.0e-12, 4.0 + 1.0e-7 + 3.0e-12)]
+    for x, y in pts:
+        lam = _lam(mesh, tri, x, y)
+        assert abs(lam[0] + 1.0e-7) < 1e-12 and lam[2] > 0.0, lam
+        assert lam[0] + lam[2] > 1e-12           # renormalised, not equal
+    elems = np.full(len(pts), 2, dtype=np.int32)
+    zc = 35.0                                    # the wet vertices' last point
+    u1, u4 = (A_U + B_U * zc + OFF_U[nd] for nd in (1, 4))
+    v1, v4 = (A_V + B_V * zc + OFF_V[nd] for nd in (1, 4))
+    for td in (1.0, -1.0):
+        U, V, ok = _run(mesh, vel, _state(pts, 45.0), td, elems=elems)
+        assert ok.all()
+        for got, a, b in ((U, u1, u4), (V, v1, v4)):
+            ulp = 2.0 * np.spacing(max(abs(a), abs(b)))
+            assert np.all(np.abs(got - td * b) <= ulp), (td, got, b)
+            lo, hi = sorted((td * a, td * b))
+            assert np.all((got >= lo - ulp) & (got <= hi + ulp)), got
+    # node 2 wet at its bed: the layer kernel with the negative weight
+    st = _state(pts, 30.0)
+    nn = find_nearest_nodes(mesh, st.lon, st.lat)
+    U, V, ok = _run(mesh, vel, st, elems=elems)
+    assert ok.all()
+    n = mesh.n_nodes
+    row_u, row_v = np.empty(n), np.empty(n)
+    for nd in range(n):
+        k, a = vu.uv_bracket(dp.p, dp.last[nd], 30.0)
+        row_u[nd] = vu.uv_at(vel.u, nd, k, a)
+        row_v[nd] = vu.uv_at(vel.v, nd, k, a)
+    for i, (x, y) in enumerate(pts):
+        Ur, Vr, okr = ip._interp_barycentric_core(
+            x, y, int(nn[i]), 2, 1.0, ip.UV_LAYOUT_NODE,
+            mesh.node_to_elems, mesh.node_to_elems_count, mesh.elem_nodes,
+            mesh.nodes_lon, mesh.nodes_lat, np.empty(0, dtype=np.float64),
+            row_u, row_v, mesh.r_earth)
+        assert okr
+        assert_bitwise(np.array([U[i], V[i]]), np.array([Ur, Vr]),
+                       f"all wet i={i}")
+    assert abs(U[1]) > 100.0                     # node 2's 1000 m/s is in
 
 
 @pytest.mark.parametrize("placement", PLACEMENTS)

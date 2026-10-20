@@ -320,10 +320,12 @@ centroid-anchored projection, `_polygon_weights` — is the node-layout
 (`src/kelp/numerics/vertical_uv.py`). A vertex whose bed lies above the
 particle (`z > bed[nd]`, `bed` = `mesh.depth`; `uv_wet`) is a wall, left out
 of the sum like the coast, and the weights of the wet vertices are
-renormalised (`_dl_node_wall`): their equal-weight mean when those weights
-sum below 1e-12; with no vertex wet, the vertex with the largest bed (the
-first on ties) at its last usable point; with every vertex wet, the plain sum
-— the arithmetic of the layer kernel (`vertical.md` §2.1).
+renormalised (`_dl_node_wall`), a negative one (a particle just outside an
+edge, which containment accepts down to `-1e-6`) counted as zero so that the
+result stays a convex blend of the wet vertex values: their equal-weight mean
+when those weights sum below 1e-12; with no vertex wet, the vertex with the
+largest bed (the first on ties) at its last usable point; with every vertex
+wet, the plain sum — the arithmetic of the layer kernel (`vertical.md` §2.1).
 
 **Element layout** (`"layer_linear"`, FESOM2 `u`/`v`). Each interpolator has
 its own route, on the element table `depth_points(mesh, "layer_linear",
@@ -343,15 +345,17 @@ ring, ghosts and guard; the element `barycentric` containment, projection,
 `_polygon_weights` and area-weighted vertex mean — and leaves dry members out
 as `vertical.md` §2.1 describes: out of the `leastsq` fit, a boundary edge
 with the `edge_leastsq_bc` ghost for `edge_leastsq`, out of each vertex mean
-(and a vertex without a wet element out of the sum) for `barycentric`. The
-fallbacks share one helper, `_dl_elem_wet_mean`: the area-weighted mean of the
-wet elements of a list and, when none of them is wet, one given element (the
-containing element) read at `z`. `edge_leastsq` and element `barycentric`
-take the edge walk's pre-validated elements (`elems=`) as their layer twins
-do; `leastsq` needs no containing element except in its no-member-wet
-fallback, where it searches one (`_find_containing_element_local`). The fused
-3-D Euler kernel has a depth-linear twin, `_fused_euler_step_3d_dl`, which
-inlines `_interp_leastsq_core_dl` — bit for bit the unfused step. There is no
+(and a vertex without a wet element out of the sum, the weights of the others
+renormalised as for nodes, a negative one counted as zero) for `barycentric`.
+The fallbacks share one helper, `_dl_elem_wet_mean`: the area-weighted mean of
+the wet elements of a list and, when none of them is wet, one given element
+(the containing element) read at `z`; it also returns how many were wet.
+`edge_leastsq` and element `barycentric` take the edge walk's pre-validated
+elements (`elems=`) as their layer twins do; `leastsq` needs no containing
+element except in its no-member-wet fallback, where it searches one
+(`_find_containing_element_local`). The fused 3-D Euler kernel has a
+depth-linear twin, `_fused_euler_step_3d_dl`, which inlines
+`_interp_leastsq_core_dl` — bit for bit the unfused step. There is no
 fused element-layout RK2 or RK4 kernel in 3-D: their stages go through the
 vectorised interpolators above.
 

@@ -425,13 +425,17 @@ def _elem_level_metadata(get_var, sigma_abs, n_elem: int, *,
     ValueError
         A variable read here is not one value per element, has a missing
         or non-finite value, or ``nlevels`` / ``ulevels`` are not integer
-        levels ``1..K``.
+        levels ``1..K``; the message names the file, the variable and the
+        fix (the run's full ``fesom.mesh.diag.nc``, or a region extracted
+        again with ``utils/extract_fesom_region.py``).
     """
     sigma_abs = np.asarray(sigma_abs, dtype=np.float64)
     n_levels = sigma_abs.size
     if n_levels == 0:
         return {}
     where = f"mesh diagnostic {meshpath!r}" if meshpath else "mesh diagnostic"
+    fix = ("; use the run's full fesom.mesh.diag.nc, or re-extract the region "
+           "with utils/extract_fesom_region.py")
 
     def column(name):
         raw = get_var(name)
@@ -442,12 +446,13 @@ def _elem_level_metadata(get_var, sigma_abs, n_elem: int, *,
         if col.shape != (n_elem,):
             raise ValueError(
                 f"{where}: variable {name!r} has shape {col.shape}, expected "
-                f"({n_elem},), one value per element")
+                f"({n_elem},), one value per element{fix}")
         bad = np.flatnonzero(~np.isfinite(col))
         if bad.size:
             raise ValueError(
                 f"{where}: variable {name!r} has a missing or non-finite "
-                f"value at element {int(bad[0])} ({bad.size} elements in all)")
+                f"value at element {int(bad[0])} ({bad.size} elements in "
+                f"all){fix}")
         return col
 
     def levels(name):
@@ -461,7 +466,7 @@ def _elem_level_metadata(get_var, sigma_abs, n_elem: int, *,
             raise ValueError(
                 f"{where}: variable {name!r} must hold integer levels "
                 f"1..{n_levels} (1-based, as FESOM2 writes them, on a mesh "
-                f"of {n_levels} levels); element {e} has {col[e]:g}")
+                f"of {n_levels} levels); element {e} has {col[e]:g}{fix}")
         return col.astype(np.int32)
 
     bottom = column("zbar_e_bottom")

@@ -484,15 +484,18 @@ Points below `ℓ_c` are never read.
 
 A member is wet while `z <= d_c`, its physical bed (a node's `mesh.depth`, an
 element's declared bed). The wet members enter the interpolator of §1 with
-the values `f_c(z)`: node layout `U = time_dir · Σ_i λ_i f_i(z) / Σ_i λ_i`
-over the wet vertices (`Σ_i λ_i = 1` when every vertex is wet: the plain
-blend of §1.1); element layout the plane fit of §1 over the wet ring elements,
-the fit of §1.2 with a dry edge neighbour replaced by a boundary ghost, or the
-vertex blend of §1.1 over vertex means of the wet elements. A dry member is
-left out as the coast is; the fallbacks when the wet members cannot support the
-fit, or none is wet, are in `vertical.md` §2.1. In time-interpolated runs each
-stored value `f_{k,c}` is first blended in time (linear or PCHIP, §6), then
-this rule applies.
+the values `f_c(z)`: node layout `U = time_dir · Σ_i λ_i⁺ f_i(z) / Σ_i λ_i⁺`
+over the wet vertices, `λ_i⁺ = max(λ_i, 0)` when a vertex is dry (a particle
+just outside an edge, which containment accepts, has a slightly negative
+weight; the result stays between the wet values), `λ_i` itself when every
+vertex is wet (`Σ_i λ_i = 1`: the plain blend of §1.1); element layout the
+plane fit of §1 over the wet ring elements, the fit of §1.2 with a dry edge
+neighbour replaced by a boundary ghost, or the vertex blend of §1.1 over vertex
+means of the wet elements (a vertex without one left out, the same `λ⁺`). A
+dry member is left out as the coast is; the fallbacks when the wet members
+cannot support the fit, or none is wet, are in `vertical.md` §2.1. In
+time-interpolated runs each stored value `f_{k,c}` is first blended in time
+(linear or PCHIP, §6), then this rule applies.
 
 **Code:** `numerics.vertical_uv.depth_points` (`p`, `ℓ`, the bed), `uv_bracket`
 (`k`, `α`), `uv_at`, `uv_wet`; node layout

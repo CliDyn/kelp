@@ -838,7 +838,9 @@ def _dl_elem_wet_mean(members, n, zq, own, time_dir, p, last, bed,
     ``own < 0`` (no containing element, or none asked for) gives
     ``ok = False``.  Wet members whose areas sum to zero or less:
     ``ok = False``.  A NaN ``zq`` is read as ``+inf``: dry wherever the bed
-    is finite.
+    is finite.  The number of wet members is returned too, so a caller can
+    tell "none wet" from "wet areas summing to zero or less" without a
+    second scan.
 
     Parameters
     ----------
@@ -865,6 +867,8 @@ def _dl_elem_wet_mean(members, n, zq, own, time_dir, p, last, bed,
     -------
     U, V : float
     ok : bool
+    n_wet : int
+        The wet members among ``members[:n]``.
     """
     if np.isnan(zq):
         zq = np.inf
@@ -886,13 +890,14 @@ def _dl_elem_wet_mean(members, n, zq, own, time_dir, p, last, bed,
         den += A
     if n_wet == 0:
         if own < 0:
-            return 0.0, 0.0, False
+            return 0.0, 0.0, False, 0
         kb, ab = uv_bracket(p, last[own], zq)
         return (time_dir * uv_at(u_f, own, kb, ab),
-                time_dir * uv_at(v_f, own, kb, ab), True)
+                time_dir * uv_at(v_f, own, kb, ab), True, 0)
     if not den > 0.0:
-        return 0.0, 0.0, False
-    return time_dir * (num_u / den), time_dir * (num_v / den), True
+        return 0.0, 0.0, False, n_wet
+    return (time_dir * (num_u / den), time_dir * (num_v / den), True,
+            n_wet)
 
 
 @njit(cache=True)
@@ -963,18 +968,22 @@ def _interp_leastsq_core_dl(
         if uv_wet(bed, elem_ids[n], zq):
             n_wet += 1
     if n_wet == 0:
-        # below every bed of the ring: the containing element
+        # below every bed of the ring: the containing element, read at z
+        # (its last usable point, unless the 2-ring search found it
+        # outside the ring and wet)
         own, in_dom = _find_containing_element_local(
             xp, yp, node_idx, node_to_elems, node_to_elems_count,
             elem_nodes, nodes_lon, nodes_lat)
         if not in_dom:
             return 0.0, 0.0, False
-        return _dl_elem_wet_mean(elem_ids, count, zq, own, time_dir,
-                                 p, last, bed, elem_areas, u_f, v_f)
+        kb, ab = uv_bracket(p, last[own], zq)
+        return (time_dir * uv_at(u_f, own, kb, ab),
+                time_dir * uv_at(v_f, own, kb, ab), True)
     if n_wet < count and n_wet < 3:
         # too few wet elements for a plane
-        return _dl_elem_wet_mean(elem_ids, count, zq, -1, time_dir,
-                                 p, last, bed, elem_areas, u_f, v_f)
+        U, V, ok, _ = _dl_elem_wet_mean(elem_ids, count, zq, -1, time_dir,
+                                        p, last, bed, elem_areas, u_f, v_f)
+        return U, V, ok
 
     # -- the layer core's fit over the wet elements --
     z0 = np.cos(yp * DEG2RAD) * METERS_PER_DEG_LAT
@@ -1039,8 +1048,9 @@ def _interp_leastsq_core_dl(
         if n_wet == count:
             return 0.0, 0.0, False
         # a wall left a singular fit: the wet elements' area mean
-        return _dl_elem_wet_mean(elem_ids, count, zq, -1, time_dir,
-                                 p, last, bed, elem_areas, u_f, v_f)
+        U, V, ok, _ = _dl_elem_wet_mean(elem_ids, count, zq, -1, time_dir,
+                                        p, last, bed, elem_areas, u_f, v_f)
+        return U, V, ok
 
     inv = 1.0 / abs(det)
 
@@ -1664,10 +1674,13 @@ def _dl_node_wall(w, verts, nv, bed, zq):
     Returns ``(n_wet, den, k_deep)``:
 
     - ``n_wet == nv`` — every vertex wet: the caller's plain barycentric
-      sum, unchanged (``den``, ``k_deep`` unused);
+      sum, unchanged (``den``, ``k_deep`` unused; ``w`` untouched);
     - ``0 < n_wet < nv`` — the dry vertices are left out and the sum over
-      the wet ones is divided by ``den``: the sum of their weights, or,
-      when that sum is below 1e-12 (the particle on a dry vertex),
+      the wet ones is divided by ``den``: the sum of their weights, each
+      negative one first set to 0.0 IN ``w`` (containment accepts a
+      particle just outside an edge, weights down to ``_BARY_EPS``; a
+      mixed-sign renormalised sum would leave the hull of the wet values),
+      or, when that sum is below 1e-12 (the particle on a dry vertex),
       ``n_wet`` — the weights of the wet vertices are then set to 1.0 IN
       ``w`` (the equal-weight mean of the wet vertex values);
     - ``n_wet == 0`` — no vertex wet: ``k_deep`` is the position in
@@ -1675,11 +1688,9 @@ def _dl_node_wall(w, verts, nv, bed, zq):
       which the caller reads at its last usable point.
     """
     n_wet = 0
-    wsum = 0.0
     for k in range(nv):
         if uv_wet(bed, verts[k], zq):
             n_wet += 1
-            wsum += w[k]
     if n_wet == nv:
         return n_wet, 1.0, -1
     if n_wet == 0:
@@ -1688,6 +1699,13 @@ def _dl_node_wall(w, verts, nv, bed, zq):
             if bed[verts[k]] > bed[verts[k_deep]]:
                 k_deep = k
         return 0, 1.0, k_deep
+    # some vertex dry: the wet weights, a negative one counted as zero
+    wsum = 0.0
+    for k in range(nv):
+        if uv_wet(bed, verts[k], zq):
+            if w[k] < 0.0:
+                w[k] = 0.0
+            wsum += w[k]
     if wsum < 1e-12:
         for k in range(nv):
             if uv_wet(bed, verts[k], zq):
@@ -1715,13 +1733,14 @@ def _interp_barycentric_core_dl(xp, yp, z, nn_node, elem_hint, time_dir,
 
     Walls at depth (:func:`_dl_node_wall`): a vertex whose bed lies above
     ``z`` (``z > bed[nd]``) is dry and left out, as the coast is; the
-    weights of the wet vertices are renormalised (their equal-weight mean
-    when those weights sum below 1e-12).  Every vertex wet: the plain sum,
-    the arithmetic of the layer kernel.  No vertex wet (the particle below
-    every bed of the element): the vertex with the largest bed, first on
-    ties, at its last usable point.  A wet vertex below ``p[last[nd]]``
-    (a partial bottom layer, a ``max_levels`` cut, a declared prefix)
-    reads its last usable point.
+    weights of the wet vertices are renormalised, a negative one (a
+    particle just outside an edge) counted as zero (their equal-weight
+    mean when those weights sum below 1e-12).  Every vertex wet: the plain
+    sum, the arithmetic of the layer kernel (a negative weight kept).  No
+    vertex wet (the particle below every bed of the element): the vertex
+    with the largest bed, first on ties, at its last usable point.  A wet
+    vertex below ``p[last[nd]]`` (a partial bottom layer, a ``max_levels``
+    cut, a declared prefix) reads its last usable point.
 
     ``z`` is the particle depth (m, positive down, as ``state.z``).  A NaN
     ``z`` is read as ``+inf``: dry wherever the bed is finite, so the
@@ -2086,14 +2105,15 @@ def _interp_bary_elem_core_dl(xp, yp, z, nn_node, elem_hint, time_dir,
     Walls at depth: an element whose bed lies above ``z``
     (``z > bed[e]``) is dry and left out of each vertex mean, as elements
     beyond a coast are absent from a coastal vertex's ring.  A vertex with
-    no wet element is left out and the weights of the others renormalised
+    no wet element is left out and the weights of the others renormalised,
+    a negative one (a particle just outside an edge) counted as zero
     (their equal-weight mean when those weights sum below 1e-12: the
     particle on that vertex).  Every element wet: the layer kernel's
     arithmetic; every vertex with a wet element: the plain barycentric
-    sum.  No vertex left (the particle below every bed around the
-    element): the containing element, dry too, at its last usable point.
-    A vertex whose wet elements' areas sum to zero or less gives
-    ``ok = False``, as in the layer kernel.
+    sum (a negative weight kept).  No vertex left (the particle below
+    every bed around the element): the containing element, dry too, at its
+    last usable point.  A vertex whose wet elements' areas sum to zero or
+    less gives ``ok = False``, as in the layer kernel.
 
     ``z`` is the particle depth (m, positive down, as ``state.z``).  A NaN
     ``z`` is read as ``+inf``: dry wherever the bed is finite.
@@ -2153,32 +2173,37 @@ def _interp_bary_elem_core_dl(xp, yp, z, nn_node, elem_hint, time_dir,
     un = np.empty(nv); vn = np.empty(nv)
     wet = np.zeros(nv, dtype=np.bool_)
     n_wet = 0
-    wsum = 0.0
     for k in range(nv):
         nd = verts[k]
         cnt = int(node_to_elems_count[nd])
-        uk, vk, okk = _dl_elem_wet_mean(node_to_elems[nd], cnt, zq, -1,
-                                        1.0, p, last, bed, elem_areas,
-                                        u_f, v_f)
+        uk, vk, okk, n_e = _dl_elem_wet_mean(node_to_elems[nd], cnt, zq,
+                                             -1, 1.0, p, last, bed,
+                                             elem_areas, u_f, v_f)
         if not okk:
-            for j in range(cnt):
-                e = int(node_to_elems[nd, j])
-                if e >= 0 and uv_wet(bed, e, zq):
-                    # wet elements whose areas sum to <= 0: the layer
-                    # kernel's refusal
-                    return 0.0, 0.0, False
+            if n_e > 0:
+                # wet elements whose areas sum to <= 0: the layer
+                # kernel's refusal
+                return 0.0, 0.0, False
             continue          # no wet element: a wall at this depth
         un[k] = uk; vn[k] = vk
         wet[k] = True
         n_wet += 1
-        wsum += w[k]
     if n_wet == 0:
         # below every bed around the element: the containing element (in
         # every vertex ring, so dry too) at its last usable point
-        return _dl_elem_wet_mean(verts, 0, zq, elem_id, time_dir,
-                                 p, last, bed, elem_areas, u_f, v_f)
+        kb, ab = uv_bracket(p, last[elem_id], zq)
+        return (time_dir * uv_at(u_f, elem_id, kb, ab),
+                time_dir * uv_at(v_f, elem_id, kb, ab), True)
     den = 1.0
     if n_wet < nv:
+        # a vertex left out: the weights of the others, a negative one
+        # (a particle just outside an edge) counted as zero
+        wsum = 0.0
+        for k in range(nv):
+            if wet[k]:
+                if w[k] < 0.0:
+                    w[k] = 0.0
+                wsum += w[k]
         if wsum < 1e-12:
             # the particle on a left-out vertex: the equal-weight mean
             for k in range(nv):
@@ -2304,8 +2329,6 @@ def _interp_barycentric_dl(
             f"{getattr(vel.u, 'shape', None)}, v "
             f"{getattr(vel.v, 'shape', None)}")
     dp = depth_points(mesh, placement, layout)
-    areas = (build_elem_areas(mesh) if layout == "element"
-             else np.empty(0, dtype=np.float64))
 
     P = state.n_particles
     U = np.zeros(P, dtype=np.float64)
@@ -2320,6 +2343,7 @@ def _interp_barycentric_dl(
     u_f = vel.u
     v_f = vel.v
     if layout == "element":
+        areas = build_elem_areas(mesh)
         if HAS_NUMBA:
             _loop_interp_bary_elem_dl(
                 P, state.alive_mask, state.lon, state.lat, state.z,
@@ -2882,9 +2906,10 @@ def _interp_edge_leastsq_core_dl(
     if not uv_wet(bed, elem_id, zq):
         # the own element dry: its wet edge neighbours' area mean, no
         # ghosts; none wet, the own element at its last usable point
-        return _dl_elem_wet_mean(elem_neighbors[elem_id], nv, zq, elem_id,
-                                 time_dir, p, last, bed, elem_areas,
-                                 u_f, v_f)
+        U, V, ok, _ = _dl_elem_wet_mean(elem_neighbors[elem_id], nv, zq,
+                                        elem_id, time_dir, p, last, bed,
+                                        elem_areas, u_f, v_f)
+        return U, V, ok
 
     # -- the layer core's fit, a dry neighbour's edge a boundary edge --
     z0 = np.cos(yp * DEG2RAD) * METERS_PER_DEG_LAT
@@ -2982,8 +3007,9 @@ def _interp_edge_leastsq_core_dl(
         members[0] = elem_id
         for k in range(nv):
             members[k + 1] = elem_neighbors[elem_id, k]
-        return _dl_elem_wet_mean(members, nv + 1, zq, -1, time_dir,
-                                 p, last, bed, elem_areas, u_f, v_f)
+        U, V, ok, _ = _dl_elem_wet_mean(members, nv + 1, zq, -1, time_dir,
+                                        p, last, bed, elem_areas, u_f, v_f)
+        return U, V, ok
 
     inv = 1.0 / abs(det)
 
