@@ -337,8 +337,8 @@ def _hand(integrator, st, *, geo, rule=Rule(), sig=SIG_S, td=1.0, dt=DT,
             dlat = (d[0][1] + 2.0 * d[1][1] + 2.0 * d[2][1] + d[3][1]) / 6.0
             s_new = s0 + dt * (f[0] + 2.0 * f[1] + 2.0 * f[2] + f[3]) / 6.0
         xn, yn = x0 + dlon, y0 + dlat
-        he = col(xn, yn, t_end)
-        zn = _clip(s_new * he, 0.0, max(he - Z0B, 0.0))
+        h_end = col(xn, yn, t_end)
+        zn = _clip(s_new * h_end, 0.0, max(h_end - Z0B, 0.0))
         res.append((xn, yn, zn, u1, v1, reads))
     lon, lat, z, u1, v1 = (np.array([r[i] for r in res]) for i in range(5))
     reads = np.array([r[5] for r in res]).T              # (stage, particle)
