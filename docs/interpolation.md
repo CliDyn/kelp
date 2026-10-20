@@ -191,7 +191,8 @@ fit** over element centres (below), the default path; the
 **barycentric** containing-element vertex blend (§1.1); or the **edge-neighbor
 least-squares** fit over the containing element and its edge-sharing neighbors
 (§1.2, FESOM-style). All run in 2D and 3D (in
-3D each particle uses its own vertical layer to slice the field first). The
+3D each particle uses its own vertical layer to slice the field first, or,
+for a field linear in depth, reads each member at its depth, §1.3). The
 registry `numerics.interpolate.get_interpolator(name)` resolves the config name to
 the vectorised interpolator and `get_interpolator_single` to the single-particle
 twin (the single-point API for tests and direct callers; RK stage loops use the
@@ -453,34 +454,52 @@ vectorised wrapper `interp_edge_leastsq` (+ `_loop_interp_edge_lsq` /
 ### 1.3 Depth-linear `u`/`v` in the vertical (`mode.uv_vertical: linear`)
 
 By default a 3-D layer-centred `u`/`v` is piecewise constant in depth: every
-vertex reads the row of the particle's layer. A depth-linear field
-(`VelocityField.uv_vertical` `"layer_linear"` — what `mode.uv_vertical: linear`
-makes of layer data — or `"level"`) is evaluated by `barycentric` only (§1.1),
-each vertex `i` at the particle depth `z` (positive-down metres):
+member of the stencil (a vertex, or an element) reads the row of the
+particle's layer. A depth-linear field (`VelocityField.uv_vertical`
+`"layer_linear"` — what `mode.uv_vertical: linear` makes of layer data — or
+`"level"`) is evaluated by `barycentric` on node layout (§1.1) and by
+`leastsq`, `edge_leastsq` (§1.2) and `barycentric` on element layout, each
+member `c` (a vertex `i` or an element `e`) at the particle depth `z`
+(positive-down metres):
 
-$$ z_i = \max\big(p_0,\ \min(z,\ p_{\ell_i})\big), \qquad
-f_i(z) = (1-\alpha)\,f_{k,i} + \alpha\,f_{k+1,i}, \qquad
-\alpha = \frac{z_i - p_k}{p_{k+1} - p_k}, $$
+$$ z_c = \max\big(p_0,\ \min(z,\ p_{\ell_c})\big), \qquad
+f_c(z) = (1-\alpha)\,f_{k,c} + \alpha\,f_{k+1,c}, \qquad
+\alpha = \frac{z_c - p_k}{p_{k+1} - p_k}, $$
 
-with `p_k <= z_i < p_{k+1}`, and `f_i = f_{k,i}` read directly when `z_i` is on
+with `p_k <= z_c < p_{k+1}`, and `f_c = f_{k,c}` read directly when `z_c` is on
 a point or at an end (of two coincident points the deeper — except at
 the surface end: at or above `p_0` point 0 is read even when point 1
 coincides with it; a spacing `< 1e-12 m` reads `p_k`, the shallower). The data points `p` are the layer
 centres `(z_k + z_{k+1})/2` (`"layer_linear"`, `K-1` points) or the levels
-(`"level"`, `K` points), and `ℓ_i` is the node's last usable point,
+(`"level"`, `K` points, node layout only). `ℓ_c` is the column's last usable
+point: per node
 
 $$ \ell_i = \max\Big(0,\ \min\big(M-1,\ \max(\{k : \mathrm{lower}_k \le d_i\} \cup \{0\}),\ D_i\big)\Big), $$
 
 `lower_k = p_k` for levels, `z_{k+1}` (the layer's lower level) for layers, `d_i`
-the node's bed depth and `D_i` an optional reader declaration (`vertical.md`
-§2.1). The velocity is then the barycentric blend of the vertex values with the
-weights of §1.1, `U = time_dir · Σ_i λ_i f_i(z)`. Points below `ℓ_i` are never
-read. In time-interpolated runs each stored value `f_{k,i}` is first blended in
-time (linear or PCHIP, §6), then this rule applies.
+the node's bed depth and `D_i` an optional reader declaration; per element
+`ℓ_e = max(0, min(M-1, D_e))`, `D_e` the element's last wet layer that the
+FESOM2 reader declares from the mesh diagnostic (`vertical.md` §2.1).
+Points below `ℓ_c` are never read.
 
-**Code:** `numerics.vertical_uv.depth_points` (`p`, `ℓ`), `uv_bracket`
-(`k`, `α`), `uv_at`; the vertex loop `numerics.interpolate._interp_barycentric_core_dl`
-and its fused time-blend twins `_interp_barycentric_core_{tinterp,pchip4}_dl`.
+A member is wet while `z <= d_c`, its physical bed (a node's `mesh.depth`, an
+element's declared bed). The wet members enter the interpolator of §1 with
+the values `f_c(z)`: node layout `U = time_dir · Σ_i λ_i f_i(z) / Σ_i λ_i`
+over the wet vertices (`Σ_i λ_i = 1` when every vertex is wet: the plain
+blend of §1.1); element layout the plane fit of §1 over the wet ring elements,
+the fit of §1.2 with a dry edge neighbour replaced by a boundary ghost, or the
+vertex blend of §1.1 over vertex means of the wet elements. A dry member is
+left out as the coast is; the fallbacks when the wet members cannot support the
+fit, or none is wet, are in `vertical.md` §2.1. In time-interpolated runs each
+stored value `f_{k,c}` is first blended in time (linear or PCHIP, §6), then
+this rule applies.
+
+**Code:** `numerics.vertical_uv.depth_points` (`p`, `ℓ`, the bed), `uv_bracket`
+(`k`, `α`), `uv_at`, `uv_wet`; node layout
+`numerics.interpolate._interp_barycentric_core_dl` and its fused time-blend
+twins `_interp_barycentric_core_{tinterp,pchip4}_dl`; element layout
+`_interp_leastsq_core_dl`, `_interp_edge_leastsq_core_dl`,
+`_interp_bary_elem_core_dl` and their shared fallback `_dl_elem_wet_mean`.
 
 ## 2. Vertical `W` profile — linear between interfaces
 

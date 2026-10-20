@@ -251,16 +251,18 @@ particle is in.
 | `sigma` | `(K,)` | vertical interfaces — physical depths for z-level meshes, sigma values for sigma meshes; empty for 2D |
 | `vertical_coord` | `"zlevel"` / `"sigma"` | selects the vertical-geometry backend |
 | `rotation_angles` | `(α,β,γ)` or `None` | the Euler frame the coordinates live in; `None` = geographic |
-| `metadata` | `dict` | reader and run facts: e.g. the u/v data prefix `uv_data_last` (int `(N,)`; HEALPix, and FESOM 1.4's last wet level per column), the uncut level table `sigma_full`; shared by shallow copies of the mesh |
+| `metadata` | `dict` | reader and run facts: e.g. the u/v data prefix `uv_data_last` (int `(N,)`; HEALPix, and FESOM 1.4's last wet level per column), the FESOM2 element bottoms `uv_data_last_elem` (int `(E,)`, each element's last wet layer) and `elem_bed` (float `(E,)`) from the mesh diagnostic's `nlevels` / `zbar_e_bottom` (with `elem_ulevels` when it has `ulevels`), the uncut level table `sigma_full`; shared by shallow copies of the mesh |
 
 The spatial search index (grid hash with its `(N, 3)` node coordinate table
 `_node_xyz`, plus a lazily built KD-tree) is attached to the mesh by
 `build_search` during `load_mesh`. Several other quantities —
 element areas, coastal-element flags, the depth-linear data-point tables
-(`_uv_depth_points`, valid while `sigma`, `depth` and `metadata["uv_data_last"]`
-are the objects they were built from — the declaration as the engine's own
-read-only snapshot, installed there at the build; replaced, never mutated, so
-a shallow copy never sees another's rebuild) — are computed lazily and cached on the
+(`_uv_depth_points`, one per placement and layout — node or element —, valid
+while `sigma`, the bed (`depth`; `metadata["elem_bed"]`) and the declaration
+(`metadata["uv_data_last"]`; `["uv_data_last_elem"]`) are the objects they
+were built from — the declaration as the engine's own read-only snapshot,
+installed there at the build; replaced, never mutated, so a shallow copy never
+sees another's rebuild) — are computed lazily and cached on the
 mesh the first time a subsystem needs them.
 
 ### `VelocityField` — one time snapshot of the flow
@@ -283,9 +285,10 @@ produced by `reader.read_velocities`.
 | `az` | `(K, N)` or `None` | vertical diffusivity at interfaces (`diffusion.var_az`) |
 
 The constructor checks the placement against the shapes: a 2-D field (`u`
-1-D) is always `"layer"`; `"level"` and `"layer_linear"` need node layout,
-with or without `w`; with `w` present, `"layer"`/`"layer_linear"` need
-`K-1` rows of `u` and `"level"` needs `K` (so FESOM2 u/v delivered on the
+1-D) is always `"layer"`; `"level"` needs node layout, with or without `w`,
+and `"layer_linear"` takes node or element layout; with `w` present,
+`"layer"`/`"layer_linear"` need `K-1` rows of `u` and `"level"` needs `K`
+(so FESOM2 u/v delivered on the
 levels raise instead of running on their first `K-1` rows). The private
 `_dl_token` is the depth-linear record check's stamp (the mesh table the field
 passed); every rebuild through the constructor drops it, and a blend keeps it

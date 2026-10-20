@@ -403,7 +403,10 @@ the integrator, whether the run is 3-D, the vertical coordinate, and
 `uv_interp`:
 
 - **Euler** uses the fused 3-D kernel for a z-level mesh when
-  `w_interp` is `nearest`/`leastsq` and `uv_interp == "leastsq"`; the fused 2-D
+  `w_interp` is `nearest`/`leastsq` and `uv_interp == "leastsq"` (a
+  depth-linear element field runs its twin `_fused_euler_step_3d_dl`, which
+  reads u/v at the particle's depth with the walls at depth of
+  `vertical.md` §2.1; bit for bit the unfused step); the fused 2-D
   kernel otherwise (the pair-aware tinterp kernel when the payload is a
   `LazyLerpField`, the steady kernel for a plain field); and the unfused path
   for barycentric/edge_leastsq/node-layout velocity or sigma 3-D. Its single
@@ -431,8 +434,10 @@ the integrator, whether the run is 3-D, the vertical coordinate, and
   `make_stage_vels_recon` and the interpolator registry.
 
 Before any of this, every step function runs `_check_depth_linear_entry`: a
-depth-linear field is refused for `rk45`, a sigma mesh, a field without `w`, a
-non-node layout and a `uv_interp` other than `barycentric`; the fields of one
+depth-linear field is refused for `rk45`, a sigma mesh, a field without `w`, and
+a layout and `uv_interp` outside the table of the interpolators that evaluate
+it (node layout: `barycentric`; element layout: `leastsq`, `edge_leastsq`,
+`barycentric`); the fields of one
 step (`vel`, `vel_next`, each PCHIP snapshot) must share one placement, and each
 passes the record check once. For a layer field it reads only the placement
 attributes, so layer runs keep their cost and their bits.

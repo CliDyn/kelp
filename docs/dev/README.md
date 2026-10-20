@@ -93,22 +93,29 @@ Paths are below `src/kelp/`.
 - **`numerics/interpolate.py`** — u/v interpolation registry: `leastsq` (default;
   least-squares fit centred on the particle), `barycentric`, `edge_leastsq`; Numba
   kernels with a Python fallback. Node-layout u/v need `barycentric` (the fail-fast
-  is in [tracking.md](tracking.md)); so does a depth-linear field (`uv_vertical`
-  `"level"`/`"layer_linear"`), which every other entry refuses. Notes:
-  [numerics.md](numerics.md); the time-blending kernel twins the fused integrators
-  call: [integrators.md](integrators.md).
+  is in [tracking.md](tracking.md)); so does a depth-linear node field
+  (`uv_vertical` `"level"`/`"layer_linear"`), while a depth-linear element field
+  (`"layer_linear"`, FESOM2 `u`/`v`) is read by `leastsq`, `edge_leastsq` and
+  `barycentric`; a stencil member dry at the particle depth is a wall. Trap: the
+  depth-linear cores copy blocks of the layer cores on purpose (no layer kernel
+  changed) — change both together (the list is in [numerics.md](numerics.md)).
+  Notes: [numerics.md](numerics.md); the time-blending kernel twins the fused
+  integrators call: [integrators.md](integrators.md).
 - **`numerics/vertical_uv.py`** — depth-linear u/v (2026-10): the data-point table
-  per mesh and placement (`depth_points`: the points and each node's last usable
-  point, cached on the mesh by object identity), the bracket and read (`uv_bracket`,
-  `uv_at`, njit) and the record check (`check_depth_linear_record`, `is_checked`:
-  u/v finite down to each node's last usable point; the field is stamped with the
-  table object). Trap: the cache and the stamp compare by IDENTITY — replace
-  `mesh.sigma`/`mesh.depth`/`mesh.metadata["uv_data_last"]`, never write them in
-  place (the engine snapshots the declaration at first use: writing into the
-  reader's array afterwards changes nothing). Notes: [numerics.md](numerics.md) (its own section and the interpolate.py
+  per mesh, placement and layout (`depth_points`: the points and, per node or per
+  element, the last usable point and the physical bed; the element table from the
+  FESOM2 reader's declaration `mesh.metadata["uv_data_last_elem"]` / `["elem_bed"]`;
+  cached on the mesh by object identity), the bracket, read and wet test
+  (`uv_bracket`, `uv_at`, `uv_wet`, njit) and the record check
+  (`check_depth_linear_record`, `is_checked`: u/v finite down to each column's last
+  usable point; the field is stamped with the table object). Trap: the cache and
+  the stamp compare by IDENTITY — replace `mesh.sigma`/`mesh.depth`/the
+  declarations/`mesh.metadata["elem_bed"]`, never write them in place (the engine
+  snapshots a declaration at first use: writing into the reader's array afterwards
+  changes nothing). Notes: [numerics.md](numerics.md) (its own section and the interpolate.py
   bullet); the entry gate and the fused twins in [integrators.md](integrators.md);
   the option and the cache marking in [tracking.md](tracking.md); the HEALPix
-  declaration in [readers.md](readers.md); `VelocityField.uv_vertical` and
+  declaration and the FESOM2 element bottoms in [readers.md](readers.md); `VelocityField.uv_vertical` and
   `_dl_token` in [core.md](core.md); topic doc [../vertical.md](../vertical.md) §2.1.
 - **`numerics/vertical.py`** — z-level layers, depth clamping and W interpolation
   (vertical first, then `nearest`, `leastsq`, `barycentric` or `idw` across the
@@ -168,7 +175,9 @@ Paths are below `src/kelp/`.
   `<var>.fesom.<year>.nc`; W is turned positive down by `resolve_w_sign` —
   negated by default, since FESOM2 writes it positive up, unless `mode.w_positive`
   or the file's CF metadata say otherwise (e.g. a reconstructed W, stamped
-  `positive="down"`). Notes: [readers.md](readers.md); the sign precedence and how
+  `positive="down"`); the element bottoms (`nlevels` / `zbar_e_bottom`, `ulevels`)
+  of a mesh diagnostic are declared in `mesh.metadata` for depth-linear element
+  u/v. Notes: [readers.md](readers.md); the sign precedence and how
   `mesh.rotation` is resolved in [config.md](config.md) (`ModeConfig.w_positive`,
   `MeshConfig.rotation`).
 - **`readers/fesom14/`** — FESOM 1.4 (a package: `reader.py` with `Fesom14Reader`;

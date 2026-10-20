@@ -178,9 +178,11 @@ coastal cells (ng5) — eta NaNs at wet nodes are zeroed silently.
 
 **Depth-linear u/v** (`mode.uv_vertical: linear`, 2026-10; the rule in
 `vertical.md` §2.1). The zeroing above is the layer path's no-flow-at-ground
-treatment; a depth-linear read instead clips every vertex to its own last
-usable point, so it must know where each column's data end and must never
-blend a zero the reader wrote into a profile. Two mechanisms see to that:
+treatment; a depth-linear read instead reads every wet vertex in its own
+column, down to the column's last usable point (a vertex whose bed lies above
+the particle is a wall, left out of the sum), so it must know where each
+column's data end and must never blend a zero the reader wrote into a
+profile. Two mechanisms see to that:
 
 - *The declaration.* A 3-D load on the dual geometry (`load_mesh` with a
   `mode_cfg` that has `Fdrift3D`) reads the leading finite count of `u` down

@@ -13,13 +13,14 @@ the tracker was developed privately from 2026-06.
   velocity is constant within each layer) or `linear` — linear in depth between
   the layer centres, the value of the first centre above it and of each column's
   last wet centre below it, never extrapolated; a partial bottom layer is never
-  read, and every vertex of the interpolation stencil follows its own bed
-  (`docs/vertical.md` §2.1). For 3-D z-level runs with node-layout u/v (FESOM2
+  read, and every vertex of the interpolation stencil is read in its own column
+  (`docs/vertical.md` §2.1; a vertex whose bed lies above the particle is a
+  wall: next section). For 3-D z-level runs with node-layout u/v (FESOM2
   `unod`/`vnod`, the HEALPix dual geometry), `numerics.uv_interp: barycentric`
   and `euler`, `rk2` or `rk4`, steady, linearly interpolated or PCHIP in time
-  (each stored value is blended in time first, then read in depth). Every other
-  combination is refused before the output file is written: 2-D runs, sigma
-  meshes, element-layout u/v, other u/v interpolators, `rk45`.
+  (each stored value is blended in time first, then read in depth). Refused before
+  the output file is written: 2-D runs, sigma meshes, other u/v interpolators,
+  `rk45` (FESOM2 element-layout u/v: next section).
 - Each record a run reads with the option is checked: a non-finite `u` or `v`
   above a column's last usable layer centre stops the run with the node, the
   layer and the record named. The HEALPix reader checks the raw record before it
@@ -59,7 +60,65 @@ the tracker was developed privately from 2026-06.
 - The cost of the option is measured by
   `benchmarks/single_node/depth_linear_cost.py`: +4 % per fused 3-D RK2
   step with a linear time blend, +8 % with PCHIP (128 threads, 1e5
-  particles).
+  particles; measured before the walls at depth of the next section).
+
+### Added — depth-linear u/v on FESOM2 element layout; walls at depth
+
+- `mode.uv_vertical: linear` works on FESOM2 element-layout u/v (`u`/`v` on
+  the triangles) with `numerics.uv_interp` `leastsq` (the default),
+  `edge_leastsq` (either `edge_leastsq_bc`) or `barycentric`, and `euler`,
+  `rk2` or `rk4`, steady, linearly interpolated or PCHIP in time, with
+  `elem_search: walk`, the split uniform and Az kicks, prefetch windows, the
+  shared snapshot cache, checkpoints and restarts, multi-realization runs and
+  `max_levels`. Each element is read linearly in depth between its own layer
+  centres, down to its own last wet layer (`docs/vertical.md` §2.1). The fused
+  3-D Euler kernel has a depth-linear twin (bit for bit the unfused step);
+  RK2 and RK4 on element data run unfused, as in layer mode.
+- **Walls at depth, for nodes too** — a change of the node-layout rule of the
+  previous section, which is in no release yet: a member of the
+  interpolation stencil (a vertex, or an element) whose bed lies above the
+  particle is a wall, like the coast. It is left out of the barycentric sum
+  (the weights of the wet vertices renormalised) or of the `leastsq` fit; for
+  `edge_leastsq` its edge is a boundary edge with the `edge_leastsq_bc` ghost;
+  for element `barycentric` it is left out of each vertex mean. Not a zero
+  velocity, which would brake every particle along the wall, and no longer the
+  shallow vertex's bottom value read below its bed (the earlier node rule),
+  which could speed a particle up. When the wet members cannot support the
+  interpolator, their area-weighted mean (`leastsq`, `edge_leastsq`) or the
+  equal-weight mean of the remaining vertices (`barycentric`, when their
+  weights vanish); when none is wet, the containing element (node layout: the
+  vertex with the largest bed) at its last usable point. With every member wet
+  the result is the layer interpolator's arithmetic. The velocity jumps where
+  a particle crosses the depth of a neighbour's bed, and near the bed the two
+  modes differ by more than the vertical interpolation: layer mode reads a
+  shallow neighbour's stored zeros, linear mode leaves that neighbour out.
+- Element bottoms: the FESOM2 reader reads `nlevels`, `zbar_e_bottom` and
+  `ulevels` from the mesh diagnostic (NetCDF or Zarr) when present and
+  declares each element's bed and last wet layer in `mesh.metadata`
+  (`elem_bed`, `uv_data_last_elem`; `elem_ulevels`). A level variable that is
+  not one finite value per element, or holds levels outside `1..K`, refuses the
+  mesh at load, in layer runs too. `utils/extract_fesom_region.py` keeps
+  `nlevels`, `ulevels`, `zbar_e_bottom` and `nlevels_nod2D` in the subset mesh
+  when the source has them; a subset written before must be extracted again to
+  use the option on element data.
+- Refused before the output file exists, naming the mesh file: element data on
+  a mesh without element bottoms (a diagnostic with neither `nlevels` nor
+  `zbar_e_bottom`, an ASCII mesh directory, an older subset), meshes with
+  ice-shelf cavities (`ulevels > 1` anywhere; not supported yet), and an
+  interpolator outside the table (node layout: `barycentric`; element layout:
+  `leastsq`, `edge_leastsq`, `barycentric`). Each element record a run reads is
+  checked like a node record: a non-finite `u` or `v` at a usable layer refuses
+  the run, naming the element, the layer and the record. Runs without the
+  option are bit for bit unchanged.
+- Engine: `VelocityField(uv_vertical="layer_linear")` accepts element layout;
+  `numerics.vertical_uv.depth_points(mesh, placement, layout)` builds one table
+  per placement and layout, with the physical bed of every column
+  (`DepthPoints.bed`, the wet test `uv_wet`). Analytic tests through the public
+  run path (`tests/test_depth_linear_analytic.py`, with a mutation pass): a
+  depth-constant field gives the layer answer, a field linear in depth is
+  exact, a smooth profile converges at second order in the layer thickness
+  (layer mode at first), and a flow along a trench keeps its speed at the
+  trench walls.
 
 ### Added — FESOM 1.4 reader (`mesh.type: fesom14`)
 

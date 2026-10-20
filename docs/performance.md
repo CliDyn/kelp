@@ -28,13 +28,16 @@ guard and the node coordinate table; the log is not kept in this repository). Pe
 rk2 ≈ **6.6 µs**, rk4 ≈ **22 µs**; `pchip` temporal reconstruction is **≈ free at scale** (a fixed
 ≈ 40 ms/step, swamped by N).
 
-**Depth-linear u/v** (`mode.uv_vertical: linear`, `vertical.md` §2.1): each vertex reads two
-data points instead of one, plus a bracket search over the node's column, and every record is
-checked once for finite values down to each column's last usable point (one parallel pass over
-the u/v arrays per record read). The step-cost ratio against the layer rule (fused 3-D RK2,
-same arrays) is measured by `benchmarks/single_node/depth_linear_cost.py`: 1.04 with a linear
-time blend and 1.08 with PCHIP (128 threads, 1e5 particles; rows in
-`benchmarks/single_node/depth_linear_cost.md`).
+**Depth-linear u/v** (`mode.uv_vertical: linear`, `vertical.md` §2.1): each stencil member (a
+vertex, or an element) reads two data points instead of one, plus a bracket search over its
+column and a wet test against its bed, and every record is checked once for finite values down
+to each column's last usable point (one parallel pass over the u/v arrays per record read). The
+step-cost ratio against the layer rule (same arrays) is measured by
+`benchmarks/single_node/depth_linear_cost.py`: node layout, fused 3-D RK2, 1.04 with a linear
+time blend and 1.08 with PCHIP (128 threads, 1e5 particles, measured before the walls at depth;
+rows in `benchmarks/single_node/depth_linear_cost.md`). The element-layout leg of the script
+(`--layout element`: element `leastsq`, the fused 3-D Euler kernel and the unfused RK2 step)
+has no measured row yet.
 
 **Run-time rule of thumb** (global, 1-day step, ≥16 threads, rk2): `T ≈ n_days × (1.0 s + 6.6 µs × N)`.
 Below ~130k tracers the run is **I/O-bound** (tracer count barely matters); above, it grows linearly

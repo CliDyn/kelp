@@ -137,7 +137,11 @@ Two newer capabilities extend the directory case:
   the older core2 form with packed `nodes` (in radians) + `elem` + `zbar`
   (negative-down); and the UGRID form with `face_nodes`. Connectivity is oriented
   to a single `(elements, 3)` shape and made 0-based, and depths are taken
-  positive-down regardless of the file's sign convention.
+  positive-down regardless of the file's sign convention. When the diagnostic
+  (or a subset mesh written by `utils/extract_fesom_region.py`) holds the element
+  levels `nlevels` or `zbar_e_bottom` (and `ulevels`), both loaders declare
+  each element's bed and last wet layer in `mesh.metadata` — what
+  `mode.uv_vertical: linear` needs on element u/v (`vertical.md` §2.1).
 
 ## §3 The time axis
 
