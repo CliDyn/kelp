@@ -27,7 +27,7 @@ import pytest
 from kelp.core.geometry import DEG2RAD, METERS_PER_DEG_LAT, wrap_lon
 from kelp.core.io import LazyLerpField, VelocityField
 from kelp.core.mesh import find_containing_elements, find_nearest_nodes
-from kelp.core.particles import make_state
+from kelp.core.particles import ParticleStatus, make_state
 from kelp.numerics import integrators as I
 from kelp.numerics import interpolate as ip
 from kelp.numerics.vertical_uv import is_checked
@@ -430,36 +430,59 @@ def test_rk45_refuses_depth_linear(uv_interp):
 
 
 @pytest.mark.parametrize("name", ["euler", "rk2", "rk4", "rk45"])
-def test_sigma_mesh_refused(name):
+def test_sigma_mesh_accepted(name):
+    """A sigma mesh passes the entry (rk45 still refuses): a
+    ``"layer_linear"`` field is read in the sigma fraction ``s = z / H_p``
+    of the 200 m columns, so the recorded first-stage velocity is
+    ``a + b*s`` at the entry ``s`` (the stage rule in full:
+    ``tests/test_integrators_depth_linear_sigma.py``)."""
     mesh = _deep_mesh()
     mesh.vertical_coord = "sigma"
-    vel = _deep_field("level", 0.004)
+    mesh.sigma = np.linspace(1.0, 0.0, K)       # interfaces s = 0, 1/4 .. 1
+    cen = 1.0 - 0.5 * (mesh.sigma[:-1] + mesh.sigma[1:])   # 1/8 .. 7/8
+    a_u, b_u, a_v, b_v = 0.2, 0.4, -0.1, 0.3
+    vel = VelocityField(
+        u=np.repeat((a_u + b_u * cen)[:, None], N_NODES, axis=1),
+        v=np.repeat((a_v + b_v * cen)[:, None], N_NODES, axis=1),
+        eta=np.zeros(N_NODES), w=np.full((K, N_NODES), 0.004),
+        uv_layout="node", uv_vertical="layer_linear")
+    st = _state(z=np.array([40.0, 90.0, 130.0]))    # s = 0.2, 0.45, 0.65
     step = dict(STEPS, rk45=I.rk45_step)[name]
-    msg = (r".*rk45" if name == "rk45"
-           else r"needs a z-level mesh \(vertical_coord 'zlevel'\), got "
-                r"'sigma'")
-    with pytest.raises(ValueError, match=_PREFIX.format(name) + msg):
-        step(_state(), vel, mesh, 600.0, 1.0, uv_interp="barycentric",
-             w_interp="barycentric")
+    kw = dict(uv_interp="barycentric", w_interp="barycentric")
+    if name == "rk45":
+        with pytest.raises(ValueError, match=(
+                r"^rk45_step: depth-linear horizontal velocity "
+                r"\(uv_vertical='layer_linear'\) .*rk45")):
+            step(st, vel, mesh, 600.0, 1.0, **kw)
+        return
+    out = step(st, vel, mesh, 600.0, 1.0, **kw)
+    assert np.all(out.status == ParticleStatus.ALIVE)
+    np.testing.assert_allclose(out.u, a_u + b_u * st.z / 200.0, rtol=1e-13)
+    np.testing.assert_allclose(out.v, a_v + b_v * st.z / 200.0, rtol=1e-13)
 
 
 def test_check_depth_linear_entry_refusals():
-    """Every refusal of the helper, in its order: rk45, the mesh, a 3-D
-    field, the layout x interpolator table (node layout: ``barycentric``
-    only; element layout: ``leastsq``, ``edge_leastsq``, ``barycentric``,
-    and its field then meets the element table's rules); then one
-    placement for all fields, whichever side is depth-linear."""
+    """Every refusal of the helper, in its order: rk45, the mesh (neither
+    z-level nor sigma), a 3-D field, the layout x interpolator table (node
+    layout: ``barycentric`` only; element layout: ``leastsq``,
+    ``edge_leastsq``, ``barycentric``, and its field then meets the element
+    table's rules); then one placement for all fields, whichever side is
+    depth-linear."""
     chk = I._check_depth_linear_entry
     mesh = _deep_mesh()
     sigma = _deep_mesh()
     sigma.vertical_coord = "sigma"
+    other = _deep_mesh()
+    other.vertical_coord = "hybrid"
     level = _deep_field("level", 0.004)
     pre = _PREFIX.format("rk2")
     # rk45 first, whatever else is wrong
     with pytest.raises(ValueError, match=_PREFIX.format("rk45") + r".*rk45"):
-        chk(level, sigma, "leastsq", "rk45")
-    with pytest.raises(ValueError, match=pre + r"needs a z-level mesh"):
-        chk(level, sigma, "leastsq", "rk2")
+        chk(level, other, "leastsq", "rk45")
+    with pytest.raises(ValueError, match=pre + (
+            r"needs a z-level or sigma mesh \(vertical_coord 'zlevel' or "
+            r"'sigma'\), got 'hybrid'$")):
+        chk(level, other, "leastsq", "rk2")
     no_w = VelocityField(u=level.u, v=level.v, eta=level.eta, w=None,
                          uv_layout="node", uv_vertical="level")
     with pytest.raises(ValueError, match=pre + r"needs a 3-D field"):

@@ -1084,18 +1084,21 @@ def _check_depth_linear_entry(vel, mesh, uv_interp: str, integrator: str, *,
 
     A depth-linear ``vel`` (``uv_vertical`` ``"level"`` or
     ``"layer_linear"``) is refused, in this order, for the ``rk45``
-    integrator, a mesh that is not z-level, a field that is not 3-D (no
-    ``w``), and a layout and ``uv_interp`` outside the table of the
-    interpolators that evaluate it: node layout with ``"barycentric"``
+    integrator, a mesh that is neither z-level nor sigma, a field that is
+    not 3-D (no ``w``), and a layout and ``uv_interp`` outside the table of
+    the interpolators that evaluate it: node layout with ``"barycentric"``
     only, element layout with ``"leastsq"``, ``"edge_leastsq"`` or
     ``"barycentric"`` (any other layout is refused).  Then the placements
     must agree, and each field passes the record check
     (``check_depth_linear_record``, which also holds an element-layout
-    field to the element table: ``"layer_linear"`` data and the reader's
-    element bottoms) unless already checked for this mesh's table:
-    ``vel``, ``vel_next``, each ``recon`` snapshot, and the raw parents
-    ``vel_a`` / ``vel_b`` of any ``LazyLerpField`` among them (checked
-    first, so a bad parent is named).
+    field to the element table: ``"layer_linear"`` data and, on a z-level
+    mesh, the reader's element bottoms; a sigma mesh serves
+    ``"layer_linear"`` data only, read in the sigma fraction
+    ``s = z / H_p`` that the unfused steps hand the interpolators,
+    :func:`_sigma_frac_for_uv`) unless already checked for this mesh's
+    table: ``vel``, ``vel_next``, each ``recon`` snapshot, and the raw
+    parents ``vel_a`` / ``vel_b`` of any ``LazyLerpField`` among them
+    (checked first, so a bad parent is named).
 
     Parameters
     ----------
@@ -1144,10 +1147,10 @@ def _check_depth_linear_entry(vel, mesh, uv_interp: str, integrator: str, *,
         _reject_depth_linear(
             vel, where, "is not supported by the rk45 integrator (2-D only "
             f"in this version); use {use}")
-    if mesh.vertical_coord != "zlevel":
+    if mesh.vertical_coord not in ("zlevel", "sigma"):
         _reject_depth_linear(
-            vel, where, "needs a z-level mesh (vertical_coord 'zlevel'), "
-            f"got {mesh.vertical_coord!r}")
+            vel, where, "needs a z-level or sigma mesh (vertical_coord "
+            f"'zlevel' or 'sigma'), got {mesh.vertical_coord!r}")
     if not _is_3d(vel):
         _reject_depth_linear(
             vel, where, "needs a 3-D field (u/v on depth points and a w "
@@ -1320,7 +1323,9 @@ def _clamp_z(z, vel, mesh, nn_full, alive, *, Dmin=0.5, z0b_min=0.1,
 # and the flow along a sloping bottom are then carried exactly, for any
 # temporal interpolation of eta; earlier versions added them as depth rates
 # (first order when combined with a dia-sigma flux, lost on steady-fallback
-# steps).
+# steps).  A depth-linear u/v field is read in s itself: each stage hands its
+# interpolator clip(z / H_p, 0, 1) of its own depth and column
+# (_sigma_frac_for_uv); W and the layer lookups keep metres.
 
 def _sigma_col_H(mesh, lons, lats, nn_full, eta, mask, w_interp, Dmin):
     """Column height ``max(depth + eta, Dmin)`` at the particles (sigma
@@ -1328,6 +1333,34 @@ def _sigma_col_H(mesh, lons, lats, nn_full, eta, mask, w_interp, Dmin):
     from .vertical_sigma import sigma_column_height
     return sigma_column_height(mesh, lons, lats, nn_full, eta, mask,
                                method=w_interp, Dmin=Dmin)
+
+
+def _sigma_frac_for_uv(z, H) -> np.ndarray:
+    """Sigma fraction ``s = clip(z / H, 0, 1)`` of every particle.
+
+    The coordinate a depth-linear u/v field is read in on a sigma mesh
+    (its points are the layer centres in ``s``,
+    :func:`kelp.numerics.vertical_uv.depth_points`): each unfused stage
+    hands its interpolator the ``s`` of its own depth and column height.
+    The vectorised form of ``vertical_sigma._sigma_frac``, element for
+    element (a NaN stays NaN; the depth-linear kernels read it as ``+inf``,
+    the bottom centre).
+
+    Parameters
+    ----------
+    z : np.ndarray, shape ``(P,)``
+        Stage depths (m, positive down).
+    H : np.ndarray, shape ``(P,)``
+        Column heights at the stage positions and time
+        (:func:`_sigma_col_H`).
+
+    Returns
+    -------
+    np.ndarray of float64, shape ``(P,)``
+    """
+    f = np.asarray(z, dtype=np.float64) / np.asarray(H, dtype=np.float64)
+    f = np.where(f < 0.0, 0.0, f)
+    return np.where(f > 1.0, 1.0, f)
 
 
 def _eta_blend(eta0, eta1, c):
@@ -5029,14 +5062,18 @@ def _euler_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
         vel_w = _sigma_stage_field(vel, eta0)
         H0 = _sigma_col_H(mesh, state.lon, state.lat, nn_full, eta0, alive,
                           w_interp, Dmin)
+    uv_state = state
     if is3d and getattr(vel, "uv_vertical", "layer") == "layer":
         interp_layer = _compute_layers(
             mesh, vel_w, state.z, nn_full, alive,
             Dmin=Dmin, z0b_min=z0b_min, H_col=H0,
         )
     elif is3d:
-        # depth-linear u/v read the stage depth (state.z), not a layer
+        # depth-linear u/v read the stage depth (state.z), not a layer;
+        # on a sigma mesh its sigma fraction s = z / H_p
         interp_layer = 0
+        if sig3d:
+            uv_state = state.replace(z=_sigma_frac_for_uv(state.z, H0))
     else:
         interp_layer = layer
 
@@ -5044,10 +5081,10 @@ def _euler_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
     if walk_interp:
         cur_elems, _ = _walk_update_elems(
             mesh, state.lon, state.lat, state.elem, alive)
-        U, V, ok = interp_fn(state, mesh, vel, nn_full, time_dir,
+        U, V, ok = interp_fn(uv_state, mesh, vel, nn_full, time_dir,
                              interp_layer, elems=cur_elems)
     else:
-        U, V, ok = interp_fn(state, mesh, vel, nn_full, time_dir,
+        U, V, ok = interp_fn(uv_state, mesh, vel, nn_full, time_dir,
                              interp_layer)
     moves = alive & ok
 
@@ -5317,9 +5354,11 @@ def _interp_uv_at(interp_fn, state, mesh, vel, lons, lats, mask,
 
     A depth-linear field (``uv_vertical`` ``"level"`` / ``"layer_linear"``)
     is read at the depth of the stage state, so the stage depth ``zs`` must
-    reach it: given, it replaces the entry ``z`` in the stage state.  Layer
-    interpolators never read ``state.z`` (they take ``layer_arg``), so
-    passing ``zs`` leaves every layer run bit-identical.
+    reach it: given, it replaces the entry ``z`` in the stage state (on a
+    sigma mesh the steps pass the stage's sigma fraction instead,
+    :func:`_sigma_frac_for_uv`).  Layer interpolators never read
+    ``state.z`` (they take ``layer_arg``), so passing ``zs`` leaves every
+    layer run bit-identical.
 
     Parameters
     ----------
@@ -5342,7 +5381,8 @@ def _interp_uv_at(interp_fn, state, mesh, vel, lons, lats, mask,
         Optional pre-validated containing elements at the STAGE positions
         (edge-walk tracker); forwarded to interpolators that accept them.
     zs : np.ndarray or None, shape ``(P,)``
-        Stage depths (m, positive down); ``None`` keeps ``state.z``.
+        Stage depths (m, positive down; a depth-linear field on a sigma
+        mesh: the stage sigma fractions ``s``); ``None`` keeps ``state.z``.
 
     Returns
     -------
@@ -5421,14 +5461,18 @@ def _rk2_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
         vel_k1 = _sigma_stage_field(vel_k1, eta0)
         H1 = _sigma_col_H(mesh, state.lon, state.lat, nn1, eta0, alive,
                           w_interp, Dmin)
+    uv_state = state
     if is3d and getattr(vel_k1, "uv_vertical", "layer") == "layer":
         interp_layer1 = _compute_layers(
             mesh, vel_k1, state.z, nn1, alive,
             Dmin=Dmin, z0b_min=z0b_min, H_col=H1,
         )
     elif is3d:
-        # depth-linear u/v read the stage depth (state.z), not a layer
+        # depth-linear u/v read the stage depth (state.z), not a layer;
+        # on a sigma mesh its sigma fraction s = z / H_p
         interp_layer1 = 0
+        if sig3d:
+            uv_state = state.replace(z=_sigma_frac_for_uv(state.z, H1))
     else:
         interp_layer1 = layer
 
@@ -5436,10 +5480,10 @@ def _rk2_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
     if walk_interp:
         cur_elems, _ = _walk_update_elems(
             mesh, state.lon, state.lat, state.elem, alive)
-        U1, V1, ok1 = interp_fn(state, mesh, vel_k1, nn1, time_dir,
+        U1, V1, ok1 = interp_fn(uv_state, mesh, vel_k1, nn1, time_dir,
                                 interp_layer1, elems=cur_elems)
     else:
-        U1, V1, ok1 = interp_fn(state, mesh, vel_k1, nn1, time_dir,
+        U1, V1, ok1 = interp_fn(uv_state, mesh, vel_k1, nn1, time_dir,
                                 interp_layer1)
 
     moves1 = alive & ok1
@@ -5477,6 +5521,7 @@ def _rk2_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
                               moves1, w_interp, Dmin)
             z_mid = np.where(moves1, s_mid * H2, state.z)
             vel_k2_w = _sigma_stage_field(vel_k2, eta_mid)
+        zs_uv = z_mid
         if is3d and getattr(vel_k2, "uv_vertical", "layer") == "layer":
             layers_mid = _compute_layers(
                 mesh, vel_k2_w, z_mid, nn_mid_full, moves1,
@@ -5484,8 +5529,11 @@ def _rk2_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
             )
             layer_arg = layers_mid
         elif is3d:
-            # depth-linear u/v read the stage depth (z_mid), not a layer
+            # depth-linear u/v read the stage depth (z_mid), not a layer;
+            # on a sigma mesh its sigma fraction in the stage column
             layer_arg = 0
+            if sig3d:
+                zs_uv = _sigma_frac_for_uv(z_mid, H2)
         else:
             layer_arg = layer
 
@@ -5500,7 +5548,7 @@ def _rk2_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
         U2, V2, ok2 = _interp_uv_at(
             interp_fn, state, mesh, vel_k2,
             lon_mid, lat_mid, moves1, nn_mid_full, time_dir, layer_arg,
-            elems=mid_elems, zs=z_mid,
+            elems=mid_elems, zs=zs_uv,
         )
 
         if is3d:
@@ -5808,6 +5856,7 @@ def _rk4_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
             if s is not None:
                 z = np.where(mask, s * H_out, z)
             vel_at_stage = _sigma_stage_field(vel_at_stage, eta_stage)
+        zs_uv = z
         if is3d and getattr(vel_at_stage, "uv_vertical", "layer") == "layer":
             layers_local = _compute_layers(
                 mesh, vel_at_stage, z, nn_full_local, mask,
@@ -5815,8 +5864,11 @@ def _rk4_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
             )
             layer_arg = layers_local
         elif is3d:
-            # depth-linear u/v read the stage depth (z), not a layer
+            # depth-linear u/v read the stage depth (z), not a layer; on a
+            # sigma mesh its sigma fraction in the stage column
             layer_arg = 0
+            if sig3d:
+                zs_uv = _sigma_frac_for_uv(z, H_out)
         else:
             layer_arg = layer
         stage_elems = prev_elems
@@ -5828,7 +5880,7 @@ def _rk4_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
         U_out, V_out, ok_out = _interp_uv_at(
             interp_fn, state, mesh, vel_at_stage,
             lon, lat, mask, nn_full_local, time_dir, layer_arg,
-            elems=stage_elems if walk_interp else None, zs=z,
+            elems=stage_elems if walk_interp else None, zs=zs_uv,
         )
         if is3d:
             W_out = _compute_w(vel_at_stage, mesh, z, nn_full_local, mask, time_dir,

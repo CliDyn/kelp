@@ -47,9 +47,12 @@ table is refused (the FESOM2 reader sets both from the mesh diagnostic's
 ``nlevels`` or ``zbar_e_bottom``).
 
 On a sigma mesh (``vertical_coord == "sigma"``, FESOM-C) the coordinate
-is the sigma fraction ``s = z / H`` of the particle's column (``H`` the
-column height at the particle, which the integrators compute; 0 at the
-surface, 1 at the bed) instead of the depth, and only ``"layer_linear"``
+is the sigma fraction ``s = z / H`` of the particle's column (0 at the
+surface, 1 at the bed; ``H`` the column height at the particle, which the
+integrators compute for each stage at its own position and time,
+``integrators._sigma_col_H``, and hand the interpolators as
+``clip(z / H, 0, 1)``, ``integrators._sigma_frac_for_uv``) instead of the
+depth, and only ``"layer_linear"``
 is served, on either layout: ``p`` = the layer centres
 ``c_k = 1 - (sigma_k + sigma_{k+1}) / 2`` of ``mesh.sigma`` (sigma 1 at
 the surface, 0 at the bed: interfaces at ``s_k = 1 - sigma_k``, the

@@ -3,8 +3,10 @@
 The step functions take a depth-linear field by the layout table of
 ``_check_depth_linear_entry``: node layout with ``uv_interp="barycentric"``
 only, element layout (``uv_vertical="layer_linear"``) with ``leastsq``,
-``edge_leastsq`` or ``barycentric``; rk45, sigma meshes and 2-D fields stay
-refused.  Every 3-D method reads each stage at its own depth: Euler the
+``edge_leastsq`` or ``barycentric``; rk45, a mesh neither z-level nor sigma
+and 2-D fields stay refused (sigma meshes:
+``tests/test_integrators_depth_linear_sigma.py``).  Every 3-D method reads
+each stage at its own depth: Euler the
 entry depth (fused and unfused), RK2 the entry depth and then ``z_mid``,
 RK4 ``z``, ``z2``, ``z3``, ``z4`` (``_interp_uv_at(..., zs=...)``), linear
 and PCHIP in time.  The fused 3-D Euler kernel has a depth-linear twin for
@@ -623,9 +625,9 @@ def test_entry_table():
     """``_check_depth_linear_entry`` on a z-level mesh: node layout with
     ``barycentric`` only; element layout with ``leastsq``, ``edge_leastsq``
     and ``barycentric`` (each accepted and record-checked) and nothing
-    else; an unknown layout refused; rk45, a 2-D field and a sigma mesh
-    refused for element fields with every interpolator (the rk45 message
-    advises euler, rk2 or rk4; for a node field with
+    else; an unknown layout refused; rk45, a 2-D field and a mesh neither
+    z-level nor sigma refused for element fields with every interpolator
+    (the rk45 message advises euler, rk2 or rk4; for a node field with
     ``uv_interp='barycentric'``); element fields on a mesh without the
     element bottoms refused by the record check."""
     chk = I._check_depth_linear_entry
@@ -662,9 +664,10 @@ def test_entry_table():
     with pytest.raises(ValueError, match=_PRE.format("rk4") + (
             r"needs uv_layout 'node' or 'element', got 'pixel'$")):
         chk(odd, mesh, "leastsq", "rk4")
-    # still refused for element fields: rk45, 2-D, sigma
-    sigma = _mesh()
-    sigma.vertical_coord = "sigma"
+    # still refused for element fields: rk45, 2-D, a mesh neither z-level
+    # nor sigma
+    other = _mesh()
+    other.vertical_coord = "hybrid"
     flat = VelocityField(u=el.u, v=el.v, eta=el.eta, w=None,
                          uv_layout="element", uv_vertical="layer_linear")
     for interp in INTERPS:
@@ -676,9 +679,9 @@ def test_entry_table():
                              r"rk2 or rk4$"):
             chk(el, mesh, interp, "rk45")
         with pytest.raises(ValueError, match=_PRE.format("rk2")
-                           + r"needs a z-level mesh \(vertical_coord "
-                             r"'zlevel'\), got 'sigma'"):
-            chk(el, sigma, interp, "rk2")
+                           + r"needs a z-level or sigma mesh \(vertical_coord "
+                             r"'zlevel' or 'sigma'\), got 'hybrid'$"):
+            chk(el, other, interp, "rk2")
         with pytest.raises(ValueError, match=_PRE.format("rk4")
                            + r"needs a 3-D field"):
             chk(flat, mesh, interp, "rk4")

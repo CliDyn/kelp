@@ -666,8 +666,8 @@ def interp_leastsq(
         the same layer).  ``np.ndarray`` of shape ``(P,)`` for 3-D
         (per-particle layer).  Ignored for a depth-linear field
         (``vel.uv_vertical`` ``"layer_linear"``, element layout): that
-        field is read at each particle's depth ``state.z``
-        (:func:`_interp_leastsq_dl`).
+        field is read at each particle's depth ``state.z``, on a sigma mesh
+        its sigma fraction (:func:`_interp_leastsq_dl`).
 
     Returns
     -------
@@ -947,7 +947,8 @@ def _interp_leastsq_core_dl(
     layer, a ``max_levels`` cut, a declared prefix) reads its last usable
     point.
 
-    ``z`` is the particle depth (m, positive down, as ``state.z``).  A NaN
+    ``z`` is the particle depth (m, positive down, as ``state.z``; on a
+    sigma mesh the sigma fraction ``s``, the table's coordinate).  A NaN
     ``z`` is read as ``+inf``: dry wherever the bed is finite.
 
     ``p`` (``(M,)``), ``last`` and ``bed`` (``(E,)``, positive down) are
@@ -1105,16 +1106,19 @@ def _interp_leastsq_dl(
 
     The ``interp_leastsq`` route for ``vel.uv_vertical`` ``"layer_linear"``
     on element layout: each particle is read at its depth ``state.z`` (m,
-    positive down); there is no layer argument.  An element whose bed
-    (``mesh.metadata["elem_bed"]``) lies above the particle is a wall and
-    left out of the fit (:func:`_interp_leastsq_core_dl`).
+    positive down; on a sigma mesh its sigma fraction ``s = z / H_p``,
+    which the steps put in ``state.z``); there is no layer argument.  An
+    element whose bed (``mesh.metadata["elem_bed"]``) lies above the
+    particle is a wall and left out of the fit
+    (:func:`_interp_leastsq_core_dl`).
 
     Parameters
     ----------
     state : ParticleState
     mesh : Mesh
         A z-level mesh with the element bottoms
-        (``mesh.metadata["uv_data_last_elem"]``, ``["elem_bed"]``); the
+        (``mesh.metadata["uv_data_last_elem"]``, ``["elem_bed"]``), or a
+        sigma mesh (no bottoms: every element is wet at every ``s``); the
         table is ``depth_points(mesh, vel.uv_vertical, "element")``.
     vel : VelocityField or LazyLerpField
         Element-layout u/v of shape ``(M, E)``.  Checked once per mesh
@@ -1136,9 +1140,9 @@ def _interp_leastsq_dl(
     ------
     ValueError
         Node layout (``uv_interp='barycentric'`` evaluates it), u/v not
-        2-D, a non-z-level mesh, a mesh without the element bottoms, or a
-        record that fails the check (shape, non-finite value at a usable
-        point).
+        2-D, a mesh neither z-level nor sigma, a z-level mesh without the
+        element bottoms, or a record that fails the check (shape,
+        non-finite value at a usable point).
     """
     placement = getattr(vel, "uv_vertical", "layer")
     if getattr(vel, "uv_layout", "element") != "element":
@@ -1742,7 +1746,8 @@ def _interp_barycentric_core_dl(xp, yp, z, nn_node, elem_hint, time_dir,
     vertex below ``p[last[nd]]`` (a partial bottom layer, a ``max_levels``
     cut, a declared prefix) reads its last usable point.
 
-    ``z`` is the particle depth (m, positive down, as ``state.z``).  A NaN
+    ``z`` is the particle depth (m, positive down, as ``state.z``; on a
+    sigma mesh the sigma fraction ``s``, the table's coordinate).  A NaN
     ``z`` is read as ``+inf``: dry wherever the bed is finite, so the
     deepest vertex at its last point (ok=True).
 
@@ -2115,7 +2120,8 @@ def _interp_bary_elem_core_dl(xp, yp, z, nn_node, elem_hint, time_dir,
     last usable point.  A vertex whose wet elements' areas sum to zero or
     less gives ``ok = False``, as in the layer kernel.
 
-    ``z`` is the particle depth (m, positive down, as ``state.z``).  A NaN
+    ``z`` is the particle depth (m, positive down, as ``state.z``; on a
+    sigma mesh the sigma fraction ``s``, the table's coordinate).  A NaN
     ``z`` is read as ``+inf``: dry wherever the bed is finite.
 
     ``p`` (``(M,)``), ``last`` and ``bed`` (``(E,)``, positive down) are
@@ -2264,7 +2270,9 @@ def _interp_barycentric_dl(
 
     The ``interp_barycentric`` route for ``vel.uv_vertical`` ``"level"`` /
     ``"layer_linear"``: each particle is read at its depth ``state.z`` (m,
-    positive down); there is no layer argument.  Node layout: a vertex
+    positive down; on a sigma mesh, which serves ``"layer_linear"`` data
+    only, its sigma fraction ``s = z / H_p``, which the steps put in
+    ``state.z``); there is no layer argument.  Node layout: a vertex
     whose bed (``mesh.depth``) lies above the particle is a wall and left
     out (:func:`_interp_barycentric_core_dl`).  Element layout
     (``"layer_linear"``): an element whose bed
@@ -2276,10 +2284,11 @@ def _interp_barycentric_dl(
     ----------
     state : ParticleState
     mesh : Mesh
-        A z-level mesh; the depth-point table is
+        A z-level or a sigma mesh; the depth-point table is
         ``depth_points(mesh, vel.uv_vertical, vel.uv_layout)`` (element
-        layout: with the element bottoms
-        ``mesh.metadata["uv_data_last_elem"]``, ``["elem_bed"]``).
+        layout on a z-level mesh: with the element bottoms
+        ``mesh.metadata["uv_data_last_elem"]``, ``["elem_bed"]``; a sigma
+        mesh needs none, every column is wet at every ``s``).
     vel : VelocityField or LazyLerpField
         Node-layout u/v of shape ``(M, N)`` or element-layout u/v of shape
         ``(M, E)``.  Checked once per mesh table with
@@ -2303,8 +2312,9 @@ def _interp_barycentric_dl(
     Raises
     ------
     ValueError
-        A layout other than node or element, u/v not 2-D, a non-z-level
-        mesh, an element-layout mesh without the element bottoms, or a
+        A layout other than node or element, u/v not 2-D, a mesh neither
+        z-level nor sigma, ``"level"`` data on a sigma mesh, an
+        element-layout z-level mesh without the element bottoms, or a
         record that fails the check (shape, non-finite value at a usable
         point).
     """
@@ -2459,8 +2469,8 @@ def interp_barycentric(
         the same layer).  ``np.ndarray`` of shape ``(P,)`` for 3-D
         (per-particle layer).  Ignored for a depth-linear field
         (``vel.uv_vertical`` ``"level"`` / ``"layer_linear"``): that field
-        is read at each particle's depth ``state.z``
-        (:func:`_interp_barycentric_dl`).
+        is read at each particle's depth ``state.z``, on a sigma mesh its
+        sigma fraction (:func:`_interp_barycentric_dl`).
     elems : np.ndarray or None
         Optional per-particle PRE-VALIDATED containing elements (edge-walk
         tracker); ``-1`` entries fall back to the internal search.  None
@@ -2868,7 +2878,8 @@ def _interp_edge_leastsq_core_dl(
     element below ``p[last[e]]`` (a partial bottom layer, a ``max_levels``
     cut, a declared prefix) reads its last usable point.
 
-    ``z`` is the particle depth (m, positive down, as ``state.z``).  A NaN
+    ``z`` is the particle depth (m, positive down, as ``state.z``; on a
+    sigma mesh the sigma fraction ``s``, the table's coordinate).  A NaN
     ``z`` is read as ``+inf``: dry wherever the bed is finite.
 
     ``p`` (``(M,)``), ``last`` and ``bed`` (``(E,)``, positive down) are
@@ -3068,17 +3079,19 @@ def _interp_edge_leastsq_dl(
 
     The ``interp_edge_leastsq`` route for ``vel.uv_vertical``
     ``"layer_linear"`` on element layout: each particle is read at its
-    depth ``state.z`` (m, positive down); there is no layer argument.  An
-    edge neighbour whose bed (``mesh.metadata["elem_bed"]``) lies above
-    the particle is a wall, its edge a boundary edge with the ``bc`` ghost
-    (:func:`_interp_edge_leastsq_core_dl`).
+    depth ``state.z`` (m, positive down; on a sigma mesh its sigma fraction
+    ``s = z / H_p``, which the steps put in ``state.z``); there is no layer
+    argument.  An edge neighbour whose bed (``mesh.metadata["elem_bed"]``)
+    lies above the particle is a wall, its edge a boundary edge with the
+    ``bc`` ghost (:func:`_interp_edge_leastsq_core_dl`).
 
     Parameters
     ----------
     state : ParticleState
     mesh : Mesh
         A z-level mesh with the element bottoms
-        (``mesh.metadata["uv_data_last_elem"]``, ``["elem_bed"]``); the
+        (``mesh.metadata["uv_data_last_elem"]``, ``["elem_bed"]``), or a
+        sigma mesh (no bottoms: every element is wet at every ``s``); the
         table is ``depth_points(mesh, vel.uv_vertical, "element")``.
     vel : VelocityField or LazyLerpField
         Element-layout u/v of shape ``(M, E)``.  Checked once per mesh
@@ -3106,9 +3119,9 @@ def _interp_edge_leastsq_dl(
     ------
     ValueError
         Node layout (``uv_interp='barycentric'`` evaluates it), an unknown
-        ``bc``, u/v not 2-D, a non-z-level mesh, a mesh without the
-        element bottoms, or a record that fails the check (shape,
-        non-finite value at a usable point).
+        ``bc``, u/v not 2-D, a mesh neither z-level nor sigma, a z-level
+        mesh without the element bottoms, or a record that fails the check
+        (shape, non-finite value at a usable point).
     """
     placement = getattr(vel, "uv_vertical", "layer")
     if getattr(vel, "uv_layout", "element") != "element":
@@ -3251,7 +3264,8 @@ def interp_edge_leastsq(
         Scalar ``int`` for 2-D, per-particle ``(P,)`` array for 3-D.
         Ignored for a depth-linear field (``vel.uv_vertical``
         ``"layer_linear"``, element layout): that field is read at each
-        particle's depth ``state.z`` (:func:`_interp_edge_leastsq_dl`).
+        particle's depth ``state.z``, on a sigma mesh its sigma fraction
+        (:func:`_interp_edge_leastsq_dl`).
     bc : str
         Boundary ghost value: ``"freeslip"`` (mirror image of u_own —
         wall-parallel constants exact, normal component damped at the

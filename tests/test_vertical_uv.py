@@ -1188,7 +1188,7 @@ def _sigma_mesh(levels=SIGMA, layout="node"):
     return mesh
 
 
-def _sigma_field(mesh, layout, u, v=None):
+def _sigma_field(layout, u, v=None):
     """A ``"layer_linear"`` field of ``layout`` on a sigma mesh."""
     if layout == "node":
         return _field(u, v, placement="layer_linear")
@@ -1290,14 +1290,14 @@ def test_sigma_record_check_all_layers(layout, comp):
     mesh = _sigma_mesh(layout=layout)
     n = mesh.n_nodes if layout == "node" else mesh.n_elements
     col = "node" if layout == "node" else "element"
-    good = _sigma_field(mesh, layout, np.ones((3, n)), np.ones((3, n)))
+    good = _sigma_field(layout, np.ones((3, n)), np.ones((3, n)))
     vu.check_depth_linear_record(good, mesh)
     assert vu.is_checked(good, mesh)
     for k, bad in ((2, np.nan), (0, np.inf), (1, -np.inf)):
         u = np.ones((3, n))
         v = np.ones((3, n))
         (u if comp == "u" else v)[k, n - 1] = bad
-        fld = _sigma_field(mesh, layout, u, v)
+        fld = _sigma_field(layout, u, v)
         with pytest.raises(ValueError, match=(
                 rf"{comp} = {bad!r} is non-finite at {col} {n - 1}, point "
                 rf"{k} \(s = {SIGMA_P[k]:g}\).*finite at points 0\.\.2 of "
