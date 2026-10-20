@@ -40,10 +40,12 @@ unless stated.
 
 Mutation pass (commit 204a8b4 with this module, 2026-10-20, every row;
 the depth_constant cells of M2, M6 and M8 again on b03afac, the same day,
-after the field's constants moved into one binade: the same cells red).
+after the field's constants moved into one binade: the same cells red;
+every row again on 575bcfb, the same day, with the no-slip trench case:
+the same cells red, plus that case for M10 and the old sources).
 Each defect went into a full copy of the checkout, one at a time, with a
 fresh Numba cache, and this module ran against it; the unmutated copy
-passed 44 of 44, the sources before the element work (28b20c9) failed 37
+passed 45 of 45, the sources before the element work (28b20c9) failed 38
 (element data refused; node layout: a shallow vertex read at its own
 bed).  Red tests (parametrised cells) and the mechanism, from the
 assertion messages:
@@ -82,8 +84,9 @@ M8     depth_constant 12            ``bed = lower[last]`` -> the particle
 M9     linear_in_depth_exact 20,    ``uv_bracket`` reads the nearest
        profile 4, trajectory 4      centre (the layer path's values) ->
                                     1.1 .. 3.6 % off, ratios 1.95 .. 2.00
-M10    trench[edge_leastsq]         a dry edge neighbour kept as a member
-                                    (no ghost) -> 23 % slow
+M10    trench[edge_leastsq] 2       a dry edge neighbour kept as a member
+       (free and no slip)           (no ghost) -> 23 % slow; no slip:
+                                    0.56 U off the hand fit
 M11    trench[leastsq],             a dry element kept in the wet-member
        trench[barycentric-element]  mean -> element barycentric 50 % slow,
                                     the ``leastsq`` trench end 44 %

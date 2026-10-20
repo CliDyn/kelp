@@ -486,6 +486,23 @@ def test_fused_euler_runner_record_check(monkeypatch, where):
 
 
 @needs_numba
+@pytest.mark.parametrize("uv_interp", INTERPS)
+@pytest.mark.parametrize("method", list(STEPS))
+def test_cavities_refused_at_direct_entry(method, uv_interp):
+    """A step called directly, without ``run_tracking``, refuses an element
+    mesh with ice-shelf cavities (``elem_ulevels`` above 1) as the run
+    does, before any particle moves."""
+    mesh = _mesh()
+    mesh.metadata["elem_ulevels"] = np.ones(mesh.n_elements, dtype=np.int32)
+    mesh.metadata["elem_ulevels"][5] = 2
+    with pytest.raises(ValueError, match=(
+            r"^ice-shelf cavities are not supported by mode\.uv_vertical: "
+            r"linear on element data yet: .* \(first: element 5, "
+            r"ulevels 2\)")):
+        STEPS[method](_state(), _rule_field(mesh), mesh, DT, 1.0,
+                      uv_interp=uv_interp, w_interp="nearest")
+
+
 def test_fused_euler_runner_refusals():
     """The runner serves element-layout ``"layer_linear"`` fields only: a
     node-layout depth-linear field is refused (``leastsq`` does not

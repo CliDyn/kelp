@@ -290,6 +290,36 @@ def _missing_elem_bottoms(mesh: Mesh, no_decl: bool,
         + " and no ".join(missing))
 
 
+def refuse_elem_cavities(mesh: Mesh) -> None:
+    """Refuse depth-linear u/v on element layout under ice-shelf cavities.
+
+    A cavity is ``mesh.metadata["elem_ulevels"]`` (the FESOM2 reader's
+    ``ulevels``) above 1 anywhere: the column starts below the surface,
+    which the element table does not represent yet.  Called by every
+    element table build and by tracking before the writer opens.
+
+    Raises
+    ------
+    ValueError
+        Naming the mesh file (``mesh.metadata["meshpath"]``), the number
+        of cavity elements and the first one.
+    """
+    md = mesh.metadata or {}
+    ulevels = md.get("elem_ulevels")
+    if ulevels is None:
+        return
+    ulevels = np.asarray(ulevels)
+    cav = np.flatnonzero(ulevels > 1)
+    if cav.size:
+        meshpath = md.get("meshpath")
+        where = f"mesh {meshpath!r}" if meshpath else "this mesh"
+        raise ValueError(
+            "ice-shelf cavities are not supported by mode.uv_vertical: "
+            f"linear on element data yet: {where} has ulevels > 1 at "
+            f"{cav.size} element(s) (first: element {int(cav[0])}, "
+            f"ulevels {int(ulevels[cav[0]])}); run without the option")
+
+
 def depth_points(mesh: Mesh, placement: str,
                  layout: str = "node") -> DepthPoints:
     """The depth-linear data-point table of ``mesh`` for ``placement``.
@@ -348,9 +378,10 @@ def depth_points(mesh: Mesh, placement: str,
         ``placement`` is ``"layer"`` or unknown, ``layout`` is unknown,
         ``"level"`` on element layout, the mesh is not z-level, the level
         table is too short, non-finite or not increasing, the depth, the
-        element bed or the declaration has the wrong shape or type, or an
+        element bed or the declaration has the wrong shape or type, an
         element table lacks the declaration or the element bed (the
-        message names both keys and ``nlevels``).
+        message names both keys and ``nlevels``), or the mesh has
+        ice-shelf cavities (:func:`refuse_elem_cavities`).
     """
     if placement not in _DL_PLACEMENTS:
         raise ValueError(
@@ -395,6 +426,8 @@ def depth_points(mesh: Mesh, placement: str,
                 and not (isinstance(decl, np.ndarray)
                          and decl.flags.writeable)):
             return entry.points
+    if layout == "element":
+        refuse_elem_cavities(mesh)
     snap = _snapshot_declaration(decl)
     points = _build_depth_points(sigma, depth, snap, placement, n_cols,
                                  layout)

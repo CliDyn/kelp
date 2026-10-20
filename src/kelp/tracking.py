@@ -33,7 +33,8 @@ from .core.mesh import Mesh, find_containing_elements, find_nearest_nodes
 from .core.particles import ParticleState, make_state, ParticleStatus, count_by_status
 from .core.release import (activate_released, mask_dormant_for_record,
                            mask_inactive_velocity)
-from .numerics.vertical_uv import check_depth_linear_record, is_checked
+from .numerics.vertical_uv import (check_depth_linear_record, is_checked,
+                                   refuse_elem_cavities)
 from .readers import (get_reader, extract_time_info, time_axis_epoch,
                       NO_EPOCH_NOTE, RESOLVED_BY_READER, _READER_RESOLVES_TIME,
                       _describe_record_times, _dry_mask_kwargs,
@@ -409,16 +410,7 @@ def _check_linear_element_mesh(mesh) -> None:
             "zbar_e_bottom (an ASCII mesh directory never has them); use "
             "the run's full fesom.mesh.diag.nc, or re-extract the region "
             "with utils/extract_fesom_region.py, which keeps them")
-    ulevels = md.get("elem_ulevels")
-    if ulevels is not None:
-        cav = np.flatnonzero(np.asarray(ulevels) > 1)
-        if cav.size:
-            raise ValueError(
-                "ice-shelf cavities are not supported by mode.uv_vertical: "
-                f"linear on element data yet: {where} has ulevels > 1 at "
-                f"{cav.size} element(s) (first: element {int(cav[0])}, "
-                f"ulevels {int(np.asarray(ulevels)[cav[0]])}); run without "
-                "the option")
+    refuse_elem_cavities(mesh)
 
 
 def _check_uv_vertical_option(option: str, *, fdrift3d: bool, mesh, uv_interp,

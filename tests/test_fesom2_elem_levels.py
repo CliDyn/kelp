@@ -177,7 +177,11 @@ def test_loaders_declare_element_bottoms(tmp_path, convention, levels, last,
     np.testing.assert_array_equal(mesh.metadata["elem_ulevels"], [1, 2])
     assert mesh.metadata["elem_ulevels"].dtype == np.int32
     assert mesh.metadata["meshpath"] == str(path)
-    # the depth-linear element table builds from the declaration
+    # the cavity (ulevels 2) refuses the depth-linear element table; without
+    # it the table builds from the declaration
+    with pytest.raises(ValueError, match="ice-shelf cavities"):
+        depth_points(mesh, "layer_linear", layout="element")
+    del mesh.metadata["elem_ulevels"]
     dp = depth_points(mesh, "layer_linear", layout="element")
     np.testing.assert_array_equal(dp.last, np.maximum(last, 0))
     np.testing.assert_array_equal(dp.bed, bed)

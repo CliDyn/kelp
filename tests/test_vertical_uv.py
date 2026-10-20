@@ -929,6 +929,31 @@ def test_elem_table_missing_bed_refused():
     assert mesh.metadata["uv_data_last_elem"].flags.writeable
 
 
+def test_elem_table_cavities_refused():
+    """``elem_ulevels`` above 1 anywhere (an ice-shelf cavity) refuses the
+    element table, naming the mesh file and the first cavity element, so
+    a direct step call meets the refusal the run meets; ``ulevels`` all 1
+    builds the table of the mesh without the variable; the node table
+    does not look at it."""
+    vu = _vu()
+    mesh = _elem_mesh()
+    mesh.metadata["meshpath"] = "cav/fesom.mesh.diag.nc"
+    mesh.metadata["elem_ulevels"] = np.array([1, 3, 1], dtype=np.int32)
+    with pytest.raises(ValueError, match=(
+            r"^ice-shelf cavities are not supported by mode\.uv_vertical: "
+            r"linear on element data yet: mesh 'cav/fesom\.mesh\.diag\.nc' "
+            r"has ulevels > 1 at 1 element\(s\) \(first: element 1, "
+            r"ulevels 3\)")):
+        _etable(vu, mesh)
+    assert mesh._uv_depth_points is None
+    vu.depth_points(mesh, "layer_linear")
+    flat = _elem_mesh()
+    flat.metadata["elem_ulevels"] = np.ones(3, dtype=np.int32)
+    got, ref = _etable(vu, flat), _etable(vu, _elem_mesh())
+    assert_bitwise(got.last, ref.last, "last")
+    assert_bitwise(got.bed, ref.bed, "bed")
+
+
 def test_elem_table_malformed_refused():
     vu = _vu()
     for decl, bad in (([2, 0], "uv_data_last_elem"),
