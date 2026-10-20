@@ -364,20 +364,29 @@ def test_declaration_malformed_refused():
         vu.depth_points(mesh, "level")
 
 
-def test_refuses_layer_and_sigma_mesh():
+def test_refuses_layer_placement():
+    """A ``"layer"`` field has no table (sigma meshes: see the sigma
+    section below, which builds one for ``"layer_linear"``)."""
     vu = _vu()
     with pytest.raises(ValueError, match="layer"):
         vu.depth_points(_mesh(), "layer")
     with pytest.raises(ValueError, match="placement"):
         vu.depth_points(_mesh(), "linear")
-    with pytest.raises(ValueError, match="zlevel"):
-        vu.depth_points(_mesh(levels=[0.0, -0.5, -1.0],
-                              vertical_coord="sigma"), "level")
+    with pytest.raises(ValueError, match="layer"):
+        vu.depth_points(_mesh(levels=[1.0, 0.5, 0.0],
+                              vertical_coord="sigma"), "layer")
+    with pytest.raises(ValueError, match=r"needs a z-level or sigma mesh"):
+        vu.depth_points(_mesh(vertical_coord="other"), "level")
     # a 2-D mesh (no levels) and a single level for layer data
     with pytest.raises(ValueError, match="levels"):
         vu.depth_points(_mesh(levels=[]), "level")
     with pytest.raises(ValueError, match="levels"):
         vu.depth_points(_mesh(levels=[0.0]), "layer_linear")
+    # a 2-D sigma mesh (the FESOM-C reader's [0.0] without sigma_lev)
+    with pytest.raises(ValueError, match=r"needs a 3-D sigma mesh with >= 2 "
+                                         r"interfaces in mesh.sigma"):
+        vu.depth_points(_mesh(levels=[0.0], vertical_coord="sigma"),
+                        "layer_linear")
     # a level table that decreases somewhere
     with pytest.raises(ValueError, match="non-decreasing"):
         vu.depth_points(_mesh(levels=[0.0, 20.0, 10.0, 30.0]), "level")
@@ -1157,6 +1166,165 @@ def test_uv_wet():
             got = fn(bed, col, z)
             assert isinstance(got, (bool, np.bool_)), type(got)
             assert bool(got) is want, (fn, col, z)
+
+
+# ---------------------------------------------------------------------------
+# Sigma meshes: the table in the sigma fraction s = z / H
+# ---------------------------------------------------------------------------
+
+#: sigma interfaces (1 at the surface, 0 at the bed); layer centres
+#: ``1 - (sigma_k + sigma_{k+1}) / 2``
+SIGMA = [1.0, 0.75, 0.25, 0.0]
+SIGMA_P = np.array([0.125, 0.5, 0.875])
+
+
+def _sigma_mesh(levels=SIGMA, layout="node"):
+    """The node mesh (4 nodes) or the element mesh (3 elements, neither an
+    element declaration nor an element bed) on sigma interfaces."""
+    if layout == "node":
+        return _mesh(levels=levels, vertical_coord="sigma")
+    mesh = _elem_mesh(levels=levels, decl=None, bed=None)
+    mesh.vertical_coord = "sigma"
+    return mesh
+
+
+def _sigma_field(mesh, layout, u, v=None):
+    """A ``"layer_linear"`` field of ``layout`` on a sigma mesh."""
+    if layout == "node":
+        return _field(u, v, placement="layer_linear")
+    return _efield(u, v)
+
+
+@pytest.mark.parametrize("layout", ["node", "element"])
+def test_sigma_table_centres(layout):
+    """The points are the layer centres in s, every column reads every
+    layer (``last = K - 2``) and is wet at every s (``bed = +inf``); no
+    declaration and no element bottom is read: a malformed declaration
+    is neither validated nor replaced by a snapshot."""
+    vu = _vu()
+    mesh = _sigma_mesh(layout=layout)
+    n_cols = mesh.n_nodes if layout == "node" else mesh.n_elements
+    key = "uv_data_last" if layout == "node" else "uv_data_last_elem"
+    bad = np.array([0.5, 7.0])                   # wrong dtype and shape
+    mesh.metadata[key] = bad
+    dp = vu.depth_points(mesh, "layer_linear", layout)
+    assert_bitwise(dp.p, SIGMA_P, "p")
+    assert_bitwise(dp.last, np.full(n_cols, 2, dtype=np.int32), "last")
+    assert_bitwise(dp.bed, np.full(n_cols, np.inf), "bed")
+    assert not (dp.p.flags.writeable or dp.last.flags.writeable
+                or dp.bed.flags.writeable)
+    assert mesh.metadata[key] is bad
+    assert vu.depth_points(mesh, "layer_linear", layout) is dp
+
+
+def test_sigma_ends_read_outer_centre():
+    """At the surface (s = 0), at the bed (s = 1) and rounding beyond it a
+    column reads its outermost centre directly and is wet there: never a
+    dry fallback.  A NaN s, which the kernels map to ``+inf``, is wet and
+    reads the bottom centre."""
+    vu = _vu()
+    dp = vu.depth_points(_sigma_mesh(), "layer_linear")
+    for col in range(dp.last.size):
+        last = int(dp.last[col])
+        assert vu.uv_bracket(dp.p, last, 0.0) == (0, -1.0)
+        assert vu.uv_bracket(dp.p, last, 1.0) == (2, -1.0)
+        assert vu.uv_bracket(dp.p, last, 1.0 + 1e-15) == (2, -1.0)
+        assert vu.uv_bracket(dp.p, last, np.inf) == (2, -1.0)
+        # between the first two centres: (0.3125 - 0.125) / 0.375
+        assert vu.uv_bracket(dp.p, last, 0.3125) == (0, 0.5)
+        for s in (0.0, 1.0, 1.0 + 1e-15, np.inf):
+            assert vu.uv_wet(dp.bed, col, s)
+
+
+def test_sigma_table_follows_kept_levels():
+    """``max_levels`` on a sigma mesh keeps the first interfaces from the
+    surface (``tracking._apply_max_levels`` cuts ``mesh.sigma``): the table
+    is rebuilt from the kept interfaces and every column reads down to
+    the last kept centre, as the layer path's ``find_layer_sigma`` stays
+    in the last kept layer below it; the record check wants the fields
+    cut alike; no limit restores the full table.  A new ``mesh.depth``
+    keeps the table (it has no bed rule)."""
+    from kelp import tracking
+    from kelp.core.config import ModeConfig
+    from kelp.numerics.vertical_sigma import find_layer_sigma
+    vu = _vu()
+    mesh = _sigma_mesh(levels=[1.0, 0.75, 0.5, 0.25, 0.0])
+    dp = vu.depth_points(mesh, "layer_linear")
+    assert_bitwise(dp.p, np.array([0.125, 0.375, 0.625, 0.875]), "p")
+    mesh.depth = mesh.depth + 5.0
+    assert vu.depth_points(mesh, "layer_linear") is dp
+    tracking._apply_max_levels(
+        mesh, ModeConfig(Fdrift3D=True, Fdrift2D=False, max_levels=3))
+    assert_bitwise(mesh.sigma, np.array([1.0, 0.75, 0.5]), "kept sigma")
+    cut = vu.depth_points(mesh, "layer_linear")
+    assert cut is not dp
+    assert_bitwise(cut.p, np.array([0.125, 0.375]), "p cut")
+    assert_bitwise(cut.last, np.full(4, 1, dtype=np.int32), "last cut")
+    assert_bitwise(cut.bed, np.full(4, np.inf), "bed cut")
+    h = 40.0
+    for s in (0.375, 0.5, 0.75, 1.0):
+        assert find_layer_sigma(mesh.sigma, s * h, h) == cut.last[0]
+        assert vu.uv_bracket(cut.p, int(cut.last[0]), s) == (1, -1.0)
+    with pytest.raises(ValueError, match=r"u has 3 rows, the 'layer_linear' "
+                                         r"table of this mesh has 2 points"):
+        vu.check_depth_linear_record(
+            _field(np.ones((3, 4)), placement="layer_linear"), mesh)
+    vu.check_depth_linear_record(
+        _field(np.ones((2, 4)), placement="layer_linear"), mesh)
+    tracking._apply_max_levels(mesh, ModeConfig(Fdrift3D=True,
+                                                Fdrift2D=False))
+    back = vu.depth_points(mesh, "layer_linear")
+    assert back is not cut
+    assert_bitwise(back.p, dp.p, "p restored")
+    assert_bitwise(back.last, np.full(4, 3, dtype=np.int32), "last restored")
+
+
+@pytest.mark.parametrize("comp", ["u", "v"])
+@pytest.mark.parametrize("layout", ["node", "element"])
+def test_sigma_record_check_all_layers(layout, comp):
+    """Every layer of every column is a usable point: a non-finite u or v
+    in any layer, the bottom one included (where a z-level column below
+    its last point may hold anything), is refused; the message names the
+    column, the point and its s."""
+    vu = _vu()
+    mesh = _sigma_mesh(layout=layout)
+    n = mesh.n_nodes if layout == "node" else mesh.n_elements
+    col = "node" if layout == "node" else "element"
+    good = _sigma_field(mesh, layout, np.ones((3, n)), np.ones((3, n)))
+    vu.check_depth_linear_record(good, mesh)
+    assert vu.is_checked(good, mesh)
+    for k, bad in ((2, np.nan), (0, np.inf), (1, -np.inf)):
+        u = np.ones((3, n))
+        v = np.ones((3, n))
+        (u if comp == "u" else v)[k, n - 1] = bad
+        fld = _sigma_field(mesh, layout, u, v)
+        with pytest.raises(ValueError, match=(
+                rf"{comp} = {bad!r} is non-finite at {col} {n - 1}, point "
+                rf"{k} \(s = {SIGMA_P[k]:g}\).*finite at points 0\.\.2 of "
+                rf"this {col} \(every layer of a sigma column; 1 {col}\(s\) "
+                r"affected\)")):
+            vu.check_depth_linear_record(fld, mesh)
+        assert not vu.is_checked(fld, mesh)
+
+
+def test_sigma_level_placement_refused():
+    """Depth-linear u/v on a sigma mesh is layer-centred only: a
+    ``"level"`` table, and so a ``"level"`` field's record check, is
+    refused, naming the placement; element layout keeps its own
+    ``"level"`` refusal.  Nothing is cached."""
+    vu = _vu()
+    mesh = _sigma_mesh()
+    msg = (r"^depth-linear u/v on a sigma mesh \(vertical_coord 'sigma'\) "
+           r"is 'layer_linear' only \(layer-centred data, read in the sigma "
+           r"fraction s = z / H\), got 'level'$")
+    with pytest.raises(ValueError, match=msg):
+        vu.depth_points(mesh, "level")
+    with pytest.raises(ValueError, match=msg):
+        vu.check_depth_linear_record(_field(np.ones((4, 4))), mesh)
+    assert mesh._uv_depth_points is None
+    with pytest.raises(ValueError, match=r"on element layout is "
+                                         r"'layer_linear' only"):
+        vu.depth_points(_sigma_mesh(layout="element"), "level", "element")
 
 
 # ---------------------------------------------------------------------------

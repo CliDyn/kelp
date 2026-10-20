@@ -3,7 +3,8 @@ bracket.
 
 A depth-linear u/v field (``VelocityField.uv_vertical`` ``"level"`` or
 ``"layer_linear"``) is evaluated linearly in depth between data points
-``p[0..M-1]`` (positive-down metres) of a z-level mesh:
+``p[0..M-1]`` (positive-down metres) of a z-level mesh (a sigma mesh:
+in the sigma fraction, below):
 
 - ``"level"``: ``p`` = the kept levels, ``|mesh.sigma|`` (``M = K``);
 - ``"layer_linear"``: ``p`` = the layer centres ``(z_k + z_{k+1}) / 2`` of
@@ -44,6 +45,21 @@ level is at or above the element's bed), and its bed,
 ``last_e = max(0, min(M-1, D_e))``.  Without either of the two an element
 table is refused (the FESOM2 reader sets both from the mesh diagnostic's
 ``nlevels`` or ``zbar_e_bottom``).
+
+On a sigma mesh (``vertical_coord == "sigma"``, FESOM-C) the coordinate
+is the sigma fraction ``s = z / H`` of the particle's column (``H`` the
+column height at the particle, which the integrators compute; 0 at the
+surface, 1 at the bed) instead of the depth, and only ``"layer_linear"``
+is served, on either layout: ``p`` = the layer centres
+``c_k = 1 - (sigma_k + sigma_{k+1}) / 2`` of ``mesh.sigma`` (sigma 1 at
+the surface, 0 at the bed: interfaces at ``s_k = 1 - sigma_k``, the
+convention of :func:`kelp.numerics.vertical_sigma.find_layer_sigma`).
+Every layer of every column holds water, so nothing else is read (no
+declaration, no element bottom, no bathymetry rule): ``last = M - 1``
+for every column and ``bed = +inf``, wet at every ``s`` (a NaN ``s``,
+which the kernels map to ``+inf``, reads the bottom centre).  The record
+check then wants every layer of every column finite, and the cached
+table is valid while ``mesh.sigma`` is the very object it was built from.
 
 Above ``p[0]`` and below ``p[last_i]`` the value of that point is used (no
 extrapolation); in between, the two bracketing points are blended.  The
@@ -124,15 +140,18 @@ class DepthPoints:
     Attributes
     ----------
     p : np.ndarray
-        Data-point depths, float64 ``(M,)``, positive down, non-decreasing.
-        Read-only.
+        Data-point depths, float64 ``(M,)``, positive down, non-decreasing;
+        on a sigma mesh the layer centres in the sigma fraction ``s``
+        (0 at the surface, 1 at the bed).  Read-only.
     last : np.ndarray
         Index of the last usable data point per column, int32 ``(C,)``, in
-        ``0 .. M-1``.  Read-only.
+        ``0 .. M-1`` (``M-1`` for every column of a sigma mesh).
+        Read-only.
     bed : np.ndarray
         Physical bed depth per column, float64 ``(C,)``, positive down: a
         copy of ``mesh.depth`` (nodes) or of ``mesh.metadata["elem_bed"]``
-        (elements), never changed by a ``max_levels`` cut.  A column is
+        (elements), never changed by a ``max_levels`` cut; ``+inf`` for
+        every column of a sigma mesh (wet at every ``s``).  A column is
         wet at depth ``z`` while ``z <= bed`` (:func:`uv_wet`).
         Read-only.
 
@@ -151,7 +170,8 @@ class _DepthPointsEntry:
     """Cache entry: strong references to the inputs and the table.
 
     ``depth`` is the bed array the table was built from: ``mesh.depth``
-    (nodes) or ``mesh.metadata["elem_bed"]`` (elements).
+    (nodes) or ``mesh.metadata["elem_bed"]`` (elements); ``depth`` and
+    ``decl`` are ``None`` for a sigma table, which reads neither.
     """
     sigma: object
     depth: object
@@ -194,7 +214,8 @@ def _snapshot_declaration(decl):
 
 
 def _build_depth_points(sigma, depth, decl, placement: str, n_cols: int,
-                        layout: str = "node") -> DepthPoints:
+                        layout: str = "node",
+                        vertical_coord: str = "zlevel") -> DepthPoints:
     """Build and validate the table of one placement and layout.
 
     ``depth`` is the bed array of the columns (``mesh.depth`` for nodes,
@@ -202,8 +223,28 @@ def _build_depth_points(sigma, depth, decl, placement: str, n_cols: int,
     ``decl`` is the engine's snapshot of the declaration
     (:func:`_snapshot_declaration`) or ``None`` (nodes only); it is
     validated here and nothing of it is kept but its values in ``last``.
+    On a sigma mesh (``vertical_coord == "sigma"``, ``"layer_linear"``
+    only) ``depth`` and ``decl`` are not read: the points are the layer
+    centres in the sigma fraction, every column reads every layer and is
+    wet at every ``s``.
     Raises the ``ValueError`` documented in :func:`depth_points`.
     """
+    if vertical_coord == "sigma":
+        # interfaces at s_k = 1 - sigma_k (find_layer_sigma's convention:
+        # sigma 1 at the surface, 0 at the bed); centres 1 - (sigma_k +
+        # sigma_{k+1}) / 2; every layer of every column holds water
+        sig = np.asarray(sigma, dtype=np.float64)
+        if sig.ndim != 1 or sig.size < 2:
+            raise ValueError(
+                f"depth-linear u/v ({placement!r}) needs a 3-D sigma mesh "
+                f"with >= 2 interfaces in mesh.sigma, got shape {sig.shape}")
+        p = 1.0 - 0.5 * (sig[:-1] + sig[1:])
+        last = np.full(n_cols, p.size - 1, dtype=np.int32)
+        bed = np.full(n_cols, np.inf, dtype=np.float64)
+        p.setflags(write=False)
+        last.setflags(write=False)
+        bed.setflags(write=False)
+        return DepthPoints(p=p, last=last, bed=bed)
     z = np.abs(np.asarray(sigma, dtype=np.float64))   # == mesh.z_levels
     need = 1 if placement == "level" else 2
     if z.ndim != 1 or z.size < need:
@@ -336,10 +377,14 @@ def depth_points(mesh: Mesh, placement: str,
         ``mesh.metadata["uv_data_last_elem"]`` (int ``(E,)``, ``>= -1``,
         the element's last wet layer) and bed depths
         ``mesh.metadata["elem_bed"]`` (float ``(E,)``, positive down), both
-        required.
+        required.  Or a sigma mesh (``vertical_coord == "sigma"``) with
+        its sigma interfaces in ``mesh.sigma`` (1 at the surface, 0 at the
+        bed), either layout, nothing else read: ``p`` = the layer centres
+        in the sigma fraction ``s``, ``last = M - 1`` and ``bed = +inf``
+        for every column.
     placement : str
-        ``"level"`` or ``"layer_linear"`` (element layout:
-        ``"layer_linear"`` only).
+        ``"level"`` or ``"layer_linear"`` (element layout and sigma
+        meshes: ``"layer_linear"`` only).
     layout : str, optional
         ``"node"`` (default: one column per node) or ``"element"`` (one
         column per element) — the ``uv_layout`` of the fields the table
@@ -354,7 +399,9 @@ def depth_points(mesh: Mesh, placement: str,
         declaration are the same objects; rebuilt (a new object) when any
         of them is replaced.  The node and the element table of a mesh
         are independent: a new ``mesh.depth`` rebuilds only the node
-        table, a new ``elem_bed`` only the element table.
+        table, a new ``elem_bed`` only the element table.  A sigma table
+        reads no bed and no declaration: it is the same object while
+        ``mesh.sigma`` is.
 
     Notes
     -----
@@ -376,12 +423,15 @@ def depth_points(mesh: Mesh, placement: str,
     ------
     ValueError
         ``placement`` is ``"layer"`` or unknown, ``layout`` is unknown,
-        ``"level"`` on element layout, the mesh is not z-level, the level
-        table is too short, non-finite or not increasing, the depth, the
-        element bed or the declaration has the wrong shape or type, an
-        element table lacks the declaration or the element bed (the
-        message names both keys and ``nlevels``), or the mesh has
-        ice-shelf cavities (:func:`refuse_elem_cavities`).
+        ``"level"`` on element layout or on a sigma mesh, the mesh is
+        neither z-level nor sigma, a sigma mesh has fewer than 2
+        interfaces, the level table is too short, non-finite or not
+        increasing, the depth, the element bed or the declaration has the
+        wrong shape or type, an element table lacks the declaration or
+        the element bed (the message names both keys and ``nlevels``), or
+        the mesh has ice-shelf cavities (:func:`refuse_elem_cavities`).
+        A sigma table is refused for its placement, layout and number of
+        interfaces only.
     """
     if placement not in _DL_PLACEMENTS:
         raise ValueError(
@@ -397,15 +447,27 @@ def depth_points(mesh: Mesh, placement: str,
             "depth-linear u/v on element layout is 'layer_linear' only "
             f"(layer-centred data), got {placement!r}; 'level' data sit on "
             "the nodes' levels")
-    if mesh.vertical_coord != "zlevel":
+    coord = mesh.vertical_coord
+    if coord == "sigma":
+        if placement != "layer_linear":
+            raise ValueError(
+                "depth-linear u/v on a sigma mesh (vertical_coord 'sigma') "
+                "is 'layer_linear' only (layer-centred data, read in the "
+                f"sigma fraction s = z / H), got {placement!r}")
+    elif coord != "zlevel":
         raise ValueError(
-            f"depth-linear u/v ({placement!r}) needs a z-level mesh "
-            f"(vertical_coord 'zlevel'), got {mesh.vertical_coord!r}")
+            f"depth-linear u/v ({placement!r}) needs a z-level or sigma "
+            f"mesh (vertical_coord 'zlevel' or 'sigma'), got {coord!r}")
     sigma = mesh.sigma
     meta = mesh.metadata or {}
     decl_key = _DECL_KEYS[layout]
-    decl = meta.get(decl_key)
-    if layout == "node":
+    # a sigma column is wet in every layer: no declaration, no bed (and no
+    # element bottoms on element layout) is read
+    decl = None if coord == "sigma" else meta.get(decl_key)
+    if coord == "sigma":
+        depth = None
+        n_cols = mesh.n_nodes if layout == "node" else mesh.n_elements
+    elif layout == "node":
         depth = mesh.depth
         n_cols = mesh.n_nodes
     else:
@@ -426,11 +488,11 @@ def depth_points(mesh: Mesh, placement: str,
                 and not (isinstance(decl, np.ndarray)
                          and decl.flags.writeable)):
             return entry.points
-    if layout == "element":
+    if layout == "element" and coord == "zlevel":
         refuse_elem_cavities(mesh)
     snap = _snapshot_declaration(decl)
     points = _build_depth_points(sigma, depth, snap, placement, n_cols,
-                                 layout)
+                                 layout, coord)
     if snap is not decl:
         # the declaration in effect is what the table was built from.  A
         # shallow copy of the mesh shares this dict and then sees the
@@ -574,17 +636,23 @@ def _first_nonfinite_per_node(f, last, out):
 
 
 def _check_components(vel, dp: DepthPoints, placement: str, record: str,
-                      layout: str = "node") -> None:
+                      layout: str = "node",
+                      sigma_mesh: bool = False) -> None:
     """Shape and finiteness of ``vel.u`` / ``vel.v`` at points ``<= last``.
 
     ``layout`` names the columns in the messages: ``"node"`` or
-    ``"element"``.
+    ``"element"``; ``sigma_mesh`` (a sigma mesh's table) names a point by
+    its sigma fraction ``s`` instead of its depth.
     """
     m = dp.p.size
     n = dp.last.size
     col = "element" if layout == "element" else "node"
-    why = ("declared last wet layer and kept levels" if col == "element"
-           else "bed, kept levels and declared data prefix")
+    if sigma_mesh:
+        why = "every layer of a sigma column"
+    else:
+        why = "down to its last usable point: " + (
+            "declared last wet layer and kept levels" if col == "element"
+            else "bed, kept levels and declared data prefix")
     rec = f" in record {record}" if record else ""
     for comp in ("u", "v"):
         f = getattr(vel, comp)
@@ -608,12 +676,14 @@ def _check_components(vel, dp: DepthPoints, placement: str, record: str,
         if bad.size:
             i = int(bad[0])
             k = int(out[i])
+            at = (f"s = {dp.p[k]:g}" if sigma_mesh
+                  else f"depth {dp.p[k]:g} m")
             raise ValueError(
                 f"check_depth_linear_record: {comp} = {float(f[k, i])!r} is "
-                f"non-finite at {col} {i}, point {k} (depth {dp.p[k]:g} m)"
-                f"{rec}; a {placement!r} field must be finite at points "
-                f"0..{int(dp.last[i])} of this {col} (down to its last "
-                f"usable point: {why}; {bad.size} {col}(s) affected)")
+                f"non-finite at {col} {i}, point {k} ({at}){rec}; a "
+                f"{placement!r} field must be finite at points "
+                f"0..{int(dp.last[i])} of this {col} ({why}; {bad.size} "
+                f"{col}(s) affected)")
 
 
 def _layout_of(vel) -> str:
@@ -630,8 +700,10 @@ def check_depth_linear_record(vel, mesh: Mesh, *, record: str = "") -> None:
     Refuses (``ValueError`` naming node or element, point, component and
     ``record``) a u or v value that is non-finite at a point ``<= last``
     of its column; points below ``last`` may hold anything (NaN, fill
-    values).  ``w`` is never checked, and a finite fill value inside the
-    prefix is the reader's business (readers mask their fill values).  On
+    values; on a sigma mesh ``last`` is the bottom layer of every column,
+    so every layer must be finite).  ``w`` is never checked, and a finite
+    fill value inside the prefix is the reader's business (readers mask
+    their fill values).  On
     success sets ``vel._dl_token = depth_points(mesh, vel.uv_vertical,
     vel.uv_layout)``: a node-layout field is checked against the node
     table, an element-layout field against the element table.
@@ -649,14 +721,15 @@ def check_depth_linear_record(vel, mesh: Mesh, *, record: str = "") -> None:
         ``uv_layout="node"``, mesh elements for ``"element"``).  A
         field-like object without ``uv_layout`` counts as element layout.
     mesh : Mesh
-        The z-level mesh the field is evaluated on.
+        The z-level or sigma mesh the field is evaluated on.
     record : str, optional
         Names the record in the message (e.g. ``"time index 2"``).
 
     Raises
     ------
     ValueError
-        A ``"layer"`` field, a non-z-level mesh, a mesh without the
+        A ``"layer"`` field, a mesh neither z-level nor sigma, a
+        ``"level"`` field on a sigma mesh, a z-level mesh without the
         element bottoms (element layout), a shape mismatch, or a
         non-finite value at a usable point.
     """
@@ -669,7 +742,8 @@ def check_depth_linear_record(vel, mesh: Mesh, *, record: str = "") -> None:
         if vel.vel_a._dl_token is dp and vel.vel_b._dl_token is dp:
             vel._dl_token = dp
         return
-    _check_components(vel, dp, vel.uv_vertical, record, layout)
+    _check_components(vel, dp, vel.uv_vertical, record, layout,
+                      mesh.vertical_coord == "sigma")
     vel._dl_token = dp
 
 

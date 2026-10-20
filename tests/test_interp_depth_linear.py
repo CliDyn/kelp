@@ -735,20 +735,50 @@ def test_direct_call_checks_once_and_rechecks_on_new_mesh():
         ip._interp_barycentric_dl(st, mesh2, vel, nn, 1.0)
 
 
-@pytest.mark.parametrize("placement", ["level", "layer_linear"])
-def test_direct_sigma_mesh_refused(placement):
+#: sigma interfaces of the sigma-mesh test (1 at the surface, 0 at the bed)
+SIGMA = np.array([1.0, 0.75, 0.5, 0.25, 0.0])
+
+
+def test_direct_sigma_mesh_reads_the_sigma_table():
+    """On a sigma mesh a direct call reads the sigma table: the particle
+    coordinate is the sigma fraction s (``state.z`` holds it; the
+    integrators hand it over), the points are the layer centres in s and
+    every vertex is wet at every s, so ``u = a + b*s`` comes out exactly,
+    clipped to the outer centres.  A field checked on the z-level mesh is
+    checked again against the sigma table, where every layer is a usable
+    point: its ``+inf`` below node 2's z-level last point is refused.
+    ``"level"`` data are refused on sigma."""
     mesh = _mesh()
-    vel = _field(placement)
+    vel = _field("layer_linear")
     st = _state(DEEP_PTS, 5.0)
     nn = find_nearest_nodes(mesh, st.lon, st.lat)
     ip._interp_barycentric_dl(st, mesh, vel, nn, 1.0)   # checked on z-level
     sig = _mesh()
+    sig.sigma = SIGMA.copy()
     sig.vertical_coord = "sigma"
-    for fld in (vel, _field(placement)):                # checked / unchecked
-        with pytest.raises(ValueError, match=r"needs a z-level mesh"):
-            ip._interp_barycentric_dl(st, sig, fld, nn, 1.0)
-        with pytest.raises(ValueError, match=r"needs a z-level mesh"):
-            ip.interp_barycentric(st, sig, fld, nn, 1.0)
+    c = 1.0 - 0.5 * (SIGMA[:-1] + SIGMA[1:])            # [1/8, 3/8, 5/8, 7/8]
+    n = sig.n_nodes
+    good = VelocityField(
+        u=np.repeat((A_U + B_U * c)[:, None], n, axis=1),
+        v=np.repeat((A_V + B_V * c)[:, None], n, axis=1),
+        eta=np.zeros(n), w=np.zeros((SIGMA.size, n)),
+        uv_layout="node", uv_vertical="layer_linear")
+    for s in (0.0, 0.3, 0.5, 0.875, 1.0):
+        st_s = _state(DEEP_PTS, s)
+        sc = min(max(s, c[0]), c[-1])
+        for fn in (ip._interp_barycentric_dl, ip.interp_barycentric):
+            U, V, ok = fn(st_s, sig, good, nn, 1.0)
+            assert ok.all()
+            np.testing.assert_allclose(U, A_U + B_U * sc, rtol=1e-14)
+            np.testing.assert_allclose(V, A_V + B_V * sc, rtol=1e-14)
+    assert vu.is_checked(good, sig)
+    for fn in (ip._interp_barycentric_dl, ip.interp_barycentric):
+        with pytest.raises(ValueError, match=r"u = inf is non-finite at "
+                                             r"node 2, point 1 \(s = 0.375\)"):
+            fn(st, sig, vel, nn, 1.0)
+        with pytest.raises(ValueError, match=r"on a sigma mesh .* is "
+                                             r"'layer_linear' only"):
+            fn(st, sig, _field("level"), nn, 1.0)
 
 
 @pytest.mark.parametrize("placement", ["level", "layer_linear"])
