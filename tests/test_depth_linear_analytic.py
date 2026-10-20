@@ -73,7 +73,11 @@ stage-2 coordinate the sigma work introduced): the unmutated copy passed
 368 cells of the two modules (4 skipped), the sources before the sigma
 work (4013cb4) failed 323 — every sigma cell, 20 here and 303 of the step
 (sigma meshes refused; the step's spies find no ``_sigma_frac_for_uv``) —
-and passed the 45 z-level cells.  M1 .. M12 turned the same cells of this
+and passed the 45 z-level cells.  Every row again on f9c5d4c, the same
+day, after the stretched-sigma cells of the profile test: the unmutated
+copy passed 372, the sources before the sigma work failed 327 (24 here),
+M1, M9 and M15 red in the stretched cells too (counts below), every other
+row unchanged.  M1 .. M12 turned the same cells of this
 module red as before, plus the sigma cells named below; the others leave
 every sigma cell green (a sigma column is wet at every ``s``: no walls, no
 declaration, no bed).  Red tests (parametrised cells) and the mechanism,
@@ -84,7 +88,7 @@ id     red tests                    mutant -> mechanism
 =====  ===========================  =======================================
 M1     linear_in_depth_exact 18,    ``uv_at`` weights swapped -> linear
        profile 4, trajectory 4,     mode 6.4 % off the closed form (1.8 %
-       sigma_profile 4,             with W), first order in both tests
+       sigma_profile 8,             with W), first order in both tests
        sigma_trajectory 4,          (node RK2 is not red: its fused twin
        step 212                     blends in line, not through ``uv_at``);
                                     in ``s`` first order too (ratios 1.99
@@ -116,7 +120,7 @@ M8     depth_constant 12            ``bed = lower[last]`` -> the particle
                                     0.025 deg off the layer run
 M9     linear_in_depth_exact 20,    ``uv_bracket`` reads the nearest
        profile 4, trajectory 4,     centre (the layer path's values) ->
-       sigma_profile 4,             1.1 .. 3.6 % off, ratios 1.95 .. 2.00
+       sigma_profile 8,             1.1 .. 3.6 % off, ratios 1.95 .. 2.00
        sigma_trajectory 4,          (in ``s``: the layer mode's errors to
        step 212                     the digit)
 M10    trench[edge_leastsq] 2       a dry edge neighbour kept as a member
@@ -140,7 +144,7 @@ M14    sigma_trajectory 4,          ``_sigma_frac_for_uv`` returns metres
                                     given ``s``) and the depth-constant
                                     field (``s`` cannot show) green
 M15    sigma_depth_constant 9,      the table's points at the upper
-       sigma_profile 4,             interfaces ``1 - sigma_k``, not the
+       sigma_profile 8,             interfaces ``1 - sigma_k``, not the
        sigma_trajectory 4,          centres -> first order (ratios 1.99 ..
        step 233                     2.00), the step 7.5 % off; the particle
                                     at ``s = 0.02`` now between two points:
