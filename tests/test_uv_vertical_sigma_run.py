@@ -598,6 +598,23 @@ def test_split_uniform_kh_with_option_sigma(tmp_path, layout, uv_interp):
     assert not np.array_equal(ta["lon"], tc["lon"])
     assert np.all(_gap(ta, tp)[:, -1] > 1.0)
     assert _global_attrs(paths[0])["uv_vertical"] == "linear"
+    _assert_kicked_run_advects_linear(path, kw, tp, _diffusion(11, kh=1e-14))
+
+
+def _assert_kicked_run_advects_linear(path, kw, tp, diffusion):
+    """With a vanishing coefficient the kicked run is the plain linear run
+    (``tp``), far from the plain layer run: the step that composes the kick
+    advects by the depth-linear rule, not by the layer one."""
+    tiny = _cfg(path, diffusion=diffusion, out="tiny.nc", **kw)
+    _run(tiny)
+    layer = _cfg(path, uv_vertical="layer", out="layer.nc", **kw)
+    _run(layer)
+    tt = load_trajectories(tiny.data.output_path)
+    tl = load_trajectories(layer.data.output_path)
+    near = max(np.max(_gap(tt, tp)), np.max(np.abs(tt["z"] - tp["z"])))
+    far = np.max(_gap(tl, tp), axis=1)
+    assert near < 1e-3, near
+    assert np.all(far > 1.0), far
 
 
 @pytest.mark.parametrize("layout,uv_interp", CASES, ids=CASE_IDS)
@@ -626,6 +643,7 @@ def test_az_kick_with_option_sigma(tmp_path, layout, uv_interp):
          + GEO.eta(ta["lon"], ta["lat"], (np.arange(N_STEPS) + 1) * DT))
     assert np.all((ta["z"] >= 0.0) & (ta["z"] <= h))
     assert _global_attrs(paths[0])["uv_vertical"] == "linear"
+    _assert_kicked_run_advects_linear(path, kw, tp, _diffusion(5, az=1e-14))
 
 
 @pytest.mark.parametrize("layout,uv_interp", CASES, ids=CASE_IDS)
