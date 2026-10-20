@@ -102,6 +102,10 @@ dry element in the `leastsq` ring for 16.1 % of the particles and fewer than thr
 wet ones for 4.2 % (counted from the script's own mesh and seeds, the same day).
 The two fd4e869 rows were measured before the walls at depth (a vertex whose bed
 lay above the particle was then read at its own last usable point, not left out).
+At 4067870, on the FESOM-C-like sigma mesh (setup 14.1 s incl. compilation, then
+1.7–2.1 s), the cost of the depth rule in `s` per unfused RK2 step is within the
+run-to-run spread for element `leastsq` with a linear time blend (ratio 0.98),
+3 % with PCHIP, and 3 % / 4 % for node `barycentric` (linear / PCHIP).
 
 | machine | CPU | threads | leg | NSIDE / nodes | particles | payload | layer [ms/step] | layer_linear [ms/step] | ratio | commit | measured |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -112,5 +116,9 @@ lay above the particle was then read at its own last usable point, not left out)
 | HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | element leastsq, unfused RK2 | 64 / 98,300 elements | 100,000 | pchip | 37.210 (35.913–39.294) | 36.184 (35.650–37.320) | 0.972 | 3136b19 | 2026-10-20 |
 | HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | node, fused RK2 | 64 / 49,152 | 100,000 | lerp | 9.588 (9.456–10.206) | 10.517 (10.459–10.590) | 1.097 | 3136b19 | 2026-10-20 |
 | HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | node, fused RK2 | 64 / 49,152 | 100,000 | pchip | 12.512 (12.484–16.679) | 12.448 (12.404–17.992) | 0.995 | 3136b19 | 2026-10-20 |
+| HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | sigma, element leastsq, unfused RK2 | 64 / 98,300 elements | 100,000 | lerp | 32.538 (31.635–36.572) | 31.918 (31.004–37.175) | 0.981 | 4067870 | 2026-10-20 |
+| HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | sigma, element leastsq, unfused RK2 | 64 / 98,300 elements | 100,000 | pchip | 36.565 (36.109–39.490) | 37.688 (37.545–39.161) | 1.031 | 4067870 | 2026-10-20 |
+| HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | sigma, node barycentric, unfused RK2 | 64 / 49,152 | 100,000 | lerp | 36.508 (35.789–38.455) | 37.513 (36.915–37.971) | 1.028 | 4067870 | 2026-10-20 |
+| HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | sigma, node barycentric, unfused RK2 | 64 / 49,152 | 100,000 | pchip | 34.491 (34.329–36.637) | 35.712 (35.481–36.076) | 1.035 | 4067870 | 2026-10-20 |
 
 Median of 15 interleaved steps per placement (min–max in brackets).

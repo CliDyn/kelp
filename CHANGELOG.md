@@ -142,7 +142,9 @@ the tracker was developed privately from 2026-06.
   for a depth-constant field, second order in the sigma layer thickness for a
   smooth profile, layer mode first) with sigma mutants in their mutation pass;
   `benchmarks/single_node/depth_linear_cost.py --vertical sigma` measures the
-  cost (no row yet).
+  cost per unfused 3-D RK2 step (128 threads, 1e5 particles): element
+  `leastsq` no measurable cost with a linear time blend, +3 % with PCHIP;
+  node `barycentric` +3 % and +4 %.
 
 ### Added — FESOM 1.4 reader (`mesh.type: fesom14`)
 
