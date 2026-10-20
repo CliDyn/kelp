@@ -683,12 +683,17 @@ TRENCH_END_SEEDS = {
     "barycentric-element": [(7.15, 5.075, 50.0)],
     "barycentric-node": [(6.90, 5.05, 50.0)],
 }
+#: no-slip: the element seeds with the first off the node column at 5.00E
+#: (the fit of ``edge_leastsq`` jumps across an element edge, so a
+#: particle on one has two answers)
+TRENCH_NOSLIP_SEEDS = [(5.02, 5.05, 35.0)] + TRENCH_SEEDS["element"][1:]
 TRENCH_CASES = [("element", "leastsq", "freeslip"),
                 ("element", "edge_leastsq", "freeslip"),
+                ("element", "edge_leastsq", "noslip"),
                 ("element", "barycentric", "freeslip"),
                 ("node", "barycentric", "freeslip")]
-TRENCH_IDS = ["leastsq", "edge_leastsq-freeslip", "barycentric-element",
-              "barycentric-node"]
+TRENCH_IDS = ["leastsq", "edge_leastsq-freeslip", "edge_leastsq-noslip",
+              "barycentric-element", "barycentric-node"]
 
 
 def _trench_beds():
@@ -710,6 +715,58 @@ def _line_beds():
     return np.where(deep, DEEP, SHELF)
 
 
+def _noslip_hand(mesh, lon, lat, z):
+    """The ``edge_leastsq`` no-slip value of the trench flow at ``(lon,
+    lat)``, depth ``z`` below the shelf bed: the plane fitted by least
+    squares through the containing element's centre (``U_T``), the centre
+    of each edge neighbour wet at ``z`` (``U_T``, a trench element) and,
+    for each dry one (the shelf), the ghost — the own centre mirrored
+    across the shared edge — at ``-U_T``, read at the particle.  Metres
+    east and north of the particle, as the fit's; the element centres are
+    the reader's; the edge neighbours are found here from the vertices."""
+    tri = np.asarray(mesh.elem_nodes)[:, :3]
+    bed = mesh.metadata["elem_bed"]
+    x, y = mesh.nodes_lon[tri], mesh.nodes_lat[tri]
+    det = ((x[:, 1] - x[:, 0]) * (y[:, 2] - y[:, 0])
+           - (x[:, 2] - x[:, 0]) * (y[:, 1] - y[:, 0]))
+    l1 = ((lon - x[:, 0]) * (y[:, 2] - y[:, 0])
+          - (x[:, 2] - x[:, 0]) * (lat - y[:, 0])) / det
+    l2 = ((x[:, 1] - x[:, 0]) * (lat - y[:, 0])
+          - (lon - x[:, 0]) * (y[:, 1] - y[:, 0])) / det
+    inside = np.flatnonzero(np.minimum(np.minimum(l1, l2), 1.0 - l1 - l2)
+                            > 1e-6)
+    assert inside.size == 1, (lon, lat, inside)    # never on an edge
+    e = int(inside[0])
+    assert bed[e] == DEEP
+
+    def metric(lo, la):
+        return ((lo - lon) * np.cos(lat * DEG2RAD) * M_DEG,
+                (la - lat) * M_DEG)
+    cx, cy = metric(mesh.elem_center_lon[e], mesh.elem_center_lat[e])
+    pts = [(cx, cy, U_T)]
+    for k in range(3):
+        a, b = tri[e, k], tri[e, (k + 1) % 3]
+        nb = [f for f in np.flatnonzero((tri == a).any(axis=1)
+                                        & (tri == b).any(axis=1)) if f != e]
+        assert len(nb) == 1
+        if z <= bed[nb[0]]:
+            assert bed[nb[0]] == DEEP
+            pts.append(metric(mesh.elem_center_lon[nb[0]],
+                              mesh.elem_center_lat[nb[0]]) + (U_T,))
+            continue
+        ax, ay = metric(mesh.nodes_lon[a], mesh.nodes_lat[a])
+        bx, by = metric(mesh.nodes_lon[b], mesh.nodes_lat[b])
+        tx, ty = bx - ax, by - ay
+        s = ((cx - ax) * tx + (cy - ay) * ty) / (tx * tx + ty * ty)
+        pts.append((2.0 * (ax + s * tx) - cx, 2.0 * (ay + s * ty) - cy,
+                    -U_T))
+    pts = np.array(pts)
+    scale = STEP * M_DEG                     # a well-scaled design matrix
+    design = np.column_stack([np.ones(len(pts)), pts[:, 0] / scale,
+                              pts[:, 1] / scale])
+    return np.linalg.lstsq(design, pts[:, 2], rcond=None)[0][0]
+
+
 @pytest.mark.parametrize("layout,uv_interp,bc", TRENCH_CASES,
                          ids=TRENCH_IDS)
 def test_trench_wall_keeps_speed(tmp_path, layout, uv_interp, bc):
@@ -724,12 +781,23 @@ def test_trench_wall_keeps_speed(tmp_path, layout, uv_interp, bc):
     the trench (``leastsq``: fewer than three wet ring elements, their
     area mean; ``barycentric``: the wet vertices) the speed is ``U`` too.
     (``edge_leastsq``'s end wall, across the flow, brakes it as a coast
-    does; ``edge_leastsq_bc: noslip`` brakes at every wall by design.)
+    does.)  ``edge_leastsq_bc: noslip`` brakes at every wall by design: the
+    recorded ``vel_u`` is the hand value of the no-slip fit
+    (:func:`_noslip_hand`: the own value negated across the shelf edge) at
+    each step's start to 1e-12 of ``U``, far from ``U`` at every start,
+    and every particle covers well under ``U T``; no layer run (the layer
+    fit reads the shelf's zeros, the linear one the negated ghost).  The
+    plane is not bounded by ``U``: in a trench triangle whose wall edge is
+    the far one it extrapolates above ``U`` near the opposite side.
 
     Measured (2026-10-20, 204a8b4): linear ``vel_u`` within 1.6e-15 of
     ``U``; the layer run's distance over the linear one 0.70 .. 0.80
     (``leastsq``), 0.77 .. 0.83 (``edge_leastsq``), 0.50 (element
-    ``barycentric``), 0.65 .. 0.80 (node ``barycentric``)."""
+    ``barycentric``), 0.65 .. 0.80 (node ``barycentric``).  No slip
+    (2026-10-20, 4a5fc2a): ``vel_u`` within 1.1e-14 of ``U`` from the hand
+    fit, 0.27 .. 1.42 ``U`` (above ``U`` at two release points in a
+    triangle walled to the north, 2 of 16 step starts); the distances
+    0.28 .. 0.63 ``U T``."""
     path = tmp_path / "fesom.mesh.diag.nc"
     if layout == "node":
         mesh_path = _write_mesh(path, NX_T, NY_T, LEVELS_T, SHELF,
@@ -750,25 +818,41 @@ def test_trench_wall_keeps_speed(tmp_path, layout, uv_interp, bc):
     u = np.broadcast_to(col[None], (n_rec,) + col.shape).copy()
     data = _write_data(tmp_path / "data", mesh, layout, u, np.zeros_like(u))
     key = uv_interp if uv_interp != "barycentric" else f"barycentric-{layout}"
-    main = TRENCH_SEEDS[layout]
+    main = TRENCH_NOSLIP_SEEDS if bc == "noslip" else TRENCH_SEEDS[layout]
     seeds = main + TRENCH_END_SEEDS.get(key, [])
     lon0, lat0, z0 = (np.array(c) for c in zip(*seeds))
     runs = {}
-    for mode in ("linear", "layer"):
+    for mode in ("linear", "layer") if bc == "freeslip" else ("linear",):
         runs[mode] = _traj(_cfg(mesh_path, data, seeds, out=f"{mode}.nc",
                                 uv_interp=uv_interp, uv_vertical=mode,
                                 n_steps=N_STEPS_T2, edge_leastsq_bc=bc))
     t = runs["linear"]
-    # every stage-1 velocity is U (v zero), every step moves U dt east
-    assert np.all(np.abs(t["vel_u"] - U_T) <= 1e-12 * U_T), (
-        np.abs(t["vel_u"] / U_T - 1.0).max())
-    assert np.all(np.abs(t["vel_v"]) <= 1e-12 * U_T)
     lon = np.concatenate([lon0[:, None], t["lon"]], axis=1)
     lat = np.concatenate([lat0[:, None], t["lat"]], axis=1)
     assert_bitwise(t["lat"], np.repeat(lat0[:, None], N_STEPS_T2, axis=1),
                    "lat")
     assert_bitwise(t["z"], np.repeat(z0[:, None], N_STEPS_T2, axis=1), "z")
+    # every stage-1 velocity: U, or the no-slip fit at the step's start;
+    # v zero
+    if bc == "freeslip":
+        u_hand = np.full(t["vel_u"].shape, U_T)
+    else:
+        u_hand = np.array([[_noslip_hand(mesh, lon[i, k], lat0[i], z0[i])
+                            for k in range(N_STEPS_T2)]
+                           for i in range(len(seeds))])
+        # the test can tell the two conditions at every step start
+        assert np.all(np.abs(u_hand - U_T) > 0.1 * U_T), u_hand / U_T
+    assert np.all(np.abs(t["vel_u"] - u_hand) <= 1e-12 * U_T), (
+        np.abs(t["vel_u"] - u_hand).max() / U_T)
+    assert np.all(np.abs(t["vel_v"]) <= 1e-12 * U_T)
     dx = (np.diff(lon, axis=1) * np.cos(lat[:, 1:] * DEG2RAD) * M_DEG)
+    if bc == "noslip":
+        # braked over the run: every particle well short of U T
+        assert np.all((dx > 0.0).all(axis=1)
+                      & (dx.sum(axis=1) < 0.8 * U_T * N_STEPS_T2 * DT)), (
+            dx.sum(axis=1) / (U_T * N_STEPS_T2 * DT))
+        return
+    # free slip: every step moves U dt east
     quantum = (_wrap_quantum(lon[:, 1:]) * np.cos(lat[:, 1:] * DEG2RAD)
                * M_DEG)
     assert np.all(np.abs(dx - U_T * DT) <= 1e-12 * U_T * DT + quantum), (

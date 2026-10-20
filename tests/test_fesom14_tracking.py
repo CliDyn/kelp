@@ -7,10 +7,11 @@ refused (it points to ``data.time_stamp`` / ``data.time_window``), and the
 output metadata says ``time_averaging = "resolved_by_reader"``.  The stamp
 options ``data.time_stamp`` / ``data.time_window`` / ``data.time_offset``
 reach ``open_dataset`` only for ``mesh.type: fesom14``; with any other mesh
-type they are refused by name.  Also pinned here: the refusals that must come
-before the output file exists (``beaching.use_eta`` without a sea-surface
-height, em/m1 diffusion), ``mesh.input_rotation`` with other mesh types,
-``kelp info`` with the stamp options, the sharding concat, and the W
+type they are refused by name.  Also pinned here: a vertex whose bed lies
+above the particle left out of the blend (a wall at depth), the refusals that
+must come before the output file exists (``beaching.use_eta`` without a
+sea-surface height, em/m1 diffusion), ``mesh.input_rotation`` with other mesh
+types, ``kelp info`` with the stamp options, the sharding concat, and the W
 reconstruction's refusal of data on the levels.
 
 Fixture: a 5 x 5 grid of nodes one degree apart (10..14 E, 40..44 N),
@@ -513,6 +514,57 @@ def test_run_tracking_sigma_mean_cut_column(tmp_path, max_levels, z_term):
     np.testing.assert_allclose(tr["lon"],
                                _expected_lon(SEEDS, [z_term, z_term], 3),
                                rtol=0, atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Walls at depth
+# ---------------------------------------------------------------------------
+
+def _shelf_u(t, z, lon, lat):
+    """A steady u on the levels (m/s): it varies across the nodes and,
+    not linearly, with depth."""
+    return (0.08 + 0.02 * (lon - 12.0) - 0.03 * (lat - 42.0)
+            + 4.0e-5 * z * z + 0.0 * t)
+
+
+def test_dry_vertex_left_out_fesom14(tmp_path):
+    """One Euler step at 20 m from a point of the triangle (11E 43N, 12E
+    43N, 12E 44N), whose vertex at 44N has two wet levels (its bed at 10 m)
+    and the others four (bed 50 m): that vertex is a wall at 20 m and left
+    out; the two others, each read linearly between its 10 and 25 m
+    levels, are blended with their barycentric weights renormalised (the
+    weights computed here).  Not the dry vertex read at its last level
+    (10 m), the clip rule of a column without walls.  No option: FESOM 1.4
+    u/v sit on the levels, and the rule holds for them as they are.
+    ``u = _shelf_u``, ``v = w = 0``."""
+    data = _data(tmp_path / "data", {"uo": _shelf_u, "vo": _zero,
+                                     "wo": _zero})
+    vx, vy = np.array([11.0, 12.0, 12.0]), np.array([43.0, 43.0, 44.0])
+    ncol = [int(NCOL[(LON == x) & (LAT == y)][0]) for x, y in zip(vx, vy)]
+    assert ncol == [4, 4, 2]
+    lon0, lat0, z0 = 11.7, 43.2, 20.0
+    # barycentric weights in lon/lat: the same in any affine frame
+    w = np.linalg.solve(np.vstack([vx, vy, np.ones(3)]), [lon0, lat0, 1.0])
+    a = (z0 - 10.0) / (25.0 - 10.0)
+    val = ((1.0 - a) * _shelf_u(0, 10.0, vx, vy)
+           + a * _shelf_u(0, 25.0, vx, vy))
+    hand = (w[0] * val[0] + w[1] * val[1]) / (w[0] + w[1])
+    # the test can tell the wall from the clip rule
+    clip = w[0] * val[0] + w[1] * val[1] + w[2] * _shelf_u(0, 10.0, 12.0,
+                                                           44.0)
+    assert abs(clip - hand) > 1e-3 * abs(hand), (clip, hand)
+    cfg = _cfg(tmp_path, data=data, seeds=[(lon0, lat0, z0)], n_steps=1,
+               numerics={"integrator": "euler"})
+    _run(cfg)
+    tr = load_trajectories(cfg.data.output_path)
+    assert (tr["status"] == ParticleStatus.ALIVE).all()
+    assert abs(tr["vel_u"][0, 0] - hand) <= 1e-9 * abs(hand), (
+        tr["vel_u"][0, 0], hand)
+    assert tr["vel_v"][0, 0] == 0.0
+    east = DAY * hand / (np.cos(np.deg2rad(lat0)) * METERS_PER_DEG_LAT)
+    assert abs(tr["lon"][0, 0] - (lon0 + east)) <= 1e-9 * abs(east)
+    assert tr["lat"][0, 0] == lat0
+    assert tr["z"][0, 0] == z0                       # no bed clamp
 
 
 # ---------------------------------------------------------------------------
