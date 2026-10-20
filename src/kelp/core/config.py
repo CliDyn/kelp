@@ -50,7 +50,9 @@ class ModeConfig:
     # node-layout u/v with numerics.uv_interp: barycentric (FESOM2
     # unod/vnod, HEALPix dual geometry), element-layout u/v with leastsq,
     # edge_leastsq or barycentric (FESOM2 u/v; the mesh diagnostic must
-    # hold nlevels or zbar_e_bottom, no ice-shelf cavities); the output
+    # hold nlevels or zbar_e_bottom, no ice-shelf cavities).  On a sigma
+    # mesh (FESOM-C, node or element u/v, the same interpolators): linear
+    # in the sigma fraction s = z / H between the layer centres.  The output
     # attribute ``uv_vertical = "linear"`` records that it was on.
     uv_vertical: str = "layer"
 

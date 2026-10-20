@@ -262,12 +262,13 @@ def _clip(x, lo, hi):
 
 def _hand(integrator, st, *, geo, rule=Rule(), sig=SIG_S, td=1.0, dt=DT,
           tu=(0.0,) * 4, te=(0.0,) * 4, t_end=0.0, surf=None, read_uv=None,
-          w0=W0, variant="stage"):
+          w0=W0, w_hi=1.0, variant="stage"):
     """The sigma step by hand: ``(lon, lat, z, u1, v1, reads)``.
 
     ``H(x, y, t) = max(bed + eta, Dmin)`` (exact for every ``w_interp``:
     a plane; ``surf(x, y, t)`` replaces ``geo.eta``),
-    ``W = td w0 (0.5 + clip(z / H))``; stage ``k`` reads u/v at the time
+    ``W = td w0 (0.5 + clip(z / H, 0, w_hi))`` (``w_hi < 1``: the last
+    interface a ``max_levels`` cut keeps); stage ``k`` reads u/v at the time
     ``tu[k]`` (``read_uv(k, s)`` replaces the rule) and its column at the
     surface time ``te[k]``; the end of the step places ``s_new`` in the
     column at ``t_end`` and clamps it (``[0, H - z0b_min]``).  ``reads[k]``
@@ -287,7 +288,7 @@ def _hand(integrator, st, *, geo, rule=Rule(), sig=SIG_S, td=1.0, dt=DT,
         return max(geo.bed(x, y) + eta(x, y, t), DMIN)
 
     def wv(z, h):
-        return td * w0 * (0.5 + _clip(z / h, 0.0, 1.0))
+        return td * w0 * (0.5 + _clip(z / h, 0.0, w_hi))
 
     def uv(k, s):
         u, v = read_uv(k, s)
@@ -502,18 +503,28 @@ def test_stage_s_not_entry_s(monkeypatch, tmp_path, integrator, layout,
         _assert_far(out, st, _hand(integrator, st, variant=variant, **args))
 
 
-@pytest.mark.parametrize("mode", ["lerp", "supplied"])
+@pytest.mark.parametrize("mode", ["lerp", "supplied", "pchip"])
 @pytest.mark.parametrize("integrator", list(STEPS))
 def test_record_check_once(monkeypatch, tmp_path, integrator, mode):
     """The stage fields on a sigma mesh (a blend of the records, the field
-    seen with another surface) hold the token of the fields the entry
-    checked: the record check runs at the entry of the first step only —
-    once per field it receives (a lazy blend: its two records, then the
-    blend) — and never inside a stage or in a second step."""
+    seen with another surface, a PCHIP reconstruction at the stage time)
+    hold the token of the fields the entry checked: the record check runs
+    at the entry of the first step only — once per field it receives (a
+    lazy blend: its two records, then the blend; PCHIP: ``vel``,
+    ``vel_next`` and the two outer records of the bundle, the inner two
+    being ``vel`` and ``vel_next``) — and never inside a stage or in a
+    second step."""
     geo = GEO_MOVING
-    mesh, recs = _fesomc(tmp_path, geo=geo)
-    vel, kw, _tu, te, _t_end = _payload(mesh, recs, geo, "element", mode,
-                                        1.0)
+    if mode == "pchip":
+        mesh, recs = _fesomc(tmp_path, geo=geo, times=RECORDS)
+        snaps = [_as(r, "element") for r in recs]
+        vel, te = snaps[1], (RECORDS[1],)
+        kw = dict(vel_next=snaps[2], dt_to_next=3600.0,
+                  recon=(snaps, list(RECORDS), RECORDS[1], 1))
+    else:
+        mesh, recs = _fesomc(tmp_path, geo=geo)
+        vel, kw, _tu, te, _t_end = _payload(mesh, recs, geo, "element",
+                                            mode, 1.0)
     calls = []
     for mod in (I, ip):
         real = mod.check_depth_linear_record
@@ -529,6 +540,9 @@ def test_record_check_once(monkeypatch, tmp_path, integrator, mode):
     if mode == "lerp":
         first = [f"vel.vel_a ({integrator}_step)",
                  f"vel.vel_b ({integrator}_step)"] + first
+    elif mode == "pchip":
+        first += [f"{name} ({integrator}_step)" for name in (
+            "vel_next", "recon snapshot 0", "recon snapshot 3")]
     assert calls == [("integrators", r) for r in first]
     STEPS[integrator](st, vel, mesh, DT, 1.0, uv_interp="leastsq",
                       w_interp="barycentric", **kw)
