@@ -71,15 +71,26 @@ smoke test of the script, not a measurement.
 ## Rows
 
 An otherwise idle HPC compute node (exclusive allocation), Python 3.13.13,
-NumPy 2.4.6, Numba 0.65.1; setup 13.6 s (lerp, incl. compilation) and 1.8 s
-(pchip). Node layout, measured before the walls at depth (a vertex whose bed lay
-above the particle was then read at its own last usable point, not left out): the cost of the
-depth rule is 4 % of the step with a linear time blend and 8 % with the PCHIP
-payload. The element leg has no measured row yet.
+NumPy 2.4.6, Numba 0.65.1. Setup 13.6 s and 1.8 s (fd4e869, node lerp / pchip),
+17.3 s, 3.0 s and 2.7 s (3136b19, element Euler / RK2 lerp / RK2 pchip, the first
+incl. compilation), 1.5 s and 1.8 s (3136b19, node lerp / pchip). At 3136b19, with
+the walls at depth, the cost of the depth rule is 6 % of the fused element Euler
+step, 3 % of the unfused element RK2 step with a linear time blend and 10 % of the
+fused node RK2 step; with the PCHIP payload it is within the run-to-run spread
+(ratios 0.97 element, 1.00 node: no measurable cost). The element workload had a
+dry element in the `leastsq` ring for 16.1 % of the particles and fewer than three
+wet ones for 4.2 % (counted from the script's own mesh and seeds, the same day).
+The two fd4e869 rows were measured before the walls at depth (a vertex whose bed
+lay above the particle was then read at its own last usable point, not left out).
 
 | machine | CPU | threads | leg | NSIDE / nodes | particles | payload | layer [ms/step] | layer_linear [ms/step] | ratio | commit | measured |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | node, fused RK2 | 64 / 49,152 | 100,000 | lerp | 9.774 (9.665–10.939) | 10.183 (10.092–11.101) | 1.042 | fd4e869 | 2026-10-19 |
 | HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | node, fused RK2 | 64 / 49,152 | 100,000 | pchip | 15.985 (15.944–16.451) | 17.254 (17.209–17.644) | 1.079 | fd4e869 | 2026-10-19 |
+| HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | element leastsq, fused Euler | 64 / 98,300 elements | 100,000 | lerp | 7.298 (5.466–8.777) | 7.754 (5.904–8.884) | 1.063 | 3136b19 | 2026-10-20 |
+| HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | element leastsq, unfused RK2 | 64 / 98,300 elements | 100,000 | lerp | 24.181 (23.691–26.483) | 24.792 (24.525–26.023) | 1.025 | 3136b19 | 2026-10-20 |
+| HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | element leastsq, unfused RK2 | 64 / 98,300 elements | 100,000 | pchip | 37.210 (35.913–39.294) | 36.184 (35.650–37.320) | 0.972 | 3136b19 | 2026-10-20 |
+| HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | node, fused RK2 | 64 / 49,152 | 100,000 | lerp | 9.588 (9.456–10.206) | 10.517 (10.459–10.590) | 1.097 | 3136b19 | 2026-10-20 |
+| HPC compute node | 2× AMD EPYC 7763 (128 cores) | 128 | node, fused RK2 | 64 / 49,152 | 100,000 | pchip | 12.512 (12.484–16.679) | 12.448 (12.404–17.992) | 0.995 | 3136b19 | 2026-10-20 |
 
 Median of 15 interleaved steps per placement (min–max in brackets).

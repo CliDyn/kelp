@@ -58,9 +58,11 @@ the tracker was developed privately from 2026-06.
   writing into the reader's old array changes nothing, writing into the
   snapshot raises.
 - The cost of the option is measured by
-  `benchmarks/single_node/depth_linear_cost.py`: +4 % per fused 3-D RK2
-  step with a linear time blend, +8 % with PCHIP (128 threads, 1e5
-  particles; measured before the walls at depth of the next section).
+  `benchmarks/single_node/depth_linear_cost.py` (128 threads, 1e5 particles,
+  with the walls at depth of the next section): +10 % per fused 3-D node RK2
+  step with a linear time blend, no measurable cost with PCHIP; element
+  `leastsq`: +6 % per fused 3-D Euler step, +3 % per unfused 3-D RK2 step,
+  no measurable cost with PCHIP.
 
 ### Added — depth-linear u/v on FESOM2 element layout; walls at depth
 
