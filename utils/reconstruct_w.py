@@ -229,12 +229,76 @@ def _w_ale_positive_down(ds_wale, key, ti, n_keep=None):
     return arr
 
 
+#: where the u variable is looked for: the tool's own names and the name of
+#: FESOM 1.4 level-wise output, refused by _refuse_level_inputs
+_U_NAMES = ("u", "ua", "u_vel", "uo")
+
+_LEVEL_FIX = (
+    "This tool integrates layer u/v (K-1 layers between the K interfaces, "
+    "FESOM2) only. FESOM 1.4 output carries the vertical velocity ('wo'): "
+    "track with it (mesh.type: fesom14) instead of reconstructing it")
+
+
+def _level_layout(ds, name: str) -> Optional[str]:
+    """How ``ds[name]`` shows FESOM 1.4 data on the levels, or None."""
+    from kelp.readers.fesom14._layout import DEPTH_DIMS, HORIZONTAL_DIMS
+    dims = tuple(ds[name].dims)
+    if len(dims) == 2 and dims[1] == "nodes_3d":
+        return f"one vector over the 3-D nodes (dimensions {dims})"
+    if len(dims) == 3 and dims[1] in DEPTH_DIMS and dims[2] in HORIZONTAL_DIMS:
+        if dims[1] in ds.variables:
+            z = np.asarray(ds[dims[1]].values, dtype=np.float64)
+            if z.size and np.isfinite(z[0]) and abs(z[0]) < 1e-6:
+                # layer centres lie below the surface; a level does not
+                return (f"on the levels (dimensions {dims}, the first "
+                        f"{dims[1]!r} at 0 m)")
+    return None
+
+
+def _refuse_level_inputs(source: SourceConfig) -> None:
+    """Refuse a FESOM 1.4 mesh or u data on the levels, before any mesh is
+    loaded or record read.
+
+    Raises
+    ------
+    ValueError
+        ``source.meshpath`` is a FESOM 1.4 ASCII mesh directory (it holds
+        ``nod3d.out``), or the u variable of ``source.u_path`` is in a FESOM
+        1.4 layout: one vector over the 3-D nodes, or level-wise on levels
+        starting at the surface.
+    """
+    mp = Path(source.meshpath).expanduser() if source.meshpath else None
+    if mp is not None and mp.is_dir() and (mp / "nod3d.out").is_file():
+        raise ValueError(
+            f"source.meshpath {mp} is a FESOM 1.4 ASCII mesh (it holds "
+            f"nod3d.out), whose u/v lie on the levels. {_LEVEL_FIX}")
+    up = Path(source.u_path).expanduser() if source.u_path else None
+    if up is None or not up.exists():
+        return
+    ds = xr.open_dataset(up, engine=_detect_engine(up), decode_times=False)
+    try:
+        for name in _U_NAMES:
+            if name in ds.variables:
+                why = _level_layout(ds, name)
+                if why is not None:
+                    raise ValueError(
+                        f"source.u_path {up}: {name!r} is FESOM 1.4 data, "
+                        f"{why}. {_LEVEL_FIX}")
+    finally:
+        ds.close()
+
+
 def run(cfg: ReconstructConfig):
-    """Execute W reconstruction for z-level meshes only."""
+    """Execute W reconstruction for z-level meshes only.
+
+    FESOM 1.4 inputs (an ASCII mesh, u on the levels) are refused before
+    anything is loaded: the reconstruction integrates layer u/v.
+    """
     t0 = _time.perf_counter()
     print(f"W velocity reconstruction")
     print(f"  Method: {cfg.method}")
     print(f"  Bottom correction: {cfg.correct_bottom}")
+    _refuse_level_inputs(cfg.source)
 
     # --- Load mesh ---
     from types import SimpleNamespace

@@ -138,3 +138,92 @@ def test_extractor_malformed_count_vector_rebuilds(monkeypatch):
     assert calls["n"] >= 1                       # rebuilt, not trusted
     assert cnt.shape == (4,)                     # valid count vector, not (1,)
     assert (n2e[:, 0] >= 0).all()
+
+
+# --- the element levels of the mesh diagnostic (nlevels, ulevels,
+# zbar_e_bottom; nlevels_nod2D on the nodes) survive the subset, values and
+# signs as in the source, and reach the FESOM2 reader's declaration.
+
+_LEVELS_NEG = [0.0, -10.0, -30.0, -60.0, -100.0]
+_LEVEL_SETS = {
+    "all": dict(nlevels=[4, 5], ulevels=[1, 2], zbar_e_bottom=[-45.0, -100.0],
+                nlevels_nod2D=[5, 4, 5, 3]),
+    "nlevels_only": dict(nlevels=[4, 5]),
+}
+_LEVEL_VARS = ("nlevels", "ulevels", "zbar_e_bottom", "nlevels_nod2D")
+
+
+def _subset_of_second_element(path):
+    """The subset holding element 1 only (nodes 0, 2, 3)."""
+    mesh = load_mesh_source(str(path))
+    sel = extract_fesom_region.build_subset_selection(
+        mesh, np.array([False, True]))
+    np.testing.assert_array_equal(sel.elem_ids, [1])
+    np.testing.assert_array_equal(sel.node_ids, [0, 2, 3])
+    return mesh, extract_fesom_region.build_subset_mesh_dataset(
+        mesh, sel, {}, False)
+
+
+@pytest.mark.parametrize("convention", ["core2", "comp", "ugrid"])
+@pytest.mark.parametrize("which", sorted(_LEVEL_SETS))
+def test_extract_keeps_level_variables(tmp_path, convention, which):
+    levels = _LEVEL_SETS[which]
+    p = write_meshdiag(tmp_path / f"{convention}.mesh.diag.nc", convention,
+                       zbar=_LEVELS_NEG, **levels)
+    mesh, ds = _subset_of_second_element(p)
+    expected = {
+        "nlevels": ("elem", [5]),
+        "ulevels": ("elem", [2]),
+        "zbar_e_bottom": ("elem", [-100.0]),          # negative, as the source
+        "nlevels_nod2D": ("nod2", [5, 5, 3]),
+    }
+    for name in _LEVEL_VARS:
+        if name not in levels:
+            assert name not in ds.variables
+            continue
+        dim, values = expected[name]
+        assert ds[name].dims == (dim,)
+        assert ds[name].dtype == mesh.ds[name].dtype
+        np.testing.assert_array_equal(ds[name].values, values)
+
+
+@pytest.mark.parametrize("fmt", ["netcdf", "zarr"])
+def test_extract_level_variables_reach_the_reader(tmp_path, fmt):
+    from kelp.readers.fesom2 import _load_mesh_nc, _load_mesh_zarr
+    p = write_meshdiag(tmp_path / "core2.mesh.diag.nc", "core2",
+                       zbar=_LEVELS_NEG, **_LEVEL_SETS["all"])
+    _, ds = _subset_of_second_element(p)
+    out = tmp_path / ("region.nc" if fmt == "netcdf" else "region.zarr")
+    extract_fesom_region._write_dataset(ds, out, fmt)
+    mesh = _load_mesh_nc(out) if fmt == "netcdf" else _load_mesh_zarr(out)
+    md = mesh.metadata
+    assert md["elem_levels_source"] == "zbar_e_bottom"
+    np.testing.assert_array_equal(md["elem_bed"], [100.0])
+    np.testing.assert_array_equal(md["uv_data_last_elem"], [3])
+    np.testing.assert_array_equal(md["elem_ulevels"], [2])
+    assert md["uv_data_last_elem"].dtype == np.int32
+    assert md["elem_ulevels"].dtype == np.int32
+
+
+@pytest.mark.parametrize("convention", ["core2", "comp", "ugrid"])
+def test_extract_without_level_variables(tmp_path, convention):
+    from kelp.readers.fesom2 import _load_mesh_nc
+    p = write_meshdiag(tmp_path / f"{convention}.mesh.diag.nc", convention)
+    _, ds = _subset_of_second_element(p)
+    assert not set(_LEVEL_VARS) & set(ds.variables)
+    out = tmp_path / "region.nc"
+    extract_fesom_region._write_dataset(ds, out, "netcdf")
+    md = _load_mesh_nc(out).metadata
+    assert "elem_bed" not in md and "uv_data_last_elem" not in md
+
+
+def test_extract_refuses_misshapen_level_variable(tmp_path):
+    p = write_meshdiag(tmp_path / "comp.mesh.diag.nc", "comp",
+                       nlevels=[3, 3])
+    mesh = load_mesh_source(str(p))
+    mesh.ds = mesh.ds.drop_vars("nlevels").assign(
+        nlevels=(("other",), np.array([3, 3, 3], dtype=np.int32)))
+    sel = extract_fesom_region.build_subset_selection(
+        mesh, np.array([False, True]))
+    with pytest.raises(ValueError, match="'nlevels'.*\\(2,\\)"):
+        extract_fesom_region.build_subset_mesh_dataset(mesh, sel, {}, False)

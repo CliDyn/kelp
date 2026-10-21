@@ -43,6 +43,18 @@ class ModeConfig:
     # convention, e.g. ``utils/reconstruct_w.py`` output).  "auto" = the
     # variable's CF ``positive`` attribute, else the reader family default.
     w_positive: str = "auto"
+    # Vertical rule for layer-centred horizontal velocity (3-D only):
+    # "layer" = piecewise constant per layer (the default), "linear" =
+    # linear in depth between the layer centres, constant above the first
+    # centre and below a column's last wet centre.  On a z-level mesh:
+    # node-layout u/v with numerics.uv_interp: barycentric (FESOM2
+    # unod/vnod, HEALPix dual geometry), element-layout u/v with leastsq,
+    # edge_leastsq or barycentric (FESOM2 u/v; the mesh diagnostic must
+    # hold nlevels or zbar_e_bottom, no ice-shelf cavities).  On a sigma
+    # mesh (FESOM-C, node or element u/v, the same interpolators): linear
+    # in the sigma fraction s = z / H between the layer centres.  The output
+    # attribute ``uv_vertical = "linear"`` records that it was on.
+    uv_vertical: str = "layer"
 
     def __post_init__(self) -> None:
         if self.sample_vars is None:
@@ -72,9 +84,22 @@ class ModeConfig:
             raise ValueError(
                 "mode.sigma_layer and mode.sigma_mean are alternatives (one "
                 "layer OR the thickness-weighted mean); set only one")
+        uvv = str(self.uv_vertical).strip().lower()
+        if uvv not in _VALID_UV_VERTICAL_OPTION:
+            raise ValueError(
+                f"mode.uv_vertical must be one of {_VALID_UV_VERTICAL_OPTION}, "
+                f"got {self.uv_vertical!r}")
+        if uvv == "linear" and not self.Fdrift3D:
+            raise ValueError(
+                "mode.uv_vertical: 'linear' interpolates the horizontal "
+                "velocity in depth and needs 3-D tracking (mode.Fdrift3D: "
+                "true); a 2-D run reads one level")
+        self.uv_vertical = uvv
 
 
 _VALID_W_POSITIVE = ("auto", "up", "down")
+#: mode.uv_vertical: the vertical rule for layer-centred u/v
+_VALID_UV_VERTICAL_OPTION = ("layer", "linear")
 #: == numerics.integrators.INTEGRATORS (pinned by test)
 _VALID_INTEGRATORS = ("euler", "rk2", "rk4", "rk45")
 #: == numerics.vertical._W_METHOD_MAP (pinned by test)
@@ -432,7 +457,7 @@ _GRID_HASH_CELL_RULES = ("occupancy", "legacy")
 @dataclass
 class MeshConfig:
     """Mesh source settings."""
-    type: str = "fesomc"           # fesomc / fesom2 / nemo / healpix
+    type: str = "fesomc"           # fesomc / fesom2 / nemo / healpix / fesom14
     meshpath: str = ""             # path to mesh files (ASCII dir or NC file)
     # Earth radius (m) for mesh-derived areas/metrics.  None -> the mesh
     # family default chosen by the reader: FESOM2 6_367_500.0 (the FESOM
@@ -484,6 +509,14 @@ class MeshConfig:
     #            (element-layout u/v => the fused leastsq kernels;
     #            v1 is 2-D only, no sampling / spatial Kh).
     healpix_geometry: str = "dual"
+    # --- fesom14-only key (refused for the other mesh types) ------------
+    # Euler angles [alpha, beta, gamma] (degrees, as in the run's namelist)
+    # of the rotated frame a FESOM 1.4 ASCII mesh is stored in; the reader
+    # rotates the coordinates back to geographic on load.  None = the mesh
+    # is geographic.  Never defaulted: the reader warns when a global mesh
+    # without an Arctic node is loaded without it.  Unrelated to `rotation`
+    # (the frame KELP tracks in).
+    input_rotation: Optional[List[float]] = None
 
     def __post_init__(self) -> None:
         if self.r_earth is not None and self.r_earth <= 0:
@@ -573,6 +606,32 @@ class MeshConfig:
                         f"mesh.rotation must be 'fesom2' or a 3-list of "
                         f"finite Euler angles (deg), got {self.rotation!r}")
                 self.rotation = vals
+        if self.input_rotation is not None and self.type != "fesom14":
+            # the other readers would ignore it: a mesh stored in a rotated
+            # frame would then be read as geographic without a word
+            raise ValueError(
+                "mesh.input_rotation is set, but mesh.type is "
+                f"{self.type!r}: the angles of the frame a mesh is stored in "
+                "apply to FESOM 1.4 ASCII meshes only (mesh.type: fesom14). "
+                "Remove mesh.input_rotation (mesh.rotation sets the frame "
+                "KELP tracks in)")
+        if self.input_rotation is not None:
+            vals = None
+            if not isinstance(self.input_rotation, (str, bytes)):
+                try:
+                    items = list(self.input_rotation)
+                    if not any(_is_boolean(x) for x in items):
+                        vals = [float(x) for x in items]
+                except (TypeError, ValueError):
+                    vals = None
+            if (vals is None or len(vals) != 3
+                    or not all(math.isfinite(v) for v in vals)):
+                raise ValueError(
+                    "mesh.input_rotation must be the 3 finite Euler angles "
+                    "[alpha, beta, gamma] (deg) of the frame a FESOM 1.4 "
+                    "ASCII mesh is stored in, as in the run's namelist, got "
+                    f"{self.input_rotation!r}")
+            self.input_rotation = vals
 
 
 @dataclass
@@ -586,7 +645,11 @@ class DataConfig:
     averaging window, so the effective time must be shifted to the
     *midpoint* of each window.  This field should always be set
     explicitly; if omitted a warning is printed with a suggestion based
-    on the mesh type.
+    on the mesh type.  ``mesh.type: fesom14`` is the exception: its reader
+    resolves what time each record represents, ``time_averaging`` is
+    refused there, and ``time_stamp`` / ``time_window`` / ``time_offset``
+    say what the stamps mean when the files cannot (refused with any other
+    mesh type when the run starts).
     """
     ncinput: str = ""              # velocity NetCDF file or directory
     ncinput_v: str = ""            # separate v file (empty = u+v in same ncinput)
@@ -599,8 +662,27 @@ class DataConfig:
     # of a sharded run); None = the seed file's '# kelp particle_offset N'
     # header (utils/split_seeds.py) or 0.  Keys every random draw.
     particle_offset: Optional[int] = None
+    # --- fesom14 only: what each record's time stamp means --------------
+    # Passed to the reader's open_dataset only when set; any other mesh type
+    # refuses them when the run starts.  time_stamp: start | centre | end |
+    # instant (where the stamp sits in its averaging window; instant =
+    # snapshots); time_window: calendar_month | calendar_year | calendar_day
+    # | '<number> <s|min|h|d>' (the averaging window, or the snapshot
+    # cadence); the two are given together or not at all, and then decide
+    # over the files' time bounds and output schedule.  time_offset:
+    # '<+-number> <s|min|h|d>' added to the raw stamps before anything else
+    # (e.g. a raw job that started mid-day).
+    time_stamp: Optional[str] = None
+    time_window: Optional[str] = None
+    time_offset: Optional[str] = None
 
     def __post_init__(self) -> None:
+        if (self.time_stamp is not None or self.time_window is not None
+                or self.time_offset is not None):
+            # the reader's own check, imported only when a key is set
+            from ..readers.fesom14._timeaxis import TimeOptions
+            TimeOptions(stamp=self.time_stamp, window=self.time_window,
+                        offset=self.time_offset).validate()
         if self.particle_offset is not None:
             from .release import check_particle_offset
             try:

@@ -24,8 +24,8 @@ particle: its position written out once per output step.
 
 Different ocean models store their meshes and velocities differently, so the
 tracker keeps a small **registry** of model-specific readers. `get_reader(name)`
-looks a reader up by model name — currently `"fesom2"`, `"fesomc"`, `"nemo"`,
-and `"healpix"` — and
+looks a reader up by model name — currently `"fesom2"`, `"fesom14"`
+(FESOM 1.4), `"fesomc"`, `"nemo"`, and `"healpix"` — and
 auto-imports the matching module the first time it is asked for. An unknown name
 raises a clear error listing the readers that are available.
 
@@ -40,6 +40,13 @@ needs to know which model it is reading:
   velocity field for that instant.
 - `read_scalar_fields(ds, timestep, mesh, varnames, mode_cfg)` (optional) reads
   named node-based scalar fields for trajectory sampling — see `field_sampling.md`.
+
+A reader may also provide `prepare(mesh, ds)`, a check of the opened dataset
+against the mesh: `run_tracking` calls it right after the dataset is opened,
+before any output file exists, and each realization calls it again at its
+entry, after the `max_levels` cut (`kelp info` calls it once). The FESOM 1.4
+reader uses it to compare the sizes, the level axis, the node coordinates and
+the wet mask of the first record of every variable with the mesh.
 
 Whether a given path is a NetCDF file or a Zarr store is decided by
 `_detect_engine`: a `.zarr` suffix, or a directory that contains a `.zattrs`
@@ -83,7 +90,15 @@ data in three shapes:
   extra file that does not fit is skipped with a warning, since merging it
   would stretch the time axis with NaN records.
 
-Because the directory case picks files by a **prefix glob** (`u*`, `v*`, …) and
+The FESOM 1.4 reader works differently: `ncinput` is a file, a directory or a
+glob, every file's header is read, and the files are grouped by the variable
+they hold — never by their names — so the u files are the files holding
+`mode.var_u` (default `uo`), wherever they sit and whatever they are called;
+only the variables the run consumes are opened. Each variable's records are
+then placed in time on their own (next section) and must match those of u
+exactly.
+
+Because the FESOM2 directory case picks files by a **prefix glob** (`u*`, `v*`, …) and
 takes the *first sorted match*, it is possible to point it at a directory where
 the first `u*` file is not the one you meant — the classic example being a
 `uice*` (sea-ice velocity) file sorting ahead of the ocean `u*` file. The full
@@ -122,7 +137,11 @@ Two newer capabilities extend the directory case:
   the older core2 form with packed `nodes` (in radians) + `elem` + `zbar`
   (negative-down); and the UGRID form with `face_nodes`. Connectivity is oriented
   to a single `(elements, 3)` shape and made 0-based, and depths are taken
-  positive-down regardless of the file's sign convention.
+  positive-down regardless of the file's sign convention. When the diagnostic
+  (or a subset mesh written by `utils/extract_fesom_region.py`) holds the element
+  levels `nlevels` or `zbar_e_bottom` (and `ulevels`), both loaders declare
+  each element's bed and last wet layer in `mesh.metadata` — what
+  `mode.uv_vertical: linear` needs on element u/v (`vertical.md` §2.1).
 
 ## §3 The time axis
 
@@ -181,6 +200,9 @@ realization).
 
 ### Time-averaged output and the midpoint shift
 
+(Not for `mesh.type: fesom14`, whose reader resolves each record's time itself —
+next subsection.)
+
 Some models write **time-averaged** output: each record is the mean over an
 averaging window (a day, a month), and the file stamps that record with the time
 at the *end* of the window. But the velocity that average best represents is the
@@ -198,13 +220,57 @@ times stay seconds since the first **raw** record, so the first window centre is
 a negative number (half an interval before that record). The trajectory output
 uses the same origin as its epoch (§5.2), so its dates are the window centres.
 
+### Readers that resolve what each record represents (FESOM 1.4)
+
+The FESOM 1.4 reader does not hand on the stamps as written. For every variable
+it decodes each file with that file's own epoch and calendar (the published
+CMIP6 files start a new epoch every decade; raw output starts one per job
+segment) and resolves, once, the instant each record represents: the **centre of
+its averaging window** for a time mean, the stamp itself for a snapshot. The
+window comes from exactly one source, in this order:
+
+1. **Explicit options**, `data.time_stamp` (where the stamp sits in its window:
+   `start`, `centre`, `end`; or `instant` for snapshots) together with
+   `data.time_window` (`calendar_month`, `calendar_year`, `calendar_day` or a
+   fixed duration). They decide for every file; when a file also has time
+   bounds or an output schedule, a warning names what was overridden and the
+   first record where the two disagree.
+2. The files' **time bounds** (found through `time.attrs["bounds"]`), as in the
+   published CMIP6 files: a January record bounded by 0 and 31 days represents
+   day 15.5, 12:00 on the 16th.
+3. The raw writer's **`output_schedule`** attribute
+   (`unit: <y|m|d|s> first: <n> rate: <n>`): its stamps are the window ends in
+   seconds since the job's start date; the reader enumerates the output events
+   the schedule implies and requires the stamps to be exactly those.
+4. Otherwise the run is refused, naming the options.
+
+An optional `data.time_offset` is added to the raw stamps (and bounds and
+epochs) before any of this — for raw output of a job that started at a time of
+day other than 00:00, whose stamps all sit early by that time of day. A window
+is never estimated from the spacing of neighbouring stamps, and every record the
+source says must exist has to be there: a gap refuses the run. All variables of
+a run must resolve to the same records (instants and windows).
+
+The resolved instants become the dataset's time coordinate, and nothing
+downstream moves them again: `run_tracking` gives no `time_averaging` warning
+and applies no midpoint shift, a set `data.time_averaging` is refused (it would
+shift the axis a second time), and the output's `time_averaging` attribute reads
+`"resolved_by_reader"`. Daily means therefore sit at 12:00 — a discrete run
+starts at a record (12:00), and a `start_date` at 00:00 needs temporal
+interpolation — and monthly means, a calendar month apart, need
+`temporal_interp: true` (discrete mode refuses irregular spacing). The run
+summary and `kelp info` print one line saying what resolved the times and the
+first and last instant.
+
 ### Starting from a calendar date
 
 Instead of a numeric index into the file, a run can name an ISO **`start_date`**
 (for example `2020-01-15T00:00`). `_resolve_start_date` matches that date against
 the **raw** file timestamps — the original on-disk times, *not* the
 midpoint-shifted ones — and returns the corresponding file index. If the
-requested date falls exactly on a snapshot, the run starts there. If it falls
+requested date falls exactly on a snapshot, the run starts there. (For
+`fesom14` the file timestamps are the resolved instants of the previous
+subsection, so a `start_date` is matched against the window centres.) If it falls
 *between* two snapshots, that only works with temporal interpolation enabled
 (so the tracker can construct a velocity at the in-between instant); otherwise it
 raises with an explanatory message. With temporal interpolation the run clock
@@ -249,6 +315,13 @@ evicts everything except the indices still needed: the two snapshots a step
 can touch, the four of a PCHIP stencil, and — with `prefetch_size > 1` — the
 read-ahead window not yet consumed. This is purely a performance shortcut —
 it changes nothing about the result, only how many times the disk is read.
+
+Every field the cache stores — a single read, each record of a prefetch window,
+a snapshot of the shared cache — first passes `mode.uv_vertical`
+(`tracking._mark_depth_linear`): with the default `layer` it is stored as read;
+with `linear` it is stored as a shallow copy marked depth-linear and checked
+(u/v finite down to each column's last usable point, `vertical.md` §2.1), so a
+bad record is refused when it is first read, named by its global time index.
 
 ## §5 Writing trajectories (output format 2)
 
@@ -590,7 +663,8 @@ resolved value), `exact_nearest`, `grid_hash_cell`, `grid_hash_cell_rule`,
 `git` binary); in 3-D also `w_interp`, `w_positive` and `w_contract`
 (`reader-converted-2026-09-23` — an output without it was written by an engine
 that used FESOM2/HEALPix W unconverted); option-dependent attributes (diffusion,
-beaching, rotation, …) only when the option is on. The sharding concatenator
+beaching, rotation, `uv_vertical = "linear"` for `mode.uv_vertical: linear`, …)
+only when the option is on. The sharding concatenator
 (`utils/concat_trajectories.py`) compares every attribute and refuses shards
 that differ (until 2026-09-23 two shards run with linear and PCHIP temporal
 reconstruction merged without complaint). It also refuses shards that differ in
@@ -660,6 +734,7 @@ position of the continuation:
 ```python
 r = load_restart(path)
 _validate_restart_frame(r["rotation_angles"], mesh)   # see coordinate_frame.md
+_validate_restart_uv_vertical(r["uv_vertical"], mode)  # mode.uv_vertical unchanged
 n = r["step_i"] + 1          # steps done, counted from a first call with start_step_i = 0
 run_single_realization(..., init_state=r["state"],    # carries the release positions
                        start_step_i=n,
@@ -717,7 +792,14 @@ checkpoint's output attribute or from `write_restart_file(...,
 particle_offset=)`), so a driver can refuse a mismatch.
 
 The frame check refuses to resume a checkpoint on a mesh in a different
-coordinate frame — see `coordinate_frame.md` for why that matters. The reason a
+coordinate frame — see `coordinate_frame.md` for why that matters. The
+`uv_vertical` check refuses to resume under another `mode.uv_vertical`
+(`vertical.md` §2.1): a trajectory would mix the piecewise-constant and the
+depth-linear horizontal velocity. `load_restart` returns the rule a checkpoint
+was written with (`r["uv_vertical"]`: the trajectory file's `uv_vertical`
+attribute, or `write_restart_file(..., uv_vertical=)`'s
+`restart_uv_vertical`; `None` = `layer`, so checkpoints of runs without the
+option hold nothing new). The reason a
 restart reproduces the original run *bit for bit* (rather than merely
 approximately) is that the stochastic diffusion draws are keyed by the **global**
 step index, not by anything that resets on resume: continuing from step `N`
@@ -766,11 +848,14 @@ The **resumable-chain** pattern built on this (it lives in a run driver, not in
 the library) runs a long experiment as a sequence of bounded jobs:
 
 1. **Resume or start.** Find the newest `restart_step*.nc` in the restart dir;
-   if one exists, `load_restart` it, validate its frame, and continue from
-   `step_i + 1`. Otherwise build the seeds and start fresh.
+   if one exists, `load_restart` it, validate its frame and its
+   `mode.uv_vertical` rule (`_validate_restart_uv_vertical(r["uv_vertical"],
+   mode)`), and continue from `step_i + 1`. Otherwise build the seeds and
+   start fresh.
 2. **Run in chunks.** Advance `restart_every` steps at a time. Each chunk writes
    one trajectory **segment** (`part_<step>.zarr`) *and* one numbered standalone
-   restart file. Picking up the chunk-end state from the segment's embedded
+   restart file (`write_restart_file(..., uv_vertical=mode.uv_vertical)`, so
+   the rule travels with it). Picking up the chunk-end state from the segment's embedded
    checkpoint (`load_restart(segment)`) feeds the next chunk.
 3. **Stop on the job budget.** After a configured amount of model time (sized
    conservatively inside the wall-clock limit), stop — and, if the full run is

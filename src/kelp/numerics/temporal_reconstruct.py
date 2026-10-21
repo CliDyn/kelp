@@ -34,7 +34,7 @@ except Exception:  # pragma: no cover - broad on purpose: a numpy/numba
             return func
         return decorator
 
-from ..core.io import VelocityField
+from ..core.io import VelocityField, _require_same_uv_vertical
 
 
 def _fc_slope(d_prev, d_next, h_prev, h_next):
@@ -224,6 +224,9 @@ def reconstruct_pchip(snaps: Sequence[VelocityField],
     ``times[1] <= t_query <= times[2]`` (the central interval).  Each field
     (``u``, ``v``, ``w`` if present, ``eta``, every ``scalars[k]``) is blended
     per-element via :func:`_pchip_blend4`.  Kh is not reconstructed.
+
+    The four snapshots must share one ``uv_vertical`` placement (checked
+    before the field shapes); the result carries it.
     """
     if len(snaps) != 4 or len(times) != 4:
         raise ValueError("reconstruct_pchip needs exactly 4 snapshots/times")
@@ -242,6 +245,9 @@ def reconstruct_pchip(snaps: Sequence[VelocityField],
             f"reconstruct_pchip: t_query={t_query} outside the central "
             f"interval [{t1}, {t2}]")
     a, b, c, d = snaps
+    # placement before any shape check or blend
+    uv_vertical = _require_same_uv_vertical(
+        "reconstruct_pchip", *(s.uv_vertical for s in snaps))
 
     def blend(attr):
         xs = [getattr(s, attr) for s in (a, b, c, d)]
@@ -285,7 +291,8 @@ def reconstruct_pchip(snaps: Sequence[VelocityField],
         scalars = {k: blend_scalar(k) for k in ref}
 
     return VelocityField(u=u, v=v, eta=eta, w=w,
-                         uv_layout=b.uv_layout, scalars=scalars)
+                         uv_layout=b.uv_layout, scalars=scalars,
+                         uv_vertical=uv_vertical)
 
 
 def make_stage_vels_recon(snaps, times, sim_time, dt, time_dir, c_coeffs):

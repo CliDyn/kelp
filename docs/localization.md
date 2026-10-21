@@ -494,7 +494,7 @@ with 200k particles (8 threads): containment 35 ns/particle vs 126 ns for the
 §5 scan (~3.6×); a full rk2 + barycentric step ~1.3× faster end-to-end on the
 unfused path. **The walk also switches the fused barycentric kernels off** (they
 require `state.elem is None`): a node-layout barycentric run with a next
-snapshot — HEALPix, NEMO, FESOM2 `unod`/`vnod`, discrete or interpolated in
+snapshot — HEALPix, NEMO, FESOM2 `unod`/`vnod`, FESOM 1.4, discrete or interpolated in
 time — runs fused under `local` and unfused under `walk`, so keep `local` there
 (the fused bary-tinterp step measured ~×9 against its unfused path, §5 of
 `time_integration.md`). The walk pays off where the step is unfused anyway:

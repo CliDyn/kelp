@@ -75,6 +75,10 @@ Models like FESOM2 write time-averaged output (e.g. monthly means) timestamped a
 the **end** of the averaging window. Set `time_averaging: mean` to shift each
 timestamp to the window midpoint; `instant` for snapshots. If unset, KELP
 warns and suggests a default by mesh type (FESOM2 and HEALPix → `mean`, FESOM-C and NEMO → `instant`).
+FESOM 1.4 (`mesh.type: fesom14`) is the exception: its reader resolves what time each record
+represents (the window centre of a mean, from the files' time bounds or the raw output schedule, or
+from `data.time_stamp` + `data.time_window`), so leave `time_averaging` unset — it is refused there
+(`io_and_time.md` §3).
 
 ## Multiple realizations (`time.num_runs`)
 
@@ -124,6 +128,13 @@ README reference and [`configuration.md`](configuration.md); the mechanics are i
 - **Edge-walk element tracking** (`numerics.elem_search: walk` — search once
   at release, then cross edges; identical results, faster) —
   [`localization.md`](localization.md) §7.
+- **Horizontal velocity linear in depth** (`mode.uv_vertical: linear`, 3-D
+  runs on z-level meshes and on FESOM-C sigma meshes, where it is linear in
+  the sigma fraction: node-layout u/v with `uv_interp: barycentric`,
+  element-layout u/v with `leastsq`, `edge_leastsq` or `barycentric` — FESOM2
+  on a mesh diagnostic with `nlevels` or `zbar_e_bottom`, FESOM-C as it is;
+  the output then has the global attribute `uv_vertical = "linear"`) —
+  [`vertical.md`](vertical.md) §2.1.
 
 ## Output and restart
 
@@ -135,7 +146,7 @@ checkpoints with `numerics.checkpoint_freq: N` (written into the same file).
 from kelp.writers import load_trajectories, load_restart
 data    = load_trajectories("trajectories.nc")  # lon/lat/z/status (P, T), time (s), vel_*,
                                                 # sampled vars, release_* (P,)
-restart = load_restart("trajectories.nc")        # state, step_i, file_idx
+restart = load_restart("trajectories.nc")        # state, step_i, file_idx, uv_vertical, ...
 
 import xarray as xr                             # CF trajectory file (output format 2):
 ds = xr.open_dataset("trajectories.nc")         # time decodes to dates; ds.sel(time=...)

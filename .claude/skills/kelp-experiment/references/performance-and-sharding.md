@@ -136,7 +136,8 @@ keep = (sid >= k * n_seed // S) & (sid < (k + 1) * n_seed // S)   # shard k = on
 sub = st.subset(keep)                    # EVERY per-particle array, release_lon/lat/z included; never a hand-written field list
 wet = None if r["wet_streak"] is None else r["wet_streak"][keep]
 write_restart_file(DST, sub, r["step_i"], r["file_idx"], wet_streak=wet,
-                   rotation_angles=r["rotation_angles"], release_step=sub.release_step)
+                   rotation_angles=r["rotation_angles"], release_step=sub.release_step,
+                   uv_vertical=r["uv_vertical"])   # the run's mode.uv_vertical rule; without it a linear resume is refused
 ```
 A hand-written field list misses fields added later (it left the release positions of output
 format 2 unsliced, and `write_restart_file` refuses such a state with a length `ValueError`).

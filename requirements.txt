@@ -5,6 +5,7 @@ numpy
 scipy
 xarray
 netCDF4
+cftime
 dask[array]
 numba
 PyYAML

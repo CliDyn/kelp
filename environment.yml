@@ -8,6 +8,7 @@ dependencies:
   - scipy
   - xarray
   - netcdf4
+  - cftime
   - pyyaml
   - numba
   - dask

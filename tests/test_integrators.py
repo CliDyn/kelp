@@ -10,6 +10,7 @@ Key physical tests:
 """
 from __future__ import annotations
 
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -22,6 +23,10 @@ from kelp.numerics.interpolate import VelocityField
 from kelp.core.mesh import Mesh, build_node_to_elems, build_search, find_nearest_nodes
 from kelp.core.particles import make_state, ParticleStatus
 from kelp.core.geometry import METERS_PER_DEG_LAT, DEG2RAD
+
+from tests._bitwise import assert_bitwise, golden_env_matches
+
+_GOLDEN_3D = Path(__file__).resolve().parent / "data" / "golden_3d"
 
 
 # ---------------------------------------------------------------------------
@@ -713,6 +718,12 @@ class TestFullStep3DNodeBarycentricGolden:
         np.testing.assert_allclose(out.lon, exp_lon, rtol=1e-12, atol=1e-12)
         np.testing.assert_allclose(out.lat, exp_lat, rtol=1e-12, atol=1e-12)
         np.testing.assert_allclose(out.z, exp_z, rtol=1e-12, atol=1e-9)
+        if golden_env_matches(_GOLDEN_3D):
+            # the environment of the 3-D goldens: main (3607596) reproduces
+            # these literals bit for bit
+            assert_bitwise(out.lon, np.array(exp_lon), "lon")
+            assert_bitwise(out.lat, np.array(exp_lat), "lat")
+            assert_bitwise(out.z, np.array(exp_z), "z")
         assert out.status.tolist() == exp_status
         # the edge particle exited and was reverted to its origin
         assert out.status[3] == ParticleStatus.OUTSIDE

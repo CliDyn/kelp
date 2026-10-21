@@ -953,6 +953,41 @@ def _compact_3d(da, mesh, name: str, n_keep: int,
     return out
 
 
+def _finite_prefix_per_cell(da, lev_dim) -> Optional[np.ndarray]:
+    """Leading finite count down every column of a ``(level, cell)``
+    DataArray at one record: int64 ``(ncells,)`` in store order, or None
+    when the variable has other dims too.  Read ``_LEVEL_BLOCK`` levels at
+    a time (like :func:`_compact_3d`), so no whole-sphere array is held."""
+    if da.ndim != 2:
+        return None
+    cell_dim = next(d for d in da.dims if d != lev_dim)
+    n_lev = int(da.sizes[lev_dim])
+    run = np.ones(int(da.sizes[cell_dim]), dtype=bool)
+    count = np.zeros(run.size, dtype=np.int64)
+    for k0 in range(0, n_lev, _LEVEL_BLOCK):
+        k1 = min(k0 + _LEVEL_BLOCK, n_lev)
+        blk = np.isfinite(np.asarray(
+            da.isel({lev_dim: slice(k0, k1)}).transpose(lev_dim,
+                                                         cell_dim).values))
+        for row in blk:
+            run &= row
+            count += run
+        if not run.any():
+            break
+    return count
+
+
+def _record_label(ds, timestep) -> str:
+    """Names one record of ``ds`` in a refusal: its index in ``ds`` (a
+    prefetch window counts from its own start) and its time stamp."""
+    label = f"time index {timestep} of the dataset read"
+    try:
+        t = ds["time"].values[timestep]
+    except Exception:
+        return label
+    return f"{label} (time {str(t)[:19]})"
+
+
 def _ffill_columns(arr: np.ndarray) -> np.ndarray:
     """Forward-fill NaNs DOWN each column of a (K, N) array (returns a copy).
 
@@ -1112,6 +1147,26 @@ class HealpixReader:
                 # composes with an extract (a further crop of the sector)
                 wet &= _bbox_wet_mask(hp, nside, order, bbox)
 
+            # u/v data prefix for depth-linear runs (mode.uv_vertical): the
+            # leading finite u count of every store column at t=0, read
+            # BEFORE the bathymetry choice below — a deptho deeper than the
+            # u prefix would otherwise point the depth-linear table at a
+            # slot the reader zeroes.  Mapped to mesh-node order once the
+            # mesh exists; declared for 3-D dual-geometry meshes of
+            # depth-linear runs only (a mode_cfg with Fdrift3D and
+            # uv_vertical "linear": a 2-D or a layer load, or one without
+            # mode_cfg, never pays this extra read of the first record, and
+            # read_velocities refuses a depth-linear run on such a mesh).
+            nfin_u = None
+            lev_dim_u = next((d for d in u0.dims
+                              if str(d).lower() in _LEVEL_DIMS), None)
+            if (lev_dim_u is not None
+                    and (getattr(mesh_cfg, "healpix_geometry", "dual")
+                         or "dual") == "dual"
+                    and cfg is not None and getattr(cfg, "Fdrift3D", False)
+                    and getattr(cfg, "uv_vertical", "layer") == "linear"):
+                nfin_u = _finite_prefix_per_cell(u0, lev_dim_u)
+
             # bathymetry: a depth variable if the product carries one, else
             # deepest-finite-level x mesh.levels (finite-prefix columns),
             # else zeros (fine for 2-D; beaching depth criteria need one).
@@ -1225,6 +1280,13 @@ class HealpixReader:
                 mesh._healpix_data_idx = carrier_pix
             mesh._healpix_data_order = order
             mesh._healpix_data_ncells = ncells
+            if (nfin_u is not None and geometry == "dual"
+                    and nfin_u.size == ncells):
+                # mesh-node order through the same store index the data
+                # compaction uses; -1 = no u in the column (never on a mesh
+                # node: land is dropped by the wet mask)
+                mesh.metadata["uv_data_last"] = (
+                    nfin_u[mesh._healpix_data_idx] - 1).astype(np.int32)
         finally:
             ds.close()
         HealpixReader._apply_rotation(mesh, mesh_cfg)
@@ -1595,6 +1657,31 @@ class HealpixReader:
             # below instead of returned as inf — safer, and impossible
             # for physical velocities)
             w = w.astype(vd, copy=False)
+        if (is_3d and geometry == "dual"
+                and getattr(cfg, "uv_vertical", "layer") == "linear"):
+            # depth-linear layer u/v: validate the RAW record against the
+            # depth-point table (bathymetry, kept levels, the declared u
+            # prefix) before the zeroing below turns a missing value into
+            # data — and before the rotation mix, which makes a NaN in one
+            # component NaN in both, so the refusal names the component
+            # that carries it; refused naming node, point and record.  The
+            # table needs the u prefix that load_mesh declares for a
+            # depth-linear mode config only
+            if (mesh.metadata or {}).get("uv_data_last") is None:
+                raise ValueError(
+                    "healpix reader: mode.uv_vertical: linear needs the u "
+                    "data prefix (mesh.metadata['uv_data_last']) that "
+                    "load_mesh declares for a 3-D mode config with "
+                    "uv_vertical: linear; this mesh was loaded without it "
+                    "(another mode config, or none) — load the mesh with "
+                    "the run's mode config")
+            from types import SimpleNamespace
+            from ..numerics.vertical_uv import check_depth_linear_record
+            check_depth_linear_record(
+                SimpleNamespace(u=u, v=v, uv_vertical="layer_linear",
+                                uv_layout="node"),
+                mesh, record=_record_label(ds, timestep))
+
         if getattr(mesh, "rotation_angles", None) is not None:
             carrier = "element" if geometry == "pixel" else "node"
             c_n, s_n = mesh._vec_rot_factors[carrier]

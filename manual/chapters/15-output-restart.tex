@@ -139,7 +139,12 @@ parameters only when they are on --- pulses, diffusion, beaching, the adaptive s
 windows, sampling, a non-default horizontal scheme or element search, single-precision fields, read-ahead and
 the rotation angles --- so that an output written with the defaults carries none of them. A run is repeated
 from these attributes; the recorded grid-hash cell, for instance, can be pinned to reproduce the anchors of
-an earlier run.
+an earlier run. Two of them concern the additions of \cref{sec:vert-uvdepth,sec:input-timeavg}. A run with
+\conf{mode.uv\_vertical: linear} has the global attribute \code{uv\_vertical = "linear"}, and a run in
+the default layer mode has no such attribute, so its output is unchanged. The attribute is the proof that
+the option was on: a misspelled key is ignored silently, like every unknown key, and leaves no attribute
+behind. A FESOM~1.4 run, whose velocities are always depth-linear and which refuses the option, has no
+\code{uv\_vertical} attribute; its time averaging reads \code{"resolved\_by\_reader"}.
 
 \section{Checkpoints and restart}\label{sec:out-restart}
 
@@ -167,6 +172,14 @@ The release positions need no step of their own: they come back with the particl
 splits a resumed state into parts slices it with \fn{ParticleState.subset}, which slices every per-particle
 array, the release positions included. With the exact-anchor guard the nearest nodes of the resumed state
 are recomputed once.
+
+\paragraph{One vertical rule per trajectory.} The rule of \conf{mode.uv\_vertical} cannot change inside one
+trajectory, since a resumed segment under the other rule would join piecewise-constant and depth-linear
+velocities in one path. A checkpoint therefore records its rule: the embedded checkpoint through the output's
+\code{uv\_vertical} attribute, a standalone restart file through its attribute \code{restart\_uv\_vertical},
+written only for \conf{linear}. \fn{load\_restart} returns the rule as \code{uv\_vertical}, with \code{None}
+meaning \conf{layer} (a layer run, or a file written before the option existed), and the resume recipe checks
+it next to the frame: a resume with the other value is refused, and the message names both rules.
 
 \paragraph{Resumable chains.} A run longer than one allocation of a batch system is split into a chain of
 jobs. Each job resumes from the newest standalone restart file --- written with \fn{write\_restart\_file}, which
@@ -228,12 +241,12 @@ start of the step; and the checkpoint arrays exist in every file, holding fill v
 written. These files remain readable by \fn{load\_trajectories}, \fn{load\_restart}, the merge tool and the
 visualization helpers; there is no converter.
 
-% (plan Task 5 interfaces) on the final code.
 \codeanchor{The writer \fn{TrajectoryWriter} and its NetCDF and Zarr backends, the embedded checkpoint,
 \fn{write\_restart\_file}, \fn{load\_restart} and \fn{load\_trajectories} are in \srcfile{writers.py}; the record
 cadence and checkpoint scheduling are in the time loop of \srcfile{tracking.py}, the record time and the release
 variables in \fn{\_record\_clock\_origin} and \fn{\_release\_arrays} there; the epoch and calendar of the time
 come from \fn{time\_axis\_epoch} (\srcfile{readers/\_\_init\_\_.py}); the velocity mask is
 \fn{mask\_inactive\_velocity} (\srcfile{core/release.py}); the frame check on resume is
-\fn{\_validate\_restart\_frame} (\srcfile{tracking.py}); sharding and merging are
+\fn{\_validate\_restart\_frame} and the rule check \fn{\_validate\_restart\_uv\_vertical}
+(\srcfile{tracking.py}); sharding and merging are
 \code{utils/sort\_seeds.py}, \code{utils/split\_seeds.py} and \code{utils/concat\_trajectories.py}.}

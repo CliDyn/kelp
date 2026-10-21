@@ -13,6 +13,8 @@ Run orchestration & tracking.py & \cref{ch:arch} \\
 Command line & cli/main.py & \cref{app:config} \\
 Mesh structure, contract \& derived tables & core/mesh.py & \cref{ch:mesh} \\
 FESOM2 and FESOM-C meshes & readers/fesom2.py, readers/fesomc.py & \cref{ch:mesh} \\
+FESOM2 element bottoms & readers/fesom2.py, utils/extract\_fesom\_region.py & \cref{sec:mesh-elem-bottoms} \\
+FESOM~1.4 mesh and reader & readers/fesom14/ (reader.py, \_ascii\_mesh.py, \_polygons.py, \_layout.py, \_timeaxis.py) & \cref{sec:mesh-fesom14,sec:input-reader} \\
 HEALPix meshes and reader & readers/healpix.py & \cref{ch:mesh,ch:input} \\
 Structured grids and NEMO & readers/structured.py, readers/nemo.py & \cref{ch:mesh,ch:input} \\
 Nearest node: grid hash, cell rule, exact search & core/mesh.py, utils/check\_grid\_hash\_cell.py & \cref{ch:localization} \\
@@ -21,6 +23,7 @@ Horizontal velocity interpolation & numerics/interpolate.py & \cref{ch:hvel} \\
 Polygon weights (triangle / Wachspress) & core/mesh.py & \cref{sec:hvel-quad} \\
 Vertical geometry \& $\Wvel$ (z-level) & numerics/vertical.py & \cref{ch:vertical} \\
 Vertical geometry \& $\Wvel$ (sigma) & numerics/vertical\_sigma.py & \cref{ch:vertical} \\
+Horizontal velocity in depth (layer or linear) & numerics/vertical\_uv.py, numerics/interpolate.py, numerics/integrators.py, tracking.py & \cref{sec:vert-uvdepth} \\
 Vertical-velocity sign & readers/\_\_init\_\_.py & \cref{sec:vert-wsign} \\
 Offline vertical-velocity reconstruction & w\_reconstruct.py, utils/reconstruct\_w.py & \cref{sec:vert-wsign} \\
 Scalar sampling & numerics/sampling.py & \cref{ch:sampling} \\
@@ -34,6 +37,7 @@ Seeding helpers & core/particles\_gen.py & \cref{ch:lifecycle} \\
 Beaching & numerics/beaching.py, tracking.py & \cref{sec:life-beach} \\
 Periodic windows & tracking.py & \cref{sec:life-periodic} \\
 Forcing readers \& time axis & readers/, tracking.py & \cref{ch:input} \\
+Reader hook and stamp options & readers/\_\_init\_\_.py & \cref{sec:input-reader,sec:input-timeavg} \\
 Step payload \& snapshot cache & core/io.py, tracking.py & \cref{sec:input-payload} \\
 Node-shared snapshot cache & core/shared\_fields.py & \cref{sec:input-shared} \\
 Trajectory output \& restart & writers.py & \cref{ch:output} \\
@@ -43,6 +47,38 @@ Region extraction & utils/extract\_fesom\_region.py, utils/extract\_healpix\_reg
 Configuration & core/config.py & \cref{app:config} \\
 Spherical metric / constants & core/geometry.py & \cref{sec:int-metric} \\
 Agent skills & .claude/skills/ & \cref{ch:skills} \\
+\bottomrule
+\end{longtable}
+
+\noindent The depth-linear rule and the FESOM~1.4 reader span several files; \cref{tab:codemap-dl} lists
+their principal symbols.
+
+\begin{longtable}{@{}>{\ttfamily\footnotesize\raggedright\arraybackslash}p{0.42\linewidth} >{\ttfamily\footnotesize\raggedright\arraybackslash}p{0.33\linewidth} >{\footnotesize}l@{}}
+\caption{Principal symbols of the depth-linear horizontal velocity and of the FESOM~1.4 reader.}\label{tab:codemap-dl}\\
+\toprule
+\normalfont Symbol & \normalfont File & \normalfont Manual \\
+\midrule \endfirsthead
+\toprule
+\normalfont Symbol & \normalfont File & \normalfont Manual \\
+\midrule \endhead
+depth\_points, DepthPoints, uv\_bracket, uv\_at, uv\_wet & numerics/vertical\_uv.py & \cref{sec:vert-uvdepth} \\
+check\_depth\_linear\_record, refuse\_elem\_cavities & numerics/vertical\_uv.py & \cref{sec:vert-uvdepth} \\
+\_interp\_barycentric\_dl, \_interp\_barycentric\_core\_dl, \_dl\_node\_wall & numerics/interpolate.py & \cref{sec:vert-uvdepth,sec:hvel-common} \\
+\_interp\_barycentric\_core\_tinterp\_dl, \_interp\_barycentric\_core\_pchip4\_dl & numerics/interpolate.py & \cref{sec:vert-uvdepth} \\
+\_interp\_leastsq\_dl, \_interp\_leastsq\_core\_dl & numerics/interpolate.py & \cref{sec:vert-uvdepth} \\
+\_interp\_edge\_leastsq\_dl, \_interp\_edge\_leastsq\_core\_dl & numerics/interpolate.py & \cref{sec:vert-uvdepth} \\
+\_interp\_bary\_elem\_core\_dl, \_dl\_elem\_wet\_mean & numerics/interpolate.py & \cref{sec:vert-uvdepth} \\
+\_check\_depth\_linear\_entry, \_sigma\_frac\_for\_uv & numerics/integrators.py & \cref{sec:vert-uvdepth} \\
+\_fused\_euler\_step\_3d\_dl, \_fused\_rk2\_step\_3d\_bary\_tinterp\_dl, \_fused\_rk2\_step\_3d\_bary\_pchip\_dl & numerics/integrators.py & \cref{sec:vert-uvdepth,sec:perf-schemes} \\
+\_check\_uv\_vertical\_option, \_validate\_uv\_compat, \_check\_linear\_element\_mesh, \_mark\_depth\_linear & tracking.py & \cref{sec:vert-uvdepth} \\
+\_validate\_restart\_uv\_vertical & tracking.py & \cref{sec:out-restart} \\
+\_elem\_level\_metadata & readers/fesom2.py & \cref{sec:mesh-elem-bottoms} \\
+Fesom14Reader (load\_mesh, open\_dataset, prepare, read\_velocities) & readers/fesom14/reader.py & \cref{sec:mesh-fesom14,sec:input-reader} \\
+read\_ascii\_mesh & readers/fesom14/\_ascii\_mesh.py & \cref{sec:mesh-fesom14} \\
+recover\_triangles & readers/fesom14/\_polygons.py & \cref{sec:mesh-fesom14} \\
+is\_data, detect\_form, gather\_nodes3d, wet\_mask\_levelwise, check\_record & readers/fesom14/\_layout.py & \cref{sec:mesh-fesom14,sec:input-reader} \\
+resolve\_axis, TimeOptions & readers/fesom14/\_timeaxis.py & \cref{sec:input-timeavg} \\
+\_prepare\_dataset, \_time\_option\_kwargs, \_describe\_record\_times & readers/\_\_init\_\_.py & \cref{sec:input-reader,sec:input-timeavg} \\
 \bottomrule
 \end{longtable}
 

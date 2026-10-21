@@ -3,8 +3,9 @@
 \textsf{KELP} is a Lagrangian particle-tracking engine for the velocity
 fields produced by unstructured-mesh ocean circulation models, with first-class
 support for the FESOM family: the Finite-volumE Sea ice--Ocean Model in its second
-version \citep[FESOM2;][]{danilov2017fesom2}, on purely triangular meshes, and its
-coastal relative FESOM-C, on mixed triangular--quadrilateral meshes. It also reads ocean fields
+version \citep[FESOM2;][]{danilov2017fesom2}, on purely triangular meshes, its finite-element
+predecessor FESOM~1.4 \citep{wang2014fesom14}, and its coastal relative FESOM-C, on mixed
+triangular--quadrilateral meshes. It also reads ocean fields
 remapped to the HEALPix grid and, in a first two-dimensional version, structured NEMO grids. Given a time sequence of stored model
 velocity snapshots and a set of release positions, it integrates the trajectories
 of passive particles either forward or backward in time, optionally in three
@@ -61,7 +62,11 @@ FESOM2 discretizes the ocean horizontally on an unstructured triangular mesh and
 vertically on a set of fixed depth levels \citep{danilov2017fesom2}; its coastal
 relative FESOM-C uses a \emph{mixed} mesh, in which an element may be a triangle or
 a quadrilateral, together with a terrain-following vertical coordinate.
-\textsf{KELP} supports both, and represents the other sources on the same kind of mesh: a HEALPix
+Its predecessor FESOM~1.4 \citep{wang2014fesom14} uses the same kind of triangular surface mesh and
+fixed levels, but it is a finite-element model of the P1 type: $u$, $v$, $\Wvel$, temperature and
+salinity are piecewise linear on the tetrahedra of a three-dimensional mesh and live together \emph{on
+the levels at the nodes}, rather than at layer centres and element centroids. \textsf{KELP} supports all
+three, and represents the other sources on the same kind of mesh: a HEALPix
 product becomes either a mesh whose nodes are the pixel centres (quadrilaterals, with triangles at the
 eight points where only three pixels meet) or a mesh whose elements are the pixels themselves, and a
 structured NEMO grid becomes a mesh of quadrilaterals (\cref{ch:mesh}). We therefore treat an element as
@@ -77,18 +82,22 @@ A second feature of the unstructured mesh bears directly on interpolation: the
 model stores different quantities at different geometric locations. The two
 horizontal velocity components may be defined either at the element vertices
 (``node-layout'' fields, such as the FESOM2 variables \conf{unod} and
-\conf{vnod}, the HEALPix pixel-centre mesh and the NEMO grids) or at the element centroids
+\conf{vnod}, the FESOM~1.4 velocities, the HEALPix pixel-centre mesh and the NEMO grids) or at the element centroids
 (``element-layout'' fields, such as the FESOM2 variables \conf{u} and \conf{v} and the FESOM-C
 velocities). The
 vertical velocity and other interface quantities are defined at the vertical
 interfaces that bound the depth layers, while scalar fields such as temperature
-and salinity are defined at the nodes. Each storage location calls for a
+and salinity are defined at the nodes. In the vertical, most producers store the three-dimensional
+horizontal velocity once per layer, which the engine reads either as constant within the layer or
+linearly in depth between the layer centres; the FESOM~1.4 velocities, stored on the levels, are always
+read linearly in depth (\cref{sec:vert-uvdepth}). Each storage location calls for a
 different interpolation stencil, a distinction that recurs throughout
 \crefrange{ch:hvel}{ch:sampling} and that we render explicitly in every schematic.
 
 The engine ships with ready configurations that make these choices concrete: global two-dimensional
 runs on node velocities, a regional three-dimensional run with vertical velocity and sampled temperature
-and salinity, a structured-grid run and HEALPix runs. Where this manual quotes a size it is usually that of
+and salinity, a structured-grid run, HEALPix runs and a three-dimensional run on level-wise FESOM~1.4
+output, its mesh recovered from the cell polygons of the data files. Where this manual quotes a size it is usually that of
 the FESOM2 \emph{core2} global mesh (\num{126858} nodes, 48 vertical interfaces reaching to about
 \SI{6250}{\metre}). The object of this document is the engine, not any experiment run with it.
 
@@ -103,13 +112,15 @@ scientific results, and we do not attempt to assess the physical realism of any
 particular simulation; our goal is to characterize what the engine computes and
 how, not to interpret the trajectories it produces.
 
-The engine is accompanied by an extensive automated test suite of about \num{2500} tests. The large majority of these guard low-level invariants --- array
+The engine is accompanied by an extensive automated test suite of about \num{4700} tests. The large majority of these guard low-level invariants --- array
 shapes, configuration parsing, byte-for-byte reproducibility --- and are not
 individually informative. A small number, by contrast, verify the numerical
 physics against independent references: convergence under step refinement in
 time-dependent eddy flows, conservation of a
 vertical streamfunction under continuity-consistent flow, reversibility of
-the integrator under time reversal (to within a small tolerance), and agreement with closed-form analytic flows.
+the integrator under time reversal (to within a small tolerance), agreement with closed-form analytic flows,
+the convergence order of the depth-linear horizontal velocity, and the reading of published FESOM~1.4
+output.
 We discuss these by name in \cref{ch:validation} as evidence that the numerics
 behave as specified, without reproducing their internals.
 

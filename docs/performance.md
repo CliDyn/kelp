@@ -28,6 +28,19 @@ guard and the node coordinate table; the log is not kept in this repository). Pe
 rk2 ≈ **6.6 µs**, rk4 ≈ **22 µs**; `pchip` temporal reconstruction is **≈ free at scale** (a fixed
 ≈ 40 ms/step, swamped by N).
 
+**Depth-linear u/v** (`mode.uv_vertical: linear`, `vertical.md` §2.1): each stencil member (a
+vertex, or an element) reads two data points instead of one, plus a bracket search over its
+column and a wet test against its bed, and every record is checked once for finite values down
+to each column's last usable point (one parallel pass over the u/v arrays per record read). The
+step-cost ratio against the layer rule (same arrays) is measured by
+`benchmarks/single_node/depth_linear_cost.py` (128 threads, 1e5 particles, with the walls at
+depth): node layout, fused 3-D RK2, 1.10 with a linear time blend and 1.00 with PCHIP; element
+`leastsq` (`--layout element`), 1.06 per fused 3-D Euler step and 1.03 per unfused RK2 step
+(0.97 with PCHIP); rows in `benchmarks/single_node/depth_linear_cost.md`. The sigma leg of the
+script (`--vertical sigma`: the unfused 3-D RK2 step on a FESOM-C-like sigma mesh): element
+`leastsq` 0.98 with a linear time blend (within the run-to-run spread) and 1.03 with PCHIP; node
+`barycentric` 1.03 and 1.04.
+
 **Run-time rule of thumb** (global, 1-day step, ≥16 threads, rk2): `T ≈ n_days × (1.0 s + 6.6 µs × N)`.
 Below ~130k tracers the run is **I/O-bound** (tracer count barely matters); above, it grows linearly
 in N.

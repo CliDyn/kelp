@@ -2,18 +2,29 @@
 
 \begin{description}[style=nextline,leftmargin=0pt,font=\normalfont\bfseries]
 \item[FESOM family] The unstructured-mesh ocean models the engine principally targets:
-  FESOM2 and FESOM-C. Used here as a collective term; statements specific to one model name it.
+  FESOM2, FESOM~1.4 and FESOM-C. Used here as a collective term; statements specific to one model name it.
 \item[FESOM2] A global ocean model on a purely triangular mesh with a fixed depth-level
   (z-level) vertical coordinate. The running example uses a FESOM2 mesh.
 \item[FESOM-C] A coastal ocean model on a mixed mesh --- elements may be triangles or
   quadrilaterals --- with a terrain-following (sigma) vertical coordinate.
+\item[FESOM~1.4] The finite-element predecessor of FESOM2, on a triangular mesh with z-levels; a P1
+  model whose $u$, $v$, $\Wvel$, temperature and salinity live on the levels at the nodes. Its mesh is read
+  from the model's ASCII files or recovered from the cell polygons of its output.
 \item[Node] A vertex of the mesh. Node-layout fields (e.g.\ \code{unod}/\code{vnod},
   scalars, sea-surface height) are defined at nodes.
 \item[Element] A mesh face: a triangle (FESOM2) or a triangle or quadrilateral (FESOM-C, HEALPix,
   NEMO). Element-layout velocities are defined at element centroids.
 \item[Interface, layer] The vertical level boundaries (interfaces) and the volumes between
   them (layers); $K$ interfaces bound $K-1$ layers. The vertical velocity lives at
-  interfaces, the three-dimensional horizontal velocity and scalars at mid-layers.
+  interfaces, the three-dimensional horizontal velocity and scalars at mid-layers (in FESOM~1.4 every
+  field on the levels).
+\item[Depth-linear horizontal velocity] The rule \conf{mode.uv\_vertical: linear}: the horizontal velocity
+  is read linearly in depth between its data points, each stencil member in its own column, instead of as
+  a constant per layer. FESOM~1.4 velocities are always read so.
+\item[Wall at depth] A stencil member whose bed lies above the particle; under the depth-linear rule it is
+  left out of the interpolation, as the coast is.
+\item[Partial bottom layer] A layer whose lower level lies below the bed of its column (a FESOM2 partial
+  bottom cell); the depth-linear rule never reads it.
 \item[One-ring] The set of elements that share a given node; the stencil used by the
   localization search and several interpolators.
 \item[Barycentric coordinates] The area-ratio weights of a point within a triangle, used to

@@ -45,20 +45,25 @@ except ImportError:
         return range(*args)
 
 from ..core.geometry import METERS_PER_DEG_LAT, DEG2RAD, wrap_lon, clamp_lat
+from ..core.io import _require_same_uv_vertical
 from .interpolate import (
     interp_leastsq, interp_leastsq_single, VelocityField,
     _interp_leastsq_core, _interp_leastsq_core_tinterp,
     _interp_leastsq_core_pchip4,
     _interp_barycentric_core_tinterp,
     _interp_barycentric_core_tinterp_3d, _interp_barycentric_core_pchip4_3d,
-    get_interpolator, UV_INTERP_USES_ELEMS,
+    _interp_barycentric_core_tinterp_dl, _interp_barycentric_core_pchip4_dl,
+    _interp_leastsq_core_dl,
+    get_interpolator, UV_INTERP_USES_ELEMS, _reject_depth_linear, _DL_LAYOUT,
 )
+from .vertical_uv import depth_points
 from ..core.mesh import (
     Mesh, find_nearest_nodes, find_containing_elements,
     find_containing_elements_walk, grid_hash_dense_for_elements,
     _local_nearest_node, _find_containing_element_local,
     _grid_hash_nearest_widened, _grid_hash_nearest_3x3,
     _grid_hash_nearest_exact, _anchor_provable, _require_node_xyz,
+    build_elem_areas,
 )
 from ..core.particles import ParticleState, ParticleStatus, FailureReason
 # The fused 3-D RK2 kernels below inline the W barycentric twins, which take
@@ -993,6 +998,12 @@ def _validate_time_aware_inputs(vel, vel_next, dt_to_next, dt):
         return
     _validate_time_aware_kwargs(vel_next, dt_to_next)
 
+    # Placement of u/v (a plain attribute on a LazyLerpField too, so no
+    # blend); a field-like object without it counts as "layer".
+    _require_same_uv_vertical(
+        "vel and vel_next", getattr(vel, "uv_vertical", "layer"),
+        getattr(vel_next, "uv_vertical", "layer"))
+
     vel_u = _probe_field(vel, "u")
     vel_v = _probe_field(vel, "v")
     vel_eta = _probe_field(vel, "eta")
@@ -1033,6 +1044,138 @@ def _validate_time_aware_inputs(vel, vel_next, dt_to_next, dt):
             f"step endpoint past next snapshot: "
             f"dt={dt:.6f}s > dt_to_next={dt_to_next:.6f}s"
         )
+
+
+def _step_fields(vel, vel_next, recon) -> list:
+    """``(label, field)`` of every field one step receives: ``vel``,
+    ``vel_next`` and each ``recon`` snapshot."""
+    named = [("vel", vel)]
+    if vel_next is not None:
+        named.append(("vel_next", vel_next))
+    if recon is not None:
+        named.extend((f"recon snapshot {i}", s)
+                     for i, s in enumerate(recon[0]))
+    return named
+
+
+def _raise_step_mixture(where: str, named) -> None:
+    """Refuse one step's fields of mixed ``uv_vertical``, naming each."""
+    raise ValueError(
+        f"{where}: uv_vertical mismatch between the fields of one step: "
+        + ", ".join(f"{name}={getattr(f, 'uv_vertical', 'layer')!r}"
+                    for name, f in named))
+
+
+#: the interpolators that evaluate a depth-linear element-layout field
+_DL_ELEMENT_UV_INTERP = ("leastsq", "edge_leastsq", "barycentric")
+
+
+def _check_depth_linear_entry(vel, mesh, uv_interp: str, integrator: str, *,
+                              vel_next=None, recon=None) -> None:
+    """Entry gate of the step functions for depth-linear u/v.
+
+    Every field the step receives (``vel``, ``vel_next``, each ``recon``
+    snapshot) must carry the same placement, whichever side is
+    depth-linear; a mixture is refused, naming each field.  A ``"layer"``
+    ``vel`` with ``"layer"`` companions returns after these placement reads
+    only (``uv_vertical`` of ``vel``, ``vel_next`` and each snapshot; no
+    data of any field, nothing of ``mesh``, no allocation), so layer runs
+    keep their cost and their bits.
+
+    A depth-linear ``vel`` (``uv_vertical`` ``"level"`` or
+    ``"layer_linear"``) is refused, in this order, for the ``rk45``
+    integrator, a mesh that is neither z-level nor sigma, a field that is
+    not 3-D (no ``w``), and a layout and ``uv_interp`` outside the table of
+    the interpolators that evaluate it: node layout with ``"barycentric"``
+    only, element layout with ``"leastsq"``, ``"edge_leastsq"`` or
+    ``"barycentric"`` (any other layout is refused).  Then the placements
+    must agree, and the depth-point table of ``vel``'s placement and
+    layout must exist (``depth_points``: on element layout
+    ``"layer_linear"`` data and, on a z-level mesh, the reader's element
+    bottoms and no ice-shelf cavities; a sigma mesh serves
+    ``"layer_linear"`` data only, read in the sigma fraction
+    ``s = z / H_p`` that the unfused steps hand the interpolators,
+    :func:`_sigma_frac_for_uv`).  The values are not checked here: a run
+    checks every record once where it stores it
+    (``tracking._mark_depth_linear``).
+
+    Parameters
+    ----------
+    vel : VelocityField or LazyLerpField
+        The step's field; one without ``uv_vertical`` counts as ``"layer"``.
+    mesh : Mesh
+        The mesh of the step.
+    uv_interp : str
+        The step's horizontal interpolator name.
+    integrator : str
+        ``"euler"``, ``"rk2"``, ``"rk4"`` or ``"rk45"`` (message prefix
+        ``"<integrator>_step"``).
+    vel_next : VelocityField or LazyLerpField, optional
+        The time-aware neighbour field.
+    recon : tuple, optional
+        The PCHIP bundle ``(snaps, times, sim_time, direction)``.
+
+    Raises
+    ------
+    ValueError
+        An unsupported combination, mixed placements (the message names
+        each field), or a mesh without the table (``depth_points``).
+    """
+    placement = getattr(vel, "uv_vertical", "layer")
+    if placement == "layer":
+        # placement reads only: a depth-linear companion of a layer vel is
+        # inconsistent input, refused like the other direction
+        mixed = (vel_next is not None
+                 and getattr(vel_next, "uv_vertical", "layer") != "layer")
+        if not mixed and recon is not None:
+            for snap in recon[0]:
+                if getattr(snap, "uv_vertical", "layer") != "layer":
+                    mixed = True
+                    break
+        if mixed:
+            _raise_step_mixture(f"{integrator}_step",
+                                _step_fields(vel, vel_next, recon))
+        return
+    where = f"{integrator}_step"
+    if integrator == "rk45":
+        # node layout needs barycentric too; element layout takes any of
+        # its interpolators
+        use = ("euler, rk2 or rk4 with uv_interp='barycentric'"
+               if getattr(vel, "uv_layout", "element") == "node"
+               else "euler, rk2 or rk4")
+        _reject_depth_linear(
+            vel, where, "is not supported by the rk45 integrator (2-D only "
+            f"in this version); use {use}")
+    if mesh.vertical_coord not in ("zlevel", "sigma"):
+        _reject_depth_linear(
+            vel, where, "needs a z-level or sigma mesh (vertical_coord "
+            f"'zlevel' or 'sigma'), got {mesh.vertical_coord!r}")
+    if not _is_3d(vel):
+        _reject_depth_linear(
+            vel, where, "needs a 3-D field (u/v on depth points and a w "
+            "field)")
+    layout = getattr(vel, "uv_layout", "element")
+    if layout == "node":
+        if uv_interp != "barycentric":
+            _reject_depth_linear(
+                vel, where, "on node layout (uv_layout='node') needs "
+                f"uv_interp='barycentric', got uv_interp={uv_interp!r}")
+    elif layout == "element":
+        if uv_interp not in _DL_ELEMENT_UV_INTERP:
+            _reject_depth_linear(
+                vel, where, "on element layout (uv_layout='element') needs "
+                "uv_interp 'leastsq', 'edge_leastsq' or 'barycentric', got "
+                f"uv_interp={uv_interp!r}")
+    else:
+        _reject_depth_linear(
+            vel, where, f"needs uv_layout 'node' or 'element', got "
+            f"{layout!r}")
+
+    named = _step_fields(vel, vel_next, recon)
+    if any(getattr(f, "uv_vertical", "layer") != placement
+           for _, f in named):
+        _raise_step_mixture(where, named)
+    depth_points(mesh, placement, layout)
 
 
 def _make_stage_vels(vel: VelocityField, vel_next: Optional[VelocityField],
@@ -1166,7 +1309,9 @@ def _clamp_z(z, vel, mesh, nn_full, alive, *, Dmin=0.5, z0b_min=0.1,
 # and the flow along a sloping bottom are then carried exactly, for any
 # temporal interpolation of eta; earlier versions added them as depth rates
 # (first order when combined with a dia-sigma flux, lost on steady-fallback
-# steps).
+# steps).  A depth-linear u/v field is read in s itself: each stage hands its
+# interpolator clip(z / H_p, 0, 1) of its own depth and column
+# (_sigma_frac_for_uv); W and the layer lookups keep metres.
 
 def _sigma_col_H(mesh, lons, lats, nn_full, eta, mask, w_interp, Dmin):
     """Column height ``max(depth + eta, Dmin)`` at the particles (sigma
@@ -1174,6 +1319,34 @@ def _sigma_col_H(mesh, lons, lats, nn_full, eta, mask, w_interp, Dmin):
     from .vertical_sigma import sigma_column_height
     return sigma_column_height(mesh, lons, lats, nn_full, eta, mask,
                                method=w_interp, Dmin=Dmin)
+
+
+def _sigma_frac_for_uv(z, H) -> np.ndarray:
+    """Sigma fraction ``s = clip(z / H, 0, 1)`` of every particle.
+
+    The coordinate a depth-linear u/v field is read in on a sigma mesh
+    (its points are the layer centres in ``s``,
+    :func:`kelp.numerics.vertical_uv.depth_points`): each unfused stage
+    hands its interpolator the ``s`` of its own depth and column height.
+    The vectorised form of ``vertical_sigma._sigma_frac``, element for
+    element (a NaN stays NaN; the depth-linear kernels read it as ``+inf``,
+    the bottom centre).
+
+    Parameters
+    ----------
+    z : np.ndarray, shape ``(P,)``
+        Stage depths (m, positive down).
+    H : np.ndarray, shape ``(P,)``
+        Column heights at the stage positions and time
+        (:func:`_sigma_col_H`).
+
+    Returns
+    -------
+    np.ndarray of float64, shape ``(P,)``
+    """
+    f = np.asarray(z, dtype=np.float64) / np.asarray(H, dtype=np.float64)
+    f = np.where(f < 0.0, 0.0, f)
+    return np.where(f > 1.0, 1.0, f)
 
 
 def _eta_blend(eta0, eta1, c):
@@ -1541,6 +1714,128 @@ def _fused_euler_step_3d(
         # W for EVERY alive particle, before the u/v verdict — the unfused
         # path computes it with mask=alive and it is also the vel_w
         # diagnostic of a particle that dies here (parity, 2026-09-12).
+        if w_method == _W_LEASTSQ:
+            WW, _ = _interp_w_leastsq_single(
+                lons[i], lats[i], z_particles[i], node_i,
+                w_field, z_levels, time_dir, node_depths,
+                nodes_lon, nodes_lat,
+                node_to_elems, node_to_elems_count, elem_nodes,
+            )
+        else:
+            WW = _interp_w_linear_single(w_field, z_levels, z_particles[i], node_i, time_dir)
+        W_out[i] = WW
+
+        if not ok:
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = z_particles[i]
+            status_out[i] = OUTSIDE
+            fr_out[i] = _FR_INTERP
+            nn_out[i] = node_i
+            continue
+
+        lat_rad = lats[i] * DEG2RAD
+        z0 = math.cos(lat_rad) * _SLM
+        if z0 < 1.0:
+            z0 = 1.0
+        lon_new = lons[i] + dt * UU / z0
+        lat_new = lats[i] + dt * VV / _SLM
+        z_new = z_particles[i] + WW * dt
+        lon_new = ((lon_new + 180.0) % 360.0) - 180.0
+        if lat_new > 90.0:
+            lat_new = 90.0
+        elif lat_new < -90.0:
+            lat_new = -90.0
+
+        nn_new = _fused_site_anchor(
+            lon_new, lat_new,
+            gh_offsets, gh_node_ids, gh_cell_size,
+            gh_lon_min, gh_lat_min, gh_nx, gh_ny, gh_wrap_lon,
+            nodes_lon, nodes_lat, node_xyz, exact, gh_far_rows,
+        )
+
+        _, in_dom = _find_containing_element_local(
+            lon_new, lat_new, nn_new,
+            node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat,
+        )
+
+        if not in_dom:
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = z_particles[i]
+            status_out[i] = OUTSIDE
+            fr_out[i] = _FR_OOB
+            nn_out[i] = node_i
+        else:
+            lon_out[i] = lon_new
+            lat_out[i] = lat_new
+            z_clamped = z_new
+            if z_clamped < z_levels[0]:
+                z_clamped = z_levels[0]
+            bd = node_depths[nn_new]
+            if z_clamped > bd:
+                z_clamped = bd
+            z_out[i] = z_clamped
+            status_out[i] = ALIVE
+            nn_out[i] = nn_new
+
+
+@njit(parallel=True, cache=True)
+def _fused_euler_step_3d_dl(
+    P, lons, lats, z_particles, alive_mask, status_in,
+    gh_offsets, gh_node_ids, gh_cell_size, gh_lon_min, gh_lat_min,
+    gh_nx, gh_ny, gh_wrap_lon, gh_far_rows,
+    node_to_elems_count, node_to_elems,
+    elem_center_lon, elem_center_lat,
+    elem_nodes, nodes_lon, nodes_lat, node_xyz,
+    node_depths, z_levels,
+    p, last, bed, elem_areas,
+    u_2d, v_2d, w_field,
+    dt, time_dir, w_method,
+    lon_out, lat_out, z_out, status_out, nn_out, U_out, V_out, W_out, fr_out, exact
+):
+    """Depth-linear twin of :func:`_fused_euler_step_3d` (element layout,
+    ``uv_vertical`` ``"layer_linear"``): the same kernel with the element
+    table ``p`` (``(M,)``), ``last``, ``bed`` and the element areas
+    ``elem_areas`` (``(E,)``) after ``z_levels``, and u/v of shape
+    ``(M, E)``.  No layer is looked up for u/v: they are read at the
+    particle's depth by :func:`_interp_leastsq_core_dl` (an element dry
+    there left out, the fallbacks of the wet members' area mean and the
+    containing element), the core the unfused step runs.  The anchors, W,
+    the move, the domain check and the clamp are the layer kernel's."""
+    ALIVE = 1
+    OUTSIDE = 3
+    _W_NEAREST = 0
+    _W_LEASTSQ = 1
+    for i in prange(P):
+        if not alive_mask[i]:
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = z_particles[i]
+            status_out[i] = status_in[i]
+            continue
+
+        node_i = _fused_site_anchor(
+            lons[i], lats[i],
+            gh_offsets, gh_node_ids, gh_cell_size,
+            gh_lon_min, gh_lat_min, gh_nx, gh_ny, gh_wrap_lon,
+            nodes_lon, nodes_lat, node_xyz, exact, gh_far_rows,
+        )
+
+        UU, VV, ok = _interp_leastsq_core_dl(
+            lons[i], lats[i], z_particles[i], node_i,
+            node_to_elems_count, node_to_elems,
+            elem_center_lon, elem_center_lat, time_dir,
+            p, last, bed, elem_areas, elem_nodes, nodes_lon, nodes_lat,
+            u_2d, v_2d,
+        )
+        U_out[i] = UU
+        V_out[i] = VV
+
+        # W for EVERY alive particle, before the u/v verdict (as the
+        # layer kernel: the unfused path computes it with mask=alive and
+        # it is also the vel_w diagnostic of a particle that dies here)
         if w_method == _W_LEASTSQ:
             WW, _ = _interp_w_leastsq_single(
                 lons[i], lats[i], z_particles[i], node_i,
@@ -3245,10 +3540,47 @@ def _run_fused_2d_pchip(state, recon, mesh, dt, time_dir, layer,
 
 
 
+def _fused_euler_3d_dl_table(vel, mesh, placement):
+    """The element table, the element areas and u/v that the depth-linear
+    twin :func:`_fused_euler_step_3d_dl` reads.
+
+    The field must be element layout (``leastsq`` evaluates no other
+    depth-linear field), and its u/v must have the table's shape ``(M, E)``
+    (no bounds checks inside the kernel).
+    """
+    site = "_run_fused_euler_3d"
+    if getattr(vel, "uv_layout", "element") != "element":
+        _reject_depth_linear(vel, site, _DL_LAYOUT)
+    dp = _fused_3d_dl_table(mesh, placement, layout="element")
+    u, v = vel.u, vel.v
+    want = (dp.p.size, mesh.n_elements)
+    if (getattr(u, "shape", None) != want
+            or getattr(v, "shape", None) != want):
+        raise ValueError(
+            f"{site}: depth-linear u/v must be (M, E) = {want}, got u "
+            f"{getattr(u, 'shape', None)}, v {getattr(v, 'shape', None)}")
+    return dp, build_elem_areas(mesh), u, v
+
+
 def _run_fused_euler_3d(state, vel, mesh, dt, time_dir, w_interp="leastsq"):
-    """Run the fused 3D Euler kernel and return the new ParticleState."""
+    """Run the fused 3D Euler kernel and return the new ParticleState.
+
+    A ``"layer"`` field runs :func:`_fused_euler_step_3d`; a depth-linear
+    element-layout field (``uv_vertical`` ``"layer_linear"``) its twin
+    :func:`_fused_euler_step_3d_dl` on the element table
+    (:func:`_fused_euler_3d_dl_table`).
+    """
     P = state.n_particles
     alive = state.alive_mask
+    placement = getattr(vel, "uv_vertical", "layer")
+    if placement == "layer":
+        fused_kernel = _fused_euler_step_3d
+        table = ()
+        u_f, v_f = vel.u, vel.v
+    else:
+        fused_kernel = _fused_euler_step_3d_dl
+        dp, areas, u_f, v_f = _fused_euler_3d_dl_table(vel, mesh, placement)
+        table = (dp.p, dp.last, dp.bed, areas)
     z_levels = _get_z_levels(mesh)
 
     w_method = _W_METHOD_MAP.get(w_interp, W_LEASTSQ)
@@ -3263,14 +3595,14 @@ def _run_fused_euler_3d(state, vel, mesh, dt, time_dir, w_interp="leastsq"):
     W_out = np.zeros(P, dtype=np.float64)
     fr_out = np.zeros(P, dtype=np.int8)
 
-    _fused_euler_step_3d(
+    fused_kernel(
         P, state.lon, state.lat, state.z, alive, state.status,
         *_mesh_gh_args(mesh),
         mesh.node_to_elems_count, mesh.node_to_elems,
         mesh.elem_center_lon, mesh.elem_center_lat,
         mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat, _require_node_xyz(mesh),
-        mesh.depth, z_levels,
-        vel.u, vel.v, vel.w,
+        mesh.depth, z_levels, *table,
+        u_f, v_f, vel.w,
         dt, time_dir, w_method,
         lon_out, lat_out, z_out, status_out, nn_out, U_out, V_out, W_out,
         fr_out, _exact_nearest_on(mesh),
@@ -3729,19 +4061,460 @@ def _fused_rk2_step_3d_bary_pchip(
             nn_out[i] = nn_new
 
 
-def _fused_3d_bary_field_checks(mesh, fields_kn1, fields_kn):
-    """Shape guards for the 3-D barycentric runners: u/v are (K-1, N),
-    w is (K, N) on the mesh's node count/vertical table (no bounds checks
+@njit(parallel=True, cache=True)
+def _fused_rk2_step_3d_bary_tinterp_dl(
+    P, lons, lats, zs, alive_mask, status_in, nn1,
+    gh_offsets, gh_node_ids, gh_cell_size, gh_lon_min, gh_lat_min,
+    gh_nx, gh_ny, gh_wrap_lon, gh_far_rows,
+    node_to_elems_count, node_to_elems,
+    elem_nodes, nodes_lon, nodes_lat, node_xyz, node_depths, z_levels,
+    p, last, bed,
+    u_a, v_a, u_b, v_b, u_t, v_t, w_a, w_b, w_t, alpha0,
+    alpha_k1, alpha_k2,
+    dt, time_dir, r_earth, w_code,
+    lon_out, lat_out, z_out, status_out, nn_out,
+    U_out, V_out, W_out, fr_out, need_exact,
+    ov_mid, ov_new, flag_lon, flag_lat, flag_site, exact
+):
+    """Depth-linear twin of :func:`_fused_rk2_step_3d_bary_tinterp`
+    (``uv_vertical`` ``"level"`` / ``"layer_linear"``): the same kernel with
+    the depth-point table ``p`` (``(M,)``), ``last`` (``(N,)``), ``bed``
+    (``(N,)``) after ``z_levels`` and u/v fields of shape ``(M, N)``.  No
+    layer is looked up for u/v: stage 1 reads them at the entry depth
+    ``zs[i]``, stage 2 at ``z_mid``
+    (:func:`_interp_barycentric_core_tinterp_dl` — time blend, then depth,
+    then the barycentric sum, a vertex dry at the stage depth left out).
+    W, anchors, flags and the clamp are untouched."""
+    ALIVE = 1
+    OUTSIDE = 3
+    z_surface = z_levels[0]
+    for i in prange(P):
+        if not alive_mask[i]:
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = zs[i]
+            status_out[i] = status_in[i]
+            continue
+
+        # stage-1 anchor comes in EXACT (batch KD-healed, computed by
+        # the runner like the unfused path) — the widened in-kernel search
+        # is certificate-exact only for containable queries, and an alive
+        # particle already off the element footprint (regional extracts,
+        # direct callers) would otherwise diverge in its nn/W diagnostics
+        # (2026-08 review).
+        node_i = nn1[i]
+
+        U1, V1, ok1 = _interp_barycentric_core_tinterp_dl(
+            lons[i], lats[i], node_i, zs[i], time_dir, alpha0, alpha_k1,
+            node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat, p, last, bed,
+            u_a, v_a, u_b, v_b, u_t, v_t, r_earth,
+        )
+        # W1 for EVERY alive particle (the unfused path computes it with
+        # mask=alive, before the ok1 verdict) — it is also the diagnostic.
+        if w_code == W_NEAREST:
+            W1 = _interp_w_linear_single_tinterp(
+                w_a, w_b, w_t, alpha0, alpha_k1,
+                z_levels, zs[i], node_i, time_dir)
+        else:
+            W1, _wok = _interp_w_bary_single_tinterp(
+                lons[i], lats[i], zs[i], node_i,
+                w_a, w_b, w_t, alpha0, alpha_k1,
+                z_levels, time_dir, node_depths,
+                nodes_lon, nodes_lat,
+                node_to_elems, node_to_elems_count, elem_nodes)
+        U_out[i] = U1
+        V_out[i] = V1
+        W_out[i] = W1
+
+        if not ok1:
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = zs[i]
+            status_out[i] = OUTSIDE
+            fr_out[i] = _FR_INTERP
+            nn_out[i] = node_i
+            continue
+
+        z0 = math.cos(lats[i] * DEG2RAD) * _SLM
+        if z0 < 1.0:
+            z0 = 1.0
+        lon_mid = lons[i] + 0.5 * dt * U1 / z0
+        lat_mid = lats[i] + 0.5 * dt * V1 / _SLM
+        lon_mid = ((lon_mid + 180.0) % 360.0) - 180.0
+        if lat_mid > 90.0:
+            lat_mid = 90.0
+        elif lat_mid < -90.0:
+            lat_mid = -90.0
+        z_mid = zs[i] + W1 * 0.5 * dt
+
+        # 3x3-first: a non-empty window is bit-identical to the batch
+        # KD-healed nearest; an EMPTY window is the only case where the
+        # in-kernel search could diverge — flag the particle for the
+        # exact unfused rerun instead (hybrid exactness, 2026-08:
+        # replaces the density-certificate gate for the 3-D kernels).
+        if exact:
+            # the in-kernel exact search (round 4: the flag/runner-heal
+            # rounds were slower than the unfused path here too)
+            nn_mid = _grid_hash_nearest_exact(
+                lon_mid, lat_mid,
+                gh_offsets, gh_node_ids, gh_cell_size,
+                gh_lon_min, gh_lat_min, gh_nx, gh_ny, gh_wrap_lon,
+                nodes_lon, nodes_lat, node_xyz, gh_far_rows,
+            )
+        else:
+            nn_mid = _grid_hash_nearest_3x3(
+                lon_mid, lat_mid,
+                gh_offsets, gh_node_ids, gh_cell_size,
+                gh_lon_min, gh_lat_min, gh_nx, gh_ny, gh_wrap_lon,
+                nodes_lon, nodes_lat, node_xyz,
+            )
+        if nn_mid < 0:
+            # anchor-heal handshake (subset-cost hybrid, 2026-08): the
+            # runner KD-heals the flagged position and re-runs JUST the
+            # flagged particles with the exact anchor injected — the
+            # whole-field unfused splice stays a terminal fallback only
+            nn_mid = ov_mid[i]
+        if nn_mid < 0:
+            need_exact[i] = 1
+            flag_site[i] = 1
+            flag_lon[i] = lon_mid
+            flag_lat[i] = lat_mid
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = zs[i]
+            status_out[i] = status_in[i]
+            continue
+
+        U2, V2, ok2 = _interp_barycentric_core_tinterp_dl(
+            lon_mid, lat_mid, nn_mid, z_mid, time_dir, alpha0, alpha_k2,
+            node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat, p, last, bed,
+            u_a, v_a, u_b, v_b, u_t, v_t, r_earth,
+        )
+        if not ok2:
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = zs[i]
+            status_out[i] = OUTSIDE
+            fr_out[i] = _FR_INTERP
+            nn_out[i] = node_i
+            continue
+
+        if w_code == W_NEAREST:
+            W2 = _interp_w_linear_single_tinterp(
+                w_a, w_b, w_t, alpha0, alpha_k2,
+                z_levels, z_mid, nn_mid, time_dir)
+        else:
+            W2, _wok2 = _interp_w_bary_single_tinterp(
+                lon_mid, lat_mid, z_mid, nn_mid,
+                w_a, w_b, w_t, alpha0, alpha_k2,
+                z_levels, time_dir, node_depths,
+                nodes_lon, nodes_lat,
+                node_to_elems, node_to_elems_count, elem_nodes)
+
+        z0m = math.cos(lat_mid * DEG2RAD) * _SLM
+        if z0m < 1.0:
+            z0m = 1.0
+        lon_new = lons[i] + dt * U2 / z0m
+        lat_new = lats[i] + dt * V2 / _SLM
+        lon_new = ((lon_new + 180.0) % 360.0) - 180.0
+        if lat_new > 90.0:
+            lat_new = 90.0
+        elif lat_new < -90.0:
+            lat_new = -90.0
+        z_new = zs[i] + W2 * dt
+
+        if exact:
+            # the in-kernel exact search (round 4: the flag/runner-heal
+            # rounds were slower than the unfused path here too)
+            nn_new = _grid_hash_nearest_exact(
+                lon_new, lat_new,
+                gh_offsets, gh_node_ids, gh_cell_size,
+                gh_lon_min, gh_lat_min, gh_nx, gh_ny, gh_wrap_lon,
+                nodes_lon, nodes_lat, node_xyz, gh_far_rows,
+            )
+        else:
+            nn_new = _grid_hash_nearest_3x3(
+                lon_new, lat_new,
+                gh_offsets, gh_node_ids, gh_cell_size,
+                gh_lon_min, gh_lat_min, gh_nx, gh_ny, gh_wrap_lon,
+                nodes_lon, nodes_lat, node_xyz,
+            )
+        if nn_new < 0:
+            nn_new = ov_new[i]
+        if nn_new < 0:
+            need_exact[i] = 1
+            flag_site[i] = 2
+            flag_lon[i] = lon_new
+            flag_lat[i] = lat_new
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = zs[i]
+            status_out[i] = status_in[i]
+            continue
+        _, in_dom = _find_containing_element_local(
+            lon_new, lat_new, nn_new,
+            node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat,
+        )
+        if not in_dom:
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = zs[i]
+            status_out[i] = OUTSIDE
+            fr_out[i] = _FR_OOB
+            nn_out[i] = node_i
+        else:
+            # surface/bottom clamp (the _loop_clamp_depth arithmetic,
+            # applied — like the unfused path — with the FINAL anchor)
+            if z_new < z_surface:
+                z_new = z_surface
+            bottom = node_depths[nn_new]
+            if z_new > bottom:
+                z_new = bottom
+            lon_out[i] = lon_new
+            lat_out[i] = lat_new
+            z_out[i] = z_new
+            status_out[i] = ALIVE
+            nn_out[i] = nn_new
+
+
+@njit(parallel=True, cache=True)
+def _fused_rk2_step_3d_bary_pchip_dl(
+    P, lons, lats, zs, alive_mask, status_in, nn1,
+    gh_offsets, gh_node_ids, gh_cell_size, gh_lon_min, gh_lat_min,
+    gh_nx, gh_ny, gh_wrap_lon, gh_far_rows,
+    node_to_elems_count, node_to_elems,
+    elem_nodes, nodes_lon, nodes_lat, node_xyz, node_depths, z_levels,
+    p, last, bed,
+    u_0, v_0, u_1, v_1, u_2, v_2, u_3, v_3,
+    w_0, w_1, w_2, w_3,
+    t0, t1, t2, t3, tq1, tq2,
+    dt, time_dir, r_earth, w_code,
+    lon_out, lat_out, z_out, status_out, nn_out,
+    U_out, V_out, W_out, fr_out, need_exact,
+    ov_mid, ov_new, flag_lon, flag_lat, flag_site, exact
+):
+    """Depth-linear twin of :func:`_fused_rk2_step_3d_bary_pchip`
+    (``uv_vertical`` ``"level"`` / ``"layer_linear"``): the same kernel with
+    ``p``, ``last``, ``bed`` after ``z_levels`` and ``(M, N)`` u/v
+    snapshots; stage 1 reads u/v at ``zs[i]`` and ``tq1``, stage 2 at
+    ``z_mid`` and ``tq2`` (:func:`_interp_barycentric_core_pchip4_dl` — the
+    4-snapshot PCHIP of each stored value first, then depth, then the
+    barycentric sum, a vertex dry at the stage depth left out)."""
+    ALIVE = 1
+    OUTSIDE = 3
+    z_surface = z_levels[0]
+    for i in prange(P):
+        if not alive_mask[i]:
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = zs[i]
+            status_out[i] = status_in[i]
+            continue
+
+        # stage-1 anchor comes in EXACT (batch KD-healed, computed by
+        # the runner like the unfused path) — the widened in-kernel search
+        # is certificate-exact only for containable queries, and an alive
+        # particle already off the element footprint (regional extracts,
+        # direct callers) would otherwise diverge in its nn/W diagnostics
+        # (2026-08 review).
+        node_i = nn1[i]
+
+        U1, V1, ok1 = _interp_barycentric_core_pchip4_dl(
+            lons[i], lats[i], node_i, zs[i], time_dir,
+            node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat, p, last, bed,
+            u_0, v_0, u_1, v_1, u_2, v_2, u_3, v_3,
+            t0, t1, t2, t3, tq1, r_earth,
+        )
+        if w_code == W_NEAREST:
+            W1 = _interp_w_linear_single_pchip4(
+                w_0, w_1, w_2, w_3, t0, t1, t2, t3, tq1,
+                z_levels, zs[i], node_i, time_dir)
+        else:
+            W1, _wok = _interp_w_bary_single_pchip4(
+                lons[i], lats[i], zs[i], node_i,
+                w_0, w_1, w_2, w_3, t0, t1, t2, t3, tq1,
+                z_levels, time_dir, node_depths,
+                nodes_lon, nodes_lat,
+                node_to_elems, node_to_elems_count, elem_nodes)
+        U_out[i] = U1
+        V_out[i] = V1
+        W_out[i] = W1
+
+        if not ok1:
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = zs[i]
+            status_out[i] = OUTSIDE
+            fr_out[i] = _FR_INTERP
+            nn_out[i] = node_i
+            continue
+
+        z0 = math.cos(lats[i] * DEG2RAD) * _SLM
+        if z0 < 1.0:
+            z0 = 1.0
+        lon_mid = lons[i] + 0.5 * dt * U1 / z0
+        lat_mid = lats[i] + 0.5 * dt * V1 / _SLM
+        lon_mid = ((lon_mid + 180.0) % 360.0) - 180.0
+        if lat_mid > 90.0:
+            lat_mid = 90.0
+        elif lat_mid < -90.0:
+            lat_mid = -90.0
+        z_mid = zs[i] + W1 * 0.5 * dt
+
+        # 3x3-first: a non-empty window is bit-identical to the batch
+        # KD-healed nearest; an EMPTY window is the only case where the
+        # in-kernel search could diverge — flag the particle for the
+        # exact unfused rerun instead (hybrid exactness, 2026-08:
+        # replaces the density-certificate gate for the 3-D kernels).
+        if exact:
+            # the in-kernel exact search (round 4: the flag/runner-heal
+            # rounds were slower than the unfused path here too)
+            nn_mid = _grid_hash_nearest_exact(
+                lon_mid, lat_mid,
+                gh_offsets, gh_node_ids, gh_cell_size,
+                gh_lon_min, gh_lat_min, gh_nx, gh_ny, gh_wrap_lon,
+                nodes_lon, nodes_lat, node_xyz, gh_far_rows,
+            )
+        else:
+            nn_mid = _grid_hash_nearest_3x3(
+                lon_mid, lat_mid,
+                gh_offsets, gh_node_ids, gh_cell_size,
+                gh_lon_min, gh_lat_min, gh_nx, gh_ny, gh_wrap_lon,
+                nodes_lon, nodes_lat, node_xyz,
+            )
+        if nn_mid < 0:
+            # anchor-heal handshake (subset-cost hybrid, 2026-08): the
+            # runner KD-heals the flagged position and re-runs JUST the
+            # flagged particles with the exact anchor injected — the
+            # whole-field unfused splice stays a terminal fallback only
+            nn_mid = ov_mid[i]
+        if nn_mid < 0:
+            need_exact[i] = 1
+            flag_site[i] = 1
+            flag_lon[i] = lon_mid
+            flag_lat[i] = lat_mid
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = zs[i]
+            status_out[i] = status_in[i]
+            continue
+
+        U2, V2, ok2 = _interp_barycentric_core_pchip4_dl(
+            lon_mid, lat_mid, nn_mid, z_mid, time_dir,
+            node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat, p, last, bed,
+            u_0, v_0, u_1, v_1, u_2, v_2, u_3, v_3,
+            t0, t1, t2, t3, tq2, r_earth,
+        )
+        if not ok2:
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = zs[i]
+            status_out[i] = OUTSIDE
+            fr_out[i] = _FR_INTERP
+            nn_out[i] = node_i
+            continue
+
+        if w_code == W_NEAREST:
+            W2 = _interp_w_linear_single_pchip4(
+                w_0, w_1, w_2, w_3, t0, t1, t2, t3, tq2,
+                z_levels, z_mid, nn_mid, time_dir)
+        else:
+            W2, _wok2 = _interp_w_bary_single_pchip4(
+                lon_mid, lat_mid, z_mid, nn_mid,
+                w_0, w_1, w_2, w_3, t0, t1, t2, t3, tq2,
+                z_levels, time_dir, node_depths,
+                nodes_lon, nodes_lat,
+                node_to_elems, node_to_elems_count, elem_nodes)
+
+        z0m = math.cos(lat_mid * DEG2RAD) * _SLM
+        if z0m < 1.0:
+            z0m = 1.0
+        lon_new = lons[i] + dt * U2 / z0m
+        lat_new = lats[i] + dt * V2 / _SLM
+        lon_new = ((lon_new + 180.0) % 360.0) - 180.0
+        if lat_new > 90.0:
+            lat_new = 90.0
+        elif lat_new < -90.0:
+            lat_new = -90.0
+        z_new = zs[i] + W2 * dt
+
+        if exact:
+            # the in-kernel exact search (round 4: the flag/runner-heal
+            # rounds were slower than the unfused path here too)
+            nn_new = _grid_hash_nearest_exact(
+                lon_new, lat_new,
+                gh_offsets, gh_node_ids, gh_cell_size,
+                gh_lon_min, gh_lat_min, gh_nx, gh_ny, gh_wrap_lon,
+                nodes_lon, nodes_lat, node_xyz, gh_far_rows,
+            )
+        else:
+            nn_new = _grid_hash_nearest_3x3(
+                lon_new, lat_new,
+                gh_offsets, gh_node_ids, gh_cell_size,
+                gh_lon_min, gh_lat_min, gh_nx, gh_ny, gh_wrap_lon,
+                nodes_lon, nodes_lat, node_xyz,
+            )
+        if nn_new < 0:
+            nn_new = ov_new[i]
+        if nn_new < 0:
+            need_exact[i] = 1
+            flag_site[i] = 2
+            flag_lon[i] = lon_new
+            flag_lat[i] = lat_new
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = zs[i]
+            status_out[i] = status_in[i]
+            continue
+        _, in_dom = _find_containing_element_local(
+            lon_new, lat_new, nn_new,
+            node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat,
+        )
+        if not in_dom:
+            lon_out[i] = lons[i]
+            lat_out[i] = lats[i]
+            z_out[i] = zs[i]
+            status_out[i] = OUTSIDE
+            fr_out[i] = _FR_OOB
+            nn_out[i] = node_i
+        else:
+            if z_new < z_surface:
+                z_new = z_surface
+            bottom = node_depths[nn_new]
+            if z_new > bottom:
+                z_new = bottom
+            lon_out[i] = lon_new
+            lat_out[i] = lat_new
+            z_out[i] = z_new
+            status_out[i] = ALIVE
+            nn_out[i] = nn_new
+
+
+def _fused_3d_bary_field_checks(mesh, fields_uv, fields_w,
+                                uv_vertical: str = "layer"):
+    """Shape guards for the 3-D barycentric runners: u/v are (K-1, N) —
+    (K, N) for ``uv_vertical == "level"`` (one row per level) — and w is
+    (K, N), on the mesh's node count/vertical table (no bounds checks
     inside the kernels)."""
     n_nodes = mesh.nodes_lon.shape[0]
     K = int(mesh.sigma.size)
-    for name, arr in fields_kn1:
-        if arr is None or arr.ndim != 2 or arr.shape != (K - 1, n_nodes):
+    if uv_vertical == "level":
+        rows, rows_name = K, "K"
+    else:
+        rows, rows_name = K - 1, "K-1"
+    for name, arr in fields_uv:
+        if arr is None or arr.ndim != 2 or arr.shape != (rows, n_nodes):
             raise ValueError(
                 f"fused 3-D barycentric kernel: {name} must be "
-                f"(K-1, N) = ({K - 1}, {n_nodes}), got "
+                f"({rows_name}, N) = ({rows}, {n_nodes}), got "
                 f"{None if arr is None else arr.shape}")
-    for name, arr in fields_kn:
+    for name, arr in fields_w:
         if arr is None or arr.ndim != 2 or arr.shape != (K, n_nodes):
             raise ValueError(
                 f"fused 3-D barycentric kernel: {name} must be "
@@ -3750,6 +4523,39 @@ def _fused_3d_bary_field_checks(mesh, fields_kn1, fields_kn):
 
 
 _W_CODE_NAME = {0: "nearest", 2: "barycentric"}  # W_NEAREST/W_BARYCENTRIC
+
+
+def _fused_3d_uv_placement(site, named):
+    """The one ``uv_vertical`` of every field a fused 3-D runner's kernel
+    reads; it picks the kernel.
+
+    ``named`` lists ``(label, field)`` pairs: the owners of the raw arrays
+    (``vel`` or a lazy ``vel``'s parents ``vel_a`` / ``vel_b``, the target
+    ``vel_next``; the four PCHIP snapshots).  A field without the attribute
+    counts as ``"layer"``.  Mixed placements are refused: a same-shaped
+    ``"layer"`` field among ``"layer_linear"`` ones would otherwise be read
+    with the wrong rule.
+    """
+    found = [(label, getattr(f, "uv_vertical", "layer")) for label, f in named]
+    placement = found[0][1]
+    if any(pl != placement for _, pl in found):
+        raise ValueError(
+            f"{site}: uv_vertical mismatch between the fields the fused "
+            "kernel reads: "
+            + ", ".join(f"{label}={pl!r}" for label, pl in found))
+    return placement
+
+
+def _fused_3d_dl_table(mesh, placement, layout="node"):
+    """The depth-point table a fused depth-linear kernel reads (``None`` for
+    ``"layer"``: nothing is read or built): ``depth_points(mesh,
+    placement, layout)`` — the node table for the barycentric RK2 runners,
+    the element table for the Euler runner — whose ``p``, ``last`` and
+    ``bed`` the runners pass after ``z_levels``.
+    """
+    if placement == "layer":
+        return None
+    return depth_points(mesh, placement, layout)
 
 
 #: max KD-heal rounds for flagged stage anchors before the terminal
@@ -3893,6 +4699,18 @@ def _run_fused_rk2_3d_bary_tinterp(state, vel, vel_next, dt_to_next, mesh,
             "payload (alpha0 == 0.0) is not supported by the fused "
             "kernel — use the unfused path")
 
+    # one placement for every field the kernel reads (a lazy vel's raw
+    # parents, the target), before any other check reads a field: it picks
+    # the kernel; the shape guard follows below
+    site = "_run_fused_rk2_3d_bary_tinterp"
+    named = []
+    if hasattr(vel, "vel_a"):
+        named += [("vel.vel_a", vel.vel_a), ("vel.vel_b", vel.vel_b)]
+    named.append(("vel", vel))
+    if vel_next is not None:
+        named.append(("vel_next", vel_next))
+    placement = _fused_3d_uv_placement(site, named)
+
     if vel_next is None:
         vel_a_full = getattr(vel, "vel_a", vel)
         u_a = vel_a_full.u; v_a = vel_a_full.v; w_a = vel_a_full.w
@@ -3927,7 +4745,15 @@ def _run_fused_rk2_3d_bary_tinterp(state, vel, vel_next, dt_to_next, mesh,
         [("u_a", u_a), ("v_a", v_a), ("u_b", u_b), ("v_b", v_b),
          ("u_t", u_t), ("v_t", v_t)],
         [("w_a", w_a), ("w_b", w_b), ("w_t", w_t)],
+        uv_vertical=placement,
     )
+    dp = _fused_3d_dl_table(mesh, placement)
+    if dp is None:
+        fused_kernel = _fused_rk2_step_3d_bary_tinterp
+        table = ()
+    else:
+        fused_kernel = _fused_rk2_step_3d_bary_tinterp_dl
+        table = (dp.p, dp.last, dp.bed)
 
     z_levels = _get_z_levels(mesh)
     # exact stage-1 anchor, same call the unfused path makes
@@ -3951,7 +4777,7 @@ def _run_fused_rk2_3d_bary_tinterp(state, vel, vel_next, dt_to_next, mesh,
         flag_lon = np.zeros(P, dtype=np.float64)
         flag_lat = np.zeros(P, dtype=np.float64)
         flag_site = np.zeros(P, dtype=np.int8)
-        _fused_rk2_step_3d_bary_tinterp(
+        fused_kernel(
             P, state.lon, state.lat, state.z, alive_arr, state.status,
             nn1,
             mesh._gh_offsets, mesh._gh_node_ids, mesh._gh_cell_size,
@@ -3959,7 +4785,7 @@ def _run_fused_rk2_3d_bary_tinterp(state, vel, vel_next, dt_to_next, mesh,
             mesh._gh_wrap_lon, int(mesh._gh_far_rows),
             mesh.node_to_elems_count, mesh.node_to_elems,
             mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat, _require_node_xyz(mesh),
-            mesh.depth, z_levels,
+            mesh.depth, z_levels, *table,
             u_a, v_a, u_b, v_b, u_t, v_t, w_a, w_b, w_t, alpha0,
             alphas[0], alphas[1],
             dt, time_dir, float(mesh.r_earth), w_code,
@@ -3993,13 +4819,16 @@ def _run_fused_rk2_3d_bary_tinterp(state, vel, vel_next, dt_to_next, mesh,
     return result
 
 
-def _run_fused_rk2_3d_bary_pchip(state, recon, mesh, dt, time_dir, w_code):
+def _run_fused_rk2_3d_bary_pchip(state, recon, mesh, dt, time_dir, w_code,
+                                 vel=None):
     """Run the fused 3-D barycentric RK2 kernel with inline PCHIP blending.
 
     Re-validates the recon bundle exactly like ``_run_fused_2d_pchip``
     (reconstruct_pchip raises on every malformed case, so the fused
     wrapper must too), with the node-layout twist: snapshots must carry
-    NODE-layout u/v and a w field.
+    NODE-layout u/v and a w field.  The four snapshots — and ``vel``, the
+    step's own field, when given (``rk2_step`` passes it) — must share one
+    ``uv_vertical``, which picks the layer kernel or its depth-linear twin.
     """
     snaps4, times4, q_time, direction = recon
     if w_code not in (W_NEAREST, W_BARYCENTRIC):
@@ -4039,6 +4868,14 @@ def _run_fused_rk2_3d_bary_pchip(state, recon, mesh, dt, time_dir, w_code):
                 "bracket (tracking nulls recon in that case).")
         tqs.append(tq)
 
+    # one placement for the step's field and the four snapshots
+    # (reconstruct_pchip's order: times, bracket, placement); it picks the
+    # kernel
+    site = "_run_fused_rk2_3d_bary_pchip"
+    named = [(f"recon snapshot {i}", s_) for i, s_ in enumerate(snaps4)]
+    placement = _fused_3d_uv_placement(
+        site, ([("vel", vel)] if vel is not None else []) + named)
+
     a, b, c_, d = snaps4
     # error-parity with reconstruct_pchip EXACTLY (round 3): it validates
     # scalars (keys identical across all four, or all absent; shapes
@@ -4073,7 +4910,15 @@ def _run_fused_rk2_3d_bary_pchip(state, recon, mesh, dt, time_dir, w_code):
         [("u0", a.u), ("v0", a.v), ("u1", b.u), ("v1", b.v),
          ("u2", c_.u), ("v2", c_.v), ("u3", d.u), ("v3", d.v)],
         [("w0", a.w), ("w1", b.w), ("w2", c_.w), ("w3", d.w)],
+        uv_vertical=placement,
     )
+    dp = _fused_3d_dl_table(mesh, placement)
+    if dp is None:
+        fused_kernel = _fused_rk2_step_3d_bary_pchip
+        table = ()
+    else:
+        fused_kernel = _fused_rk2_step_3d_bary_pchip_dl
+        table = (dp.p, dp.last, dp.bed)
 
     P = state.n_particles
     z_levels = _get_z_levels(mesh)
@@ -4097,7 +4942,7 @@ def _run_fused_rk2_3d_bary_pchip(state, recon, mesh, dt, time_dir, w_code):
         flag_lon = np.zeros(P, dtype=np.float64)
         flag_lat = np.zeros(P, dtype=np.float64)
         flag_site = np.zeros(P, dtype=np.int8)
-        _fused_rk2_step_3d_bary_pchip(
+        fused_kernel(
             P, state.lon, state.lat, state.z, alive_arr, state.status,
             nn1,
             mesh._gh_offsets, mesh._gh_node_ids, mesh._gh_cell_size,
@@ -4105,7 +4950,7 @@ def _run_fused_rk2_3d_bary_pchip(state, recon, mesh, dt, time_dir, w_code):
             mesh._gh_wrap_lon, int(mesh._gh_far_rows),
             mesh.node_to_elems_count, mesh.node_to_elems,
             mesh.elem_nodes, mesh.nodes_lon, mesh.nodes_lat, _require_node_xyz(mesh),
-            mesh.depth, z_levels,
+            mesh.depth, z_levels, *table,
             a.u, a.v, b.u, b.v, c_.u, c_.v, d.u, d.v,
             a.w, b.w, c_.w, d.w,
             t0, t1, t2, t3, tqs[0], tqs[1],
@@ -4183,11 +5028,18 @@ def _euler_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
         vel_w = _sigma_stage_field(vel, eta0)
         H0 = _sigma_col_H(mesh, state.lon, state.lat, nn_full, eta0, alive,
                           w_interp, Dmin)
-    if is3d:
+    uv_state = state
+    if is3d and getattr(vel, "uv_vertical", "layer") == "layer":
         interp_layer = _compute_layers(
             mesh, vel_w, state.z, nn_full, alive,
             Dmin=Dmin, z0b_min=z0b_min, H_col=H0,
         )
+    elif is3d:
+        # depth-linear u/v read the stage depth (state.z), not a layer;
+        # on a sigma mesh its sigma fraction s = z / H_p
+        interp_layer = 0
+        if sig3d:
+            uv_state = state.replace(z=_sigma_frac_for_uv(state.z, H0))
     else:
         interp_layer = layer
 
@@ -4195,10 +5047,10 @@ def _euler_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
     if walk_interp:
         cur_elems, _ = _walk_update_elems(
             mesh, state.lon, state.lat, state.elem, alive)
-        U, V, ok = interp_fn(state, mesh, vel, nn_full, time_dir,
+        U, V, ok = interp_fn(uv_state, mesh, vel, nn_full, time_dir,
                              interp_layer, elems=cur_elems)
     else:
-        U, V, ok = interp_fn(state, mesh, vel, nn_full, time_dir,
+        U, V, ok = interp_fn(uv_state, mesh, vel, nn_full, time_dir,
                              interp_layer)
     moves = alive & ok
 
@@ -4321,6 +5173,9 @@ def euler_step(
     ParticleState
         New state after one Euler step.
     """
+    _check_depth_linear_entry(vel, mesh, kwargs.get("uv_interp", "leastsq"),
+                              "euler", vel_next=kwargs.get("vel_next"),
+                              recon=kwargs.get("recon"))
     diffusion: Optional[DiffusionStepArgs] = kwargs.pop("diffusion", None)
     _reject_em_m1_az(diffusion)
     alive = state.alive_mask
@@ -4374,9 +5229,15 @@ def euler_step(
             # through to the unfused dispatcher).  Under mesh.exact_nearest
             # it anchors every site through the in-kernel exact search
             # (_fused_site_anchor -> _grid_hash_nearest_exact), like every
-            # other fused kernel; no flag/heal round trip.
+            # other fused kernel; no flag/heal round trip.  A "layer" field
+            # runs the layer kernel (raw u[layer] rows), a "layer_linear"
+            # one (element layout, the runner refuses any other) its
+            # depth-linear twin; a "level" field (node layout, which leastsq
+            # does not evaluate) never enters it.
             fused_ok = (not is_sigma_3d and w_interp in ("nearest", "leastsq")
-                        and uv_interp == "leastsq")
+                        and uv_interp == "leastsq"
+                        and getattr(vel, "uv_vertical", "layer")
+                        in ("layer", "layer_linear"))
             if fused_ok:
                 result = _run_fused_euler_3d(state, vel, mesh, dt, time_dir,
                                              w_interp=w_interp)
@@ -4437,7 +5298,7 @@ def euler_step(
 # ---------------------------------------------------------------------------
 
 def _interp_uv_at(interp_fn, state, mesh, vel, lons, lats, mask,
-                  nn_full, time_dir, layer_arg, elems=None):
+                  nn_full, time_dir, layer_arg, elems=None, zs=None):
     """Vectorised (parallel) u/v interpolation at explicit stage positions.
 
     RK stages after the first evaluate u/v at the midpoint / stage positions,
@@ -4456,6 +5317,14 @@ def _interp_uv_at(interp_fn, state, mesh, vel, lons, lats, mask,
     identical to the per-particle loop — only parallel.  Particles outside
     ``mask`` are skipped by the kernel and return ``0.0 / 0.0 / False``,
     matching the loop's pre-zeroed outputs.
+
+    A depth-linear field (``uv_vertical`` ``"level"`` / ``"layer_linear"``)
+    is read at the depth of the stage state, so the stage depth ``zs`` must
+    reach it: given, it replaces the entry ``z`` in the stage state (on a
+    sigma mesh the steps pass the stage's sigma fraction instead,
+    :func:`_sigma_frac_for_uv`).  Layer interpolators never read
+    ``state.z`` (they take ``layer_arg``), so passing ``zs`` leaves every
+    layer run bit-identical.
 
     Parameters
     ----------
@@ -4477,6 +5346,9 @@ def _interp_uv_at(interp_fn, state, mesh, vel, lons, lats, mask,
     elems : np.ndarray or None
         Optional pre-validated containing elements at the STAGE positions
         (edge-walk tracker); forwarded to interpolators that accept them.
+    zs : np.ndarray or None, shape ``(P,)``
+        Stage depths (m, positive down; a depth-linear field on a sigma
+        mesh: the stage sigma fractions ``s``); ``None`` keeps ``state.z``.
 
     Returns
     -------
@@ -4485,7 +5357,11 @@ def _interp_uv_at(interp_fn, state, mesh, vel, lons, lats, mask,
     stage_status = np.where(
         mask, int(ParticleStatus.ALIVE), int(ParticleStatus.OUTSIDE)
     ).astype(state.status.dtype)
-    stage_state = state.replace(lon=lons, lat=lats, status=stage_status)
+    if zs is None:
+        stage_state = state.replace(lon=lons, lat=lats, status=stage_status)
+    else:
+        stage_state = state.replace(lon=lons, lat=lats, z=zs,
+                                    status=stage_status)
     if elems is not None:
         return interp_fn(stage_state, mesh, vel, nn_full, time_dir,
                          layer_arg, elems=elems)
@@ -4551,11 +5427,18 @@ def _rk2_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
         vel_k1 = _sigma_stage_field(vel_k1, eta0)
         H1 = _sigma_col_H(mesh, state.lon, state.lat, nn1, eta0, alive,
                           w_interp, Dmin)
-    if is3d:
+    uv_state = state
+    if is3d and getattr(vel_k1, "uv_vertical", "layer") == "layer":
         interp_layer1 = _compute_layers(
             mesh, vel_k1, state.z, nn1, alive,
             Dmin=Dmin, z0b_min=z0b_min, H_col=H1,
         )
+    elif is3d:
+        # depth-linear u/v read the stage depth (state.z), not a layer;
+        # on a sigma mesh its sigma fraction s = z / H_p
+        interp_layer1 = 0
+        if sig3d:
+            uv_state = state.replace(z=_sigma_frac_for_uv(state.z, H1))
     else:
         interp_layer1 = layer
 
@@ -4563,10 +5446,10 @@ def _rk2_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
     if walk_interp:
         cur_elems, _ = _walk_update_elems(
             mesh, state.lon, state.lat, state.elem, alive)
-        U1, V1, ok1 = interp_fn(state, mesh, vel_k1, nn1, time_dir,
+        U1, V1, ok1 = interp_fn(uv_state, mesh, vel_k1, nn1, time_dir,
                                 interp_layer1, elems=cur_elems)
     else:
-        U1, V1, ok1 = interp_fn(state, mesh, vel_k1, nn1, time_dir,
+        U1, V1, ok1 = interp_fn(uv_state, mesh, vel_k1, nn1, time_dir,
                                 interp_layer1)
 
     moves1 = alive & ok1
@@ -4604,12 +5487,19 @@ def _rk2_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
                               moves1, w_interp, Dmin)
             z_mid = np.where(moves1, s_mid * H2, state.z)
             vel_k2_w = _sigma_stage_field(vel_k2, eta_mid)
-        if is3d:
+        zs_uv = z_mid
+        if is3d and getattr(vel_k2, "uv_vertical", "layer") == "layer":
             layers_mid = _compute_layers(
                 mesh, vel_k2_w, z_mid, nn_mid_full, moves1,
                 Dmin=Dmin, z0b_min=z0b_min, H_col=H2 if sig3d else None,
             )
             layer_arg = layers_mid
+        elif is3d:
+            # depth-linear u/v read the stage depth (z_mid), not a layer;
+            # on a sigma mesh its sigma fraction in the stage column
+            layer_arg = 0
+            if sig3d:
+                zs_uv = _sigma_frac_for_uv(z_mid, H2)
         else:
             layer_arg = layer
 
@@ -4619,11 +5509,12 @@ def _rk2_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
                 mesh, lon_mid, lat_mid, cur_elems, moves1)
             last_elems = mid_elems
 
-        # Stage-2 u/v in parallel (was a serial per-particle loop).
+        # Stage-2 u/v in parallel (was a serial per-particle loop), at
+        # the stage depth z_mid (read by depth-linear fields only).
         U2, V2, ok2 = _interp_uv_at(
             interp_fn, state, mesh, vel_k2,
             lon_mid, lat_mid, moves1, nn_mid_full, time_dir, layer_arg,
-            elems=mid_elems,
+            elems=mid_elems, zs=zs_uv,
         )
 
         if is3d:
@@ -4722,6 +5613,9 @@ def rk2_step(
     Stage 1: half Euler step → midpoint position.
     Stage 2: evaluate velocity at midpoint, full step from original position.
     """
+    _check_depth_linear_entry(vel, mesh, kwargs.get("uv_interp", "leastsq"),
+                              "rk2", vel_next=kwargs.get("vel_next"),
+                              recon=kwargs.get("recon"))
     diffusion: Optional[DiffusionStepArgs] = kwargs.pop("diffusion", None)
     _reject_em_m1_az(diffusion)
     _reject_combined_em_on_rk(diffusion, "rk2")
@@ -4795,7 +5689,7 @@ def rk2_step(
         w_code = W_NEAREST if w_interp == "nearest" else W_BARYCENTRIC
         if recon is not None:
             result = _run_fused_rk2_3d_bary_pchip(
-                state, recon, mesh, dt, time_dir, w_code)
+                state, recon, mesh, dt, time_dir, w_code, vel=vel)
         else:
             result = _run_fused_rk2_3d_bary_tinterp(
                 state, vel, vel_next, dt_to_next, mesh, dt, time_dir,
@@ -4928,23 +5822,31 @@ def _rk4_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
             if s is not None:
                 z = np.where(mask, s * H_out, z)
             vel_at_stage = _sigma_stage_field(vel_at_stage, eta_stage)
-        if is3d:
+        zs_uv = z
+        if is3d and getattr(vel_at_stage, "uv_vertical", "layer") == "layer":
             layers_local = _compute_layers(
                 mesh, vel_at_stage, z, nn_full_local, mask,
                 Dmin=Dmin, z0b_min=z0b_min, H_col=H_col,
             )
             layer_arg = layers_local
+        elif is3d:
+            # depth-linear u/v read the stage depth (z), not a layer; on a
+            # sigma mesh its sigma fraction in the stage column
+            layer_arg = 0
+            if sig3d:
+                zs_uv = _sigma_frac_for_uv(z, H_out)
         else:
             layer_arg = layer
         stage_elems = prev_elems
         if walk_interp:
             stage_elems, _ = _walk_update_elems(
                 mesh, lon, lat, prev_elems, mask)
-        # Per-stage u/v in parallel (was a serial per-particle loop).
+        # Per-stage u/v in parallel (was a serial per-particle loop), at
+        # the stage depth z (read by depth-linear fields only).
         U_out, V_out, ok_out = _interp_uv_at(
             interp_fn, state, mesh, vel_at_stage,
             lon, lat, mask, nn_full_local, time_dir, layer_arg,
-            elems=stage_elems if walk_interp else None,
+            elems=stage_elems if walk_interp else None, zs=zs_uv,
         )
         if is3d:
             W_out = _compute_w(vel_at_stage, mesh, z, nn_full_local, mask, time_dir,
@@ -5110,6 +6012,9 @@ def rk4_step(
     Uses a single velocity field (no temporal interpolation).
     Four spatial evaluations at staggered positions.
     """
+    _check_depth_linear_entry(vel, mesh, kwargs.get("uv_interp", "leastsq"),
+                              "rk4", vel_next=kwargs.get("vel_next"),
+                              recon=kwargs.get("recon"))
     diffusion: Optional[DiffusionStepArgs] = kwargs.pop("diffusion", None)
     _reject_em_m1_az(diffusion)
     _reject_combined_em_on_rk(diffusion, "rk4")
@@ -5552,6 +6457,9 @@ def rk45_step(
     ``u``/``v`` were evaluated — the end of the step BEFORE any diffusion
     kick; the tracking layer un-rotates the recorded velocity there).
     """
+    _check_depth_linear_entry(vel, mesh, kwargs.get("uv_interp", "leastsq"),
+                              "rk45", vel_next=kwargs.get("vel_next"),
+                              recon=kwargs.get("recon"))
     diffusion: Optional[DiffusionStepArgs] = kwargs.pop("diffusion", None)
     _reject_em_m1_az(diffusion)
     if diffusion is not None and diffusion.scheme in ("em", "m1"):

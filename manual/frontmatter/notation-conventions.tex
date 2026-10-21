@@ -35,12 +35,13 @@ convention ($1852\times 60$), the value used by Parcels; the original Fortran tr
 
 \paragraph{The FESOM family.} \textsf{KELP} targets the unstructured-mesh ocean
 models of the FESOM family: \emph{FESOM2}, whose meshes are purely triangular and
-whose vertical coordinate is a set of fixed depth levels (z-levels), and
+whose vertical coordinate is a set of fixed depth levels (z-levels); its finite-element predecessor
+\emph{FESOM~1.4}, on the same kind of mesh and levels, whose fields live on the levels at the nodes; and
 \emph{FESOM-C}, whose meshes are \emph{mixed} --- each element being a triangle or a
 quadrilateral --- and whose vertical coordinate is terrain-following (sigma). The
 engine additionally reads ocean fields remapped to the HEALPix grid and structured NEMO grids, which it
 represents as meshes of quadrilaterals (with a few triangles). Accordingly, throughout this manual an \emph{element} is a
-triangle or a quadrilateral, and a ``FESOM mesh'' means a mesh of either model;
+triangle or a quadrilateral, and a ``FESOM mesh'' means a mesh of any of these models;
 statements that hold for only one of them name it explicitly. Sizes quoted as examples are those of the
 FESOM2 \emph{core2} (triangular, z-level) mesh.
 
@@ -48,7 +49,8 @@ FESOM2 \emph{core2} (triangular, z-level) mesh.
 velocities are defined at the element \emph{vertices} (nodes); element-layout
 velocities are defined at element \emph{centroids} (elements); and the vertical
 velocity and other interface quantities are defined at the \emph{vertical
-interfaces} that bound the depth layers. The distinction governs which
+interfaces} that bound the depth layers, the three-dimensional horizontal velocity at the layer centres
+(FESOM~1.4: on the levels, with the vertical velocity). The distinction governs which
 interpolation stencil applies and is made explicit in every schematic.
 
 \paragraph{Typographic conventions.} Source files, functions, and configuration

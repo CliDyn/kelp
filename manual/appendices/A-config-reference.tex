@@ -12,11 +12,12 @@ case are silently ignored and the default is used --- there is no typographic pr
 so a key that appears to have no effect should be checked against this table. Relative paths of the mesh,
 data, seed and output files are resolved against the directory of the configuration file;
 \conf{numerics.shared\_fields\_dir} is taken as written. Many values are validated when the file is
-loaded --- the interpolation methods \conf{uv\_interp} and \conf{sample\_interp}, the diffusion, beaching
-(when enabled), periodic, adaptive-scheme, grid-hash, rotation and HEALPix keys, and
-\conf{w\_positive} --- and an invalid value there raises an error immediately; others, such as
-\conf{integrator}, \conf{w\_interp}, \conf{max\_levels}, \conf{time\_averaging} and the \conf{time}
-values, are checked when the run starts or when first used. Unknown keys inside the diffusion and
+loaded --- the integrator, the interpolation methods \conf{uv\_interp}, \conf{w\_interp} and
+\conf{sample\_interp}, the diffusion, beaching (when enabled), periodic, adaptive-scheme, grid-hash, rotation
+and HEALPix keys, \conf{w\_positive}, \conf{uv\_vertical}, \conf{input\_rotation} and the stamp keys of
+\conf{data} --- and an invalid value there raises an error immediately; others, such as
+\conf{max\_levels}, \conf{time\_averaging} and the \conf{time} values, are checked when the run starts or
+when first used. Unknown keys inside the diffusion and
 beaching blocks are ignored like any other.
 
 \setlength{\tabcolsep}{4pt}
@@ -34,8 +35,9 @@ var\_u, var\_v & str & auto & Names of the horizontal velocity variables; set to
 var\_w & str & auto & Name of the vertical velocity (3-D). FESOM2: if unresolved, the run proceeds in 2-D silently; FESOM-C refuses \code{w\_cart}. \\
 w\_positive & str & \code{auto} & Sign convention of the vertical velocity in the file: \code{auto}, \code{up} or \code{down} (\cref{sec:vert-wsign}). \\
 var\_eta & str & auto & Name of the sea-surface height. \\
-sigma\_layer & int & surface & 2-D layered input: which vertical layer to track. \\
-sigma\_mean & bool & \code{false} & FESOM-C 2-D: thickness-weighted vertical mean instead of one layer. \\
+uv\_vertical & str & \code{layer} & Horizontal velocity in depth: \code{layer} (constant within each layer) or \code{linear} (linear between the layer centres; a stencil member whose bed lies above the particle is a wall; \cref{sec:vert-uvdepth}). \code{linear} needs 3-D tracking (refused at load otherwise), a z-level or sigma mesh, \code{euler}, \code{rk2} or \code{rk4}, and \conf{uv\_interp} \code{barycentric} for node layout or \code{leastsq}, \code{edge\_leastsq} or \code{barycentric} for element layout; FESOM2 element data need the element bottoms and no ice-shelf cavities (\cref{sec:mesh-elem-bottoms}). Refused for \code{fesom14}, whose velocities on the levels are always linear in depth. Recorded as the output attribute \code{uv\_vertical = "linear"}; a resume must keep it (\cref{sec:out-restart}). \\
+sigma\_layer & int & surface & 2-D layered input: which vertical layer to track (\code{fesom14}: a 0-based kept level). \\
+sigma\_mean & bool & \code{false} & FESOM-C and \code{fesom14} 2-D: thickness-weighted vertical mean instead of one layer. \\
 max\_levels & int & all & Keep the first $N$ vertical interfaces from the surface; must be $\ge 2$ in 3-D. \\
 sample\_vars & list & \code{[]} & Node-based scalar fields to sample along trajectories (e.g.\ \code{temp}, \code{salt}). \\
 track\_failure\_reason & bool & \code{false} & Record why each particle died (\cref{sec:life-reason}). \\
@@ -119,10 +121,11 @@ seed & int & none & Beaching RNG seed; defaults to the diffusion seed. \\
 \toprule
 \normalfont Key & Type & Default & Description \\
 \midrule \endhead
-type & str & \code{fesomc} & \code{fesom2} / \code{fesomc} / \code{nemo} / \code{healpix}; selects the reader, conventions, and vertical coordinate. \\
-meshpath & str & required & Path to the mesh file or directory (\cref{ch:mesh}). \\
+type & str & \code{fesomc} & \code{fesom2} / \code{fesom14} / \code{fesomc} / \code{nemo} / \code{healpix}; selects the reader, conventions, and vertical coordinate. \code{fesom14} needs \conf{uv\_interp: barycentric} (\cref{sec:mesh-fesom14}). \\
+meshpath & str & required & Path to the mesh file or directory (\cref{ch:mesh}). \code{fesom14}: an ASCII mesh directory (it holds \code{nod3d.out}), or level-wise data with cell polygons --- a file, or a directory whose first \code{*.nc} file holding \conf{mode.var\_u} is used. \\
+input\_rotation & [3 floats] & \code{null} & \code{fesom14} only (refused at load for every other type): the Euler angles in degrees, from the run's namelist, of the rotated frame an ASCII mesh is stored in; rotated back to geographic on load. Refused for a mesh from cell polygons; independent of \conf{rotation}. \\
 r\_earth & float (m) & family & Earth radius for mesh-derived areas; defaults per model. \\
-rotation & varies & \code{null} & FESOM2 + HEALPix: \code{null} (geographic), \code{fesom2}, or an explicit list of Euler angles (\cref{ch:frame}). \\
+rotation & varies & \code{null} & FESOM2, FESOM~1.4 and HEALPix: \code{null} (geographic), \code{fesom2}, or an explicit list of Euler angles (\cref{ch:frame}). \\
 exact\_nearest & bool & \code{true} & Prove every nearest-node anchor (\cref{sec:loc-exact}). \\
 grid\_hash\_cell\_rule & str & \code{occu-} \code{pancy} & Choose the hash cell by measurement (\code{occupancy}), or keep the reader's (\code{legacy}) (\cref{sec:loc-cell}). \\
 grid\_hash\_cell\_size & float (deg) & \code{null} & Explicit hash cell; overrides the rule. \\
@@ -138,14 +141,17 @@ levels & path or list & \code{null} & HEALPix: interface depths, a level-table p
 \toprule
 \normalfont Key & Type & Default & Description \\
 \midrule \endhead
-ncinput & str & required & Velocity input: a file, a Zarr store, or (FESOM2) a directory of per-variable files. \\
+ncinput & str & required & Velocity input: a file, a Zarr store, or (FESOM2) a directory of per-variable files; \code{fesom14}: a file, a directory or a glob, the files grouped by the variables they hold (\cref{sec:input-reader}). \\
 ncinput\_v & str & \code{""} & Separate $v$-velocity file, if not in \conf{ncinput} (NEMO: overrides grid-V; HEALPix: refused). \\
 ncinput\_w & str & \code{""} & Separate vertical-velocity file (3-D), if applicable (HEALPix: refused). \\
 ncinput\_eta & str & \code{""} & HEALPix: separate sea-surface-height store. \\
 inicloud & str & required & Release positions: rows of \code{lon lat [depth] [release\_sec]}, geographic (\cref{sec:life-release}). \\
 particle\_offset & int & \code{null} & Global index of the file's first particle in a sharded release (\cref{sec:perf-shard}); \code{null} = the file's \code{\# kelp particle\_offset N} header, else 0. Keys every random draw. \\
 output\_path & str & memory & Output; \code{.zarr} selects Zarr, otherwise NetCDF4 (\cref{ch:output}). \\
-time\_averaging & str & guess & \code{mean} (shift timestamps to window midpoints) or \code{instant}; set explicitly (guess: \code{mean} for FESOM2 and HEALPix). \\
+time\_averaging & str & guess & \code{mean} (shift timestamps to window midpoints) or \code{instant}; set explicitly (guess: \code{mean} for FESOM2 and HEALPix). \code{fesom14}: leave unset --- the reader resolves the record times itself and a set value is refused; the output records \code{"resolved\_by\_reader"} (\cref{sec:input-timeavg}). \\
+time\_stamp & str & \code{null} & \code{fesom14} only (the three stamp keys are refused for every other type): where a stamp sits in its window, \code{start}, \code{centre} or \code{end}, or \code{instant} for snapshots. Given together with \conf{time\_window} or not at all; overrides the files' time bounds or output schedule with a warning. \\
+time\_window & str & \code{null} & \code{fesom14} only: the averaging window (with \code{instant}, the snapshot cadence): \code{calendar\_month}, \code{calendar\_year}, \code{calendar\_day} or a duration \code{"<number> <s|min|h|d>"}, computed in the files' calendar. \\
+time\_offset & str & \code{null} & \code{fesom14} only: a shift \code{"<$\pm$number> <s|min|h|d>"} added to the stamps, bounds and epoch of every file first, for raw output of a job that started after midnight; allowed alone. \\
 \bottomrule
 \end{longtable}
 

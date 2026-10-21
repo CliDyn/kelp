@@ -27,6 +27,10 @@ $R_M$ & Metric radius of the displacement, $\Mlat\cdot180/\pi$, used by the grea
 $\xi,\ \xi_1,\ \xi_2$ & Standard normal variates of the stochastic kicks (\cref{ch:diffusion}). \\
 $A_z$ & Vertical eddy diffusivity (m$^2$\,s$^{-1}$), \cref{sec:diff-vertical}. \\
 $c_k$ & Fraction of the step at which Runge--Kutta stage $k$ samples the flow. \\
+$p_k,\ M$ & Data points of a depth-linear horizontal velocity (layer centres or levels; on a sigma mesh layer centres in $s$) and their number (\cref{sec:vert-uvdepth}). \\
+$\ell_c,\ d_c,\ D_c$ & Last usable data point, bed depth and reader-declared data prefix of column $c$ (a node or an element), \cref{eq:vert-uv-last}. \\
+$s$ & Sigma fraction $z/H_p$ of the particle's column, clipped to $[0,1]$ (\cref{eq:vert-uv-sigma}). \\
+$\bwt{i}^{+}$ & Barycentric weight counted as zero when negative, in the wall rule (\cref{eq:vert-uv-bary}). \\
 $\alpha_0,\ \alpha_k$ & Bracket fraction of a lazy blend and stage fraction of a stage blend (\cref{ch:temporal}). \\
 $A_k,\ C_k$ & Doubled fan- and corner-triangle areas in the Wachspress weights (\cref{eq:wachspress}). \\
 \bottomrule

@@ -83,6 +83,11 @@ carried element.}
 \label{tab:fused-kernels}
 \end{table}
 
+Both three-dimensional families have depth-linear twins, selected under the same conditions by the
+placement of the field: the Euler twin for element-layout least squares and the RK2 twins for node-layout
+barycentric interpolation, steady, linear or PCHIP in time. They reproduce the unfused depth-linear path
+bit for bit (\cref{sec:vert-uvdepth}).
+
 The three-dimensional RK2 kernel evaluates per particle: the stage-one anchor and layer, the
 horizontal velocity by barycentric interpolation with the temporal blend applied at each vertex, and
 the vertical velocity $W_1$ --- computed before the horizontal verdict, so that a particle that dies

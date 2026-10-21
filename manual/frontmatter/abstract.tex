@@ -4,7 +4,7 @@
 We document \textsf{KELP}, a Lagrangian particle-tracking engine that
 integrates the trajectories of passive particles through the velocity fields of
 unstructured-mesh ocean circulation models, with primary support for the FESOM
-family --- FESOM2, on purely triangular meshes, and FESOM-C, on mixed
+family --- FESOM2 and its predecessor FESOM~1.4, on purely triangular meshes, and FESOM-C, on mixed
 triangular--quadrilateral meshes --- and with readers for ocean fields remapped to the HEALPix grid and
 for structured NEMO grids.
 This manual is a numerical and implementation reference: for each component of
@@ -17,7 +17,7 @@ concrete example.
 The material is organized along the path a single time step travels through the
 solver: locating a particle on the unstructured mesh, with a proof that the nearest node found is the
 nearest; interpolating the velocity in space (horizontally by barycentric or least-squares schemes,
-vertically between depth interfaces or along sigma surfaces) and in time (by linear or monotone
+vertically between depth interfaces or along sigma surfaces, per layer or linearly in depth) and in time (by linear or monotone
 piecewise-cubic reconstruction); advancing the position with an explicit or adaptive Runge--Kutta
 scheme; and applying boundary conditions. Stochastic diffusion, the particle lifecycle, the
 forcing reader, trajectory output, the configuration surface, verification, and

@@ -16,6 +16,7 @@ from __future__ import annotations
 import time as _time
 import warnings
 from dataclasses import dataclass, field
+from dataclasses import replace as _dc_replace
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -25,15 +26,19 @@ from .core.config import (
     resolve_time_params,
 )
 from .numerics.diffusion import DiffusionStepArgs
-from .numerics.integrators import get_integrator
+from .numerics.integrators import _DL_ELEMENT_UV_INTERP, get_integrator
 from .core.geometry import DEG2RAD
 from .core.io import LazyLerpField, VelocityField
 from .core.mesh import Mesh, find_containing_elements, find_nearest_nodes
 from .core.particles import ParticleState, make_state, ParticleStatus, count_by_status
 from .core.release import (activate_released, mask_dormant_for_record,
                            mask_inactive_velocity)
+from .numerics.vertical_uv import (check_depth_linear_record,
+                                   refuse_elem_cavities)
 from .readers import (get_reader, extract_time_info, time_axis_epoch,
-                      NO_EPOCH_NOTE)
+                      NO_EPOCH_NOTE, RESOLVED_BY_READER, _READER_RESOLVES_TIME,
+                      _describe_record_times, _dry_mask_kwargs,
+                      _prepare_dataset, _time_option_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -348,8 +353,280 @@ def _apply_beaching_hook(state, prev_status, mesh, vel, run_cfg, wet_streak,
 
 
 # ---------------------------------------------------------------------------
+# mode.uv_vertical: layer-centred u/v evaluated linearly in depth
+# ---------------------------------------------------------------------------
+
+#: values of ``mode.uv_vertical`` (== core.config._VALID_UV_VERTICAL_OPTION)
+_UV_VERTICAL_OPTIONS = ("layer", "linear")
+
+#: ``mode.uv_vertical: linear`` on a z-level or sigma mesh: the u/v
+#: interpolators that evaluate a depth-linear field, per u/v layout (the
+#: integrators' entry table, ``integrators._check_depth_linear_entry``)
+_LINEAR_UV_INTERP = {"node": ("barycentric",),
+                     "element": _DL_ELEMENT_UV_INTERP}
+
+
+def _linear_uv_interp_table() -> str:
+    return "; ".join(
+        f"{layout} layout: " + ", ".join(repr(n) for n in names)
+        for layout, names in _LINEAR_UV_INTERP.items())
+
+
+def _linear_option_layout_error(uv_layout, uv_interp=None) -> ValueError:
+    """The refusal of ``mode.uv_vertical: linear`` for a u/v layout outside
+    the table, or (``uv_interp`` given) an interpolator outside the
+    layout's row."""
+    if uv_layout not in _LINEAR_UV_INTERP:
+        return ValueError(
+            "mode.uv_vertical: 'linear' needs node or element layout u/v, "
+            f"got uv_layout={uv_layout!r} (drop the option)")
+    return ValueError(
+        f"mode.uv_vertical: 'linear' on {uv_layout} layout u/v (uv_layout="
+        f"{uv_layout!r}) needs numerics.uv_interp "
+        + " or ".join(repr(n) for n in _LINEAR_UV_INTERP[uv_layout])
+        + f", got {uv_interp!r}")
+
+
+def _check_linear_element_mesh(mesh) -> None:
+    """Refuse ``mode.uv_vertical: linear`` on element-layout u/v where a
+    z-level mesh cannot support it: no element bottoms
+    (``mesh.metadata["uv_data_last_elem"]`` / ``["elem_bed"]``, which the
+    FESOM2 reader sets from the mesh diagnostic's ``nlevels`` or
+    ``zbar_e_bottom``), or ice-shelf cavities
+    (``mesh.metadata["elem_ulevels"]`` above 1 anywhere).  The message
+    names the mesh file (``mesh.metadata["meshpath"]``).  A sigma mesh
+    (FESOM-C) passes: every layer of every element is wet, so it needs no
+    element bottoms and has no cavities.
+    """
+    if getattr(mesh, "vertical_coord", "zlevel") == "sigma":
+        return
+    md = getattr(mesh, "metadata", None) or {}
+    meshpath = md.get("meshpath")
+    where = f"mesh {meshpath!r}" if meshpath else "this mesh"
+    missing = [k for k in ("uv_data_last_elem", "elem_bed")
+               if md.get(k) is None]
+    if missing:
+        raise ValueError(
+            "mode.uv_vertical: 'linear' on element-layout u/v needs each "
+            f"element's bottom, and {where} declares none ("
+            + " and ".join(f"mesh.metadata[{k!r}]" for k in missing)
+            + " not set): the mesh diagnostic has neither nlevels nor "
+            "zbar_e_bottom (an ASCII mesh directory never has them); use "
+            "the run's full fesom.mesh.diag.nc, or re-extract the region "
+            "with utils/extract_fesom_region.py, which keeps them")
+    refuse_elem_cavities(mesh)
+
+
+def _check_uv_vertical_option(option: str, *, fdrift3d: bool, mesh, uv_interp,
+                              reader) -> None:
+    """Refuse ``mode.uv_vertical`` where the run's facts rule it out.
+
+    Checked after the mesh is loaded (``run_tracking``) and at the entry of
+    ``run_single_realization``: the value, and for ``"linear"`` 3-D
+    tracking, a z-level or sigma mesh (FESOM-C: the integrators evaluate
+    u/v at the sigma fraction ``s = z / H_p``), a ``numerics.uv_interp`` of
+    the layout table (node layout: ``barycentric``; element layout:
+    ``leastsq``, ``edge_leastsq``, ``barycentric`` — the interpolators that
+    evaluate depth-linear u/v) and a reader whose u/v are layer-centred (a
+    reader that stores them on levels, ``native_uv_vertical = "level"``, is
+    depth-linear without the option).  The layout itself, its row of the
+    table and a z-level mesh's element bottoms are checked where the layout
+    is known (``_validate_uv_compat``: the pre-writer probe, the entry
+    probe of ``run_single_realization``, the step-0 guard; and the cache
+    marking).
+    """
+    if option not in _UV_VERTICAL_OPTIONS:
+        raise ValueError(
+            f"mode.uv_vertical must be one of {_UV_VERTICAL_OPTIONS}, got "
+            f"{option!r}")
+    if option != "linear":
+        return
+    if not fdrift3d:
+        raise ValueError(
+            "mode.uv_vertical: 'linear' needs 3-D tracking (mode.Fdrift3D: "
+            "true)")
+    coord = getattr(mesh, "vertical_coord", "zlevel")
+    if coord not in ("zlevel", "sigma"):
+        raise ValueError(
+            "mode.uv_vertical: 'linear' needs a z-level or sigma mesh, this "
+            f"mesh has vertical_coord {coord!r}")
+    if not any(uv_interp in names for names in _LINEAR_UV_INTERP.values()):
+        raise ValueError(
+            "mode.uv_vertical: 'linear' needs a u/v interpolator that "
+            f"evaluates depth-linear fields ({_linear_uv_interp_table()}), "
+            f"got numerics.uv_interp {uv_interp!r}")
+    if getattr(reader, "native_uv_vertical", "layer") == "level":
+        name = getattr(reader, "__name__", type(reader).__name__)
+        raise ValueError(
+            f"mode.uv_vertical: 'linear' is for layer-centred u/v; reader "
+            f"{name} stores u/v on the levels (native_uv_vertical='level'), "
+            "which are always interpolated linearly in depth — remove the "
+            "option")
+
+
+def _field_is_3d(vel) -> bool:
+    """u on depth points and a w field (a lazy blend answers from its
+    parents, nothing is blended)."""
+    if isinstance(vel, LazyLerpField):
+        return _field_is_3d(vel.vel_a) and _field_is_3d(vel.vel_b)
+    return vel.w is not None and getattr(vel.u, "ndim", 1) == 2
+
+
+def _as_layer_linear(vel):
+    """A shallow copy marked ``"layer_linear"``: the same arrays."""
+    if isinstance(vel, LazyLerpField):
+        return LazyLerpField(_as_layer_linear(vel.vel_a),
+                             _as_layer_linear(vel.vel_b), vel.alpha)
+    return _dc_replace(vel, uv_vertical="layer_linear")
+
+
+def _mark_depth_linear(vel, option: str, mesh, *, record: str = ""):
+    """Apply ``mode.uv_vertical`` to a field read for a run.
+
+    Every store site of the velocity cache passes its fields through here,
+    so the cached object is the marked and checked one, and every record a
+    run reads is checked once (the interpolators and the step functions
+    do not check again).
+
+    - option ``"layer"``, field ``"layer"``: returned untouched (no copy,
+      no check — the default path stays bit-identical);
+    - option ``"linear"``, field ``"layer"``: a shallow copy carrying
+      ``uv_vertical="layer_linear"`` (the same arrays), refused for a 2-D
+      field (no w or 1-D u), for a layout other than ``"node"`` or
+      ``"element"``, and for element layout on a z-level mesh without the
+      element bottoms or with ice-shelf cavities
+      (:func:`_check_linear_element_mesh`; a sigma mesh needs neither);
+    - a field already ``"layer_linear"`` with option ``"linear"``: returned
+      as is;
+    - a ``"level"`` field (a reader whose data sit on levels): kept as is
+      with option ``"layer"``, refused with ``"linear"``;
+    - a ``"layer_linear"`` field with option ``"layer"``: refused (a field
+      marked by another run's option).
+
+    A depth-linear result passes
+    :func:`~kelp.numerics.vertical_uv.check_depth_linear_record` (named by
+    ``record``).
+
+    Parameters
+    ----------
+    vel : VelocityField or LazyLerpField
+    option : str
+        ``mode.uv_vertical``: ``"layer"`` or ``"linear"``.
+    mesh : Mesh
+        The mesh the run evaluates the field on (not read for a layer
+        field with option ``"layer"``); element layout on a z-level mesh:
+        its metadata holds the element bottoms.
+    record : str, keyword-only
+        Names the record in a refusal, e.g. ``"time index 12"``.
+
+    Returns
+    -------
+    VelocityField or LazyLerpField
+
+    Raises
+    ------
+    ValueError
+        An unknown option, an unsupported combination, or a non-finite u/v
+        value at a usable depth point.
+    """
+    placement = getattr(vel, "uv_vertical", "layer")
+    if option == "layer":
+        if placement == "layer":
+            return vel
+        if placement == "layer_linear":
+            raise ValueError(
+                "a field marked uv_vertical='layer_linear' reached a run "
+                "with mode.uv_vertical 'layer'"
+                + (f" ({record})" if record else ""))
+    elif option == "linear":
+        if placement == "level":
+            raise ValueError(
+                "mode.uv_vertical: 'linear' is for layer-centred u/v; this "
+                "field stores u/v on the levels (uv_vertical='level'), which "
+                "are always interpolated linearly in depth — remove the "
+                "option")
+        if placement == "layer":
+            if not _field_is_3d(vel):
+                raise ValueError(
+                    "mode.uv_vertical: 'linear' needs a 3-D field (u/v on "
+                    "the layers and a w field)"
+                    + (f"; {record}" if record else ""))
+            layout = getattr(vel, "uv_layout", "element")
+            if layout not in _LINEAR_UV_INTERP:
+                raise _linear_option_layout_error(layout)
+            if layout == "element":
+                _check_linear_element_mesh(mesh)
+            vel = _as_layer_linear(vel)
+    else:
+        raise ValueError(
+            f"mode.uv_vertical must be one of {_UV_VERTICAL_OPTIONS}, got "
+            f"{option!r}")
+    check_depth_linear_record(vel, mesh, record=record)
+    return vel
+
+
+def _apply_max_levels(mesh, mode, verbose: bool = False) -> None:
+    """Cut ``mesh.sigma`` to ``mode.max_levels`` interfaces from the surface.
+
+    The uncut table is kept once in ``mesh.metadata["sigma_full"]`` and
+    every cut is taken from it, so calls with different limits on one mesh
+    (direct ``run_single_realization`` entries) each get their own table;
+    ``max_levels`` None restores the full table of a mesh cut earlier.  A
+    call that leaves the table as it is keeps the very array object, so a
+    depth-point table built for it stays valid.  On a mesh never cut, None
+    changes nothing and stores nothing.
+
+    Raises
+    ------
+    ValueError
+        ``max_levels < 2`` in 3-D mode.
+    """
+    max_levels = getattr(mode, "max_levels", None)
+    md = getattr(mesh, "metadata", None)
+    if md is None:
+        md = {}
+    full = md.get("sigma_full")
+    sig = mesh.sigma
+    if full is not None and not (
+            sig is full or (sig.size <= full.size
+                            and np.array_equal(sig, full[:sig.size]))):
+        # the table was replaced by someone else since: it is the new full
+        full = None
+        md.pop("sigma_full", None)
+    if max_levels is None:
+        if full is not None and sig.size != full.size:
+            mesh.sigma = full
+        return
+    if full is None and sig.size == 0:
+        return
+    if getattr(mode, "Fdrift3D", False) and max_levels < 2:
+        raise ValueError(
+            f"max_levels must be >= 2 in 3D mode, got {max_levels}"
+        )
+    if full is None:
+        full = sig
+        if getattr(mesh, "metadata", None) is None:
+            mesh.metadata = md
+        md["sigma_full"] = full
+    keep = min(int(max_levels), full.size)
+    if sig.size != keep:
+        mesh.sigma = full[:keep]
+    if verbose:
+        if getattr(mesh, "vertical_coord", "zlevel") == "sigma":
+            print(f"Vertical interfaces limited to {keep} (sigma mesh)")
+        else:
+            print(f"Depth levels limited to {keep} "
+                  f"(max depth {mesh.sigma[-1]:.1f}m)")
+
+
+# ---------------------------------------------------------------------------
 # Velocity cache for temporal interpolation
 # ---------------------------------------------------------------------------
+
+def _uv_vertical_option(mode) -> str:
+    """``mode.uv_vertical`` ("layer" when the mode has none, e.g. None)."""
+    return getattr(mode, "uv_vertical", "layer")
+
 
 class _VelCache:
     """Cache for adjacent velocity fields to avoid re-reading.
@@ -403,23 +680,32 @@ class _VelCache:
 
     def get(self, file_idx: int, reader, ds, mesh, mode,
             diffusion=None, sample_vars=None) -> VelocityField:
+        # Every store site passes the field through _mark_depth_linear
+        # (mode.uv_vertical): the cached object is the marked, checked one.
         if file_idx not in self._cache and self._shared is not None:
             kw = self._kw(diffusion, sample_vars)
             try:
-                self._cache[file_idx] = self._shared_get(
-                    file_idx, reader, ds, mesh, mode, kw)
+                vel = self._shared_get(file_idx, reader, ds, mesh, mode, kw)
             except Exception as exc:
                 warnings.warn(
                     f"shared_fields disabled for this run: {exc!r} — "
                     "falling back to local reads.", RuntimeWarning)
                 self._shared = None
+            else:
+                # outside the fail-open try: a refused record is an error of
+                # the data, not of the shared layer
+                self._cache[file_idx] = _mark_depth_linear(
+                    vel, _uv_vertical_option(mode), mesh,
+                    record=f"time index {file_idx}")
         if file_idx not in self._cache:
             kw = self._kw(diffusion, sample_vars)
             if self._prefetch > 1:
                 self._load_window(file_idx, reader, ds, mesh, mode, kw)
             else:
-                self._cache[file_idx] = reader.read_velocities(
-                    ds, file_idx, mesh, mode, **kw)
+                self._cache[file_idx] = _mark_depth_linear(
+                    reader.read_velocities(ds, file_idx, mesh, mode, **kw),
+                    _uv_vertical_option(mode), mesh,
+                    record=f"time index {file_idx}")
         return self._cache[file_idx]
 
     def _shared_get(self, file_idx, reader, ds, mesh, mode,
@@ -455,8 +741,10 @@ class _VelCache:
             # ``start`` itself out of range (caller bug — every production caller
             # passes a clamped index): read it directly so the error, if any,
             # comes from the reader, not a 0-length window slice.
-            self._cache[start] = reader.read_velocities(
-                ds, start, mesh, mode, **kw)
+            self._cache[start] = _mark_depth_linear(
+                reader.read_velocities(ds, start, mesh, mode, **kw),
+                _uv_vertical_option(mode), mesh,
+                record=f"time index {start}")
             return
         lo, hi = min(idxs), max(idxs) + 1
         window = ds.isel(time=slice(lo, hi)).load()   # one contiguous read
@@ -464,8 +752,11 @@ class _VelCache:
         for i in idxs:
             if i not in self._cache:
                 try:
-                    self._cache[i] = reader.read_velocities(
-                        window, i - lo, mesh, mode, **kw)
+                    self._cache[i] = _mark_depth_linear(
+                        reader.read_velocities(window, i - lo, mesh, mode,
+                                               **kw),
+                        _uv_vertical_option(mode), mesh,
+                        record=f"time index {i}")
                 except Exception:
                     # A look-ahead record the run may never use (e.g. past
                     # the end of a partly covering W file) must not fail the
@@ -507,7 +798,10 @@ def _flatten_vel(vel: VelocityField):
         a = getattr(vel, f)
         if a is not None:
             arrays[f] = a
+    # uv_vertical rides in the meta; an attached field is checked in its
+    # own process (the store site in _VelCache.get)
     meta = {"uv_layout": vel.uv_layout, "kh_layout": vel.kh_layout,
+            "uv_vertical": vel.uv_vertical,
             "scalar_names": sorted(vel.scalars) if vel.scalars else []}
     for nm in meta["scalar_names"]:
         arrays["scalar__" + nm] = vel.scalars[nm]
@@ -524,7 +818,8 @@ def _assemble_vel(arrays, meta) -> VelocityField:
         kh_meridional=arrays.get("kh_meridional"),
         kh_layout=meta.get("kh_layout"),
         uv_layout=meta.get("uv_layout", "element"),
-        scalars=scal or None, az=arrays.get("az"))
+        scalars=scal or None, az=arrays.get("az"),
+        uv_vertical=meta.get("uv_vertical", "layer"))
 
 
 def _kelp_version() -> str:
@@ -685,14 +980,28 @@ def _path_fingerprint(path) -> list:
 # ---------------------------------------------------------------------------
 
 # --- u/v interpolation x layout compatibility (spec 2026-06-06) ---
-def _validate_uv_compat(uv_layout: str, uv_interp: str) -> None:
+def _validate_uv_compat(uv_layout: str, uv_interp: str,
+                        uv_vertical_option: str = "layer", *,
+                        mesh=None) -> None:
     """leastsq / edge_leastsq are element-centre math and cannot consume
-    node-based velocities — fail with the actionable fix."""
+    node-based velocities — fail with the actionable fix.  With
+    ``mode.uv_vertical: linear`` the layout and the interpolator must be
+    in the layout table (node layout: ``barycentric``; element layout:
+    ``leastsq``, ``edge_leastsq``, ``barycentric``), and element-layout
+    u/v on a z-level ``mesh`` (when given) need the element bottoms and no
+    ice-shelf cavities (:func:`_check_linear_element_mesh`; a sigma mesh
+    needs neither)."""
     if uv_layout == "node" and uv_interp in ("leastsq", "edge_leastsq"):
         raise ValueError(
             "node-based velocities (uv_layout='node', e.g. FESOM2 "
             "unod/vnod) require numerics.uv_interp: 'barycentric' — "
             f"{uv_interp!r} interpolates element-centre values.")
+    if uv_vertical_option != "linear":
+        return
+    if uv_interp not in _LINEAR_UV_INTERP.get(uv_layout, ()):
+        raise _linear_option_layout_error(uv_layout, uv_interp)
+    if uv_layout == "element" and mesh is not None:
+        _check_linear_element_mesh(mesh)
 
 
 # --- rotated-frame boundary (spec 2026-06-06: Seeds / Output / Checkpoints) ---
@@ -964,6 +1273,7 @@ def _validate_restart_frame(restart_angles, mesh):
 
         r = load_restart(path)
         _validate_restart_frame(r["rotation_angles"], mesh)
+        _validate_restart_uv_vertical(r["uv_vertical"], mode)
         run_single_realization(..., init_state=r["state"],
                                start_step_i=r["step_i"] + 1, ...)
     """
@@ -974,6 +1284,36 @@ def _validate_restart_frame(restart_angles, mesh):
         raise ValueError(
             f"checkpoint frame {ra} does not match mesh frame {ma}; "
             "resume with the same mesh.rotation as the original run")
+
+
+def _validate_restart_uv_vertical(restart_value, mode) -> None:
+    """Reject resuming a checkpoint under another ``mode.uv_vertical``.
+
+    ``restart_value`` is ``load_restart(path)["uv_vertical"]``: the rule
+    the checkpoint was written with, ``None`` for a checkpoint without it
+    (a ``"layer"`` run, or a file written before the option existed).  A
+    resumed segment must keep the rule, or one trajectory mixes the
+    piecewise-constant and the depth-linear u/v.  Caller-driven, like
+    :func:`_validate_restart_frame`::
+
+        r = load_restart(path)
+        _validate_restart_frame(r["rotation_angles"], mesh)
+        _validate_restart_uv_vertical(r["uv_vertical"], mode)
+        run_single_realization(..., init_state=r["state"], ...)
+
+    Raises
+    ------
+    ValueError
+        The two rules differ (the message names both).
+    """
+    stored = "layer" if restart_value is None else str(restart_value)
+    current = _uv_vertical_option(mode)
+    if stored != current:
+        raise ValueError(
+            f"the checkpoint was written with mode.uv_vertical {stored!r}, "
+            f"this run has {current!r}; resume with mode.uv_vertical: "
+            f"{stored} (a rule change mixes two vertical u/v rules in one "
+            "trajectory — start a new run from the seeds to change it)")
 
 
 def _resolve_composition(diff_cfg, integrator_name: str) -> str:
@@ -1450,6 +1790,20 @@ def run_single_realization(
     Returns
     -------
     TrajectoryRecord
+
+    Notes
+    -----
+    ``mode.uv_vertical: "linear"`` (layer-centred u/v linear in depth) gets
+    the refusals of ``run_tracking`` here too, the layout ones (the layout
+    table, an element mesh's bottoms and cavities) from the reader's
+    ``probe_uv_layout`` right after the ``prepare`` hook, before any read
+    and before anything is written.  A depth-linear run (the
+    option, or a reader with ``native_uv_vertical = "level"``) applies
+    ``mode.max_levels`` to ``mesh.sigma`` itself, from the uncut table kept
+    in ``mesh.metadata["sigma_full"]`` (None restores it); a mesh cut that
+    way earlier is re-cut to this call's limit whatever the option.  A
+    reader's optional ``prepare(mesh, ds)`` hook runs at every call, after
+    that cut (``_prepare_dataset``).
     """
     from .core.release import check_particle_offset
     # None (a restart written without an offset) means an unsharded run
@@ -1512,6 +1866,34 @@ def run_single_realization(
     uv_interp_resolved = numerics.uv_interp
     # Boundary-ghost value for edge_leastsq (inert for other methods).
     edge_lsq_bc_resolved = getattr(numerics, "edge_leastsq_bc", "freeslip")
+
+    # mode.uv_vertical (depth-linear layer u/v): the run_tracking refusals
+    # again, for direct callers, before any read.  A depth-linear run (the
+    # option, or a reader whose u/v sit on levels) cuts the mesh to
+    # mode.max_levels here as run_tracking does, so the levels, the
+    # depth-point tables and the reader's arrays agree on every entry point;
+    # a mesh cut earlier by the same helper is re-cut to this run's limit
+    # (run_tracking's own cut: a no-op).  Layer runs on an uncut mesh keep
+    # the historical behaviour (no cut here).
+    uv_vertical_option = _uv_vertical_option(mode)
+    _check_uv_vertical_option(
+        uv_vertical_option, fdrift3d=bool(getattr(mode, "Fdrift3D", False)),
+        mesh=mesh, uv_interp=uv_interp_resolved, reader=reader)
+    if (uv_vertical_option == "linear"
+            or getattr(reader, "native_uv_vertical", "layer") == "level"
+            or "sigma_full" in (getattr(mesh, "metadata", None) or {})):
+        _apply_max_levels(mesh, mode)
+    # the reader's mesh-relative dataset hook, at every entry (after the
+    # cut above: it sees the levels in use)
+    _prepare_dataset(reader, mesh, ds)
+    probe_fn = getattr(reader, "probe_uv_layout", None)
+    if uv_vertical_option == "linear" and probe_fn is not None:
+        # the layout facts of run_tracking's pre-writer probe, for direct
+        # callers too: before any read and before anything is written to
+        # a caller's writer (metadata only)
+        _validate_uv_compat(probe_fn(ds, mode, mesh), uv_interp_resolved,
+                            uv_vertical_option=uv_vertical_option,
+                            mesh=mesh)
 
     # Mesh-derived default for ``dres_m``:
     # median element edge length, clipped to [100 m, 50 km], computed
@@ -1738,6 +2120,9 @@ def run_single_realization(
             writer.set_global_attr("w_positive", str(
                 getattr(mode, "w_positive", "auto")))
             writer.set_global_attr("w_contract", "reader-converted-2026-09-23")
+        if uv_vertical_option == "linear":
+            # recorded only when on: option-off outputs carry no new attr
+            writer.set_global_attr("uv_vertical", "linear")
     # Same pattern for periodic windows: caller-supplied writers get the
     # attrs too (run_tracking also sets them via construction metadata —
     # a doubled set overwrites with the same value).
@@ -1940,7 +2325,9 @@ def run_single_realization(
         # never pass through run_tracking at all (cheap: one comparison).
         if step_i == 0:
             _validate_uv_compat(getattr(vel, "uv_layout", "element"),
-                                uv_interp_resolved)
+                                uv_interp_resolved,
+                                uv_vertical_option=uv_vertical_option,
+                                mesh=mesh)
 
         # Downgrade to steady if tracking dt exceeds the bracket
         # (start-between-snapshots, end-of-range, irregular spacing).
@@ -2615,6 +3002,9 @@ def run_tracking(
         )
 
     reader = get_reader(config.mesh.type)
+    # the stamp options (and the time_averaging rule of a reader that
+    # resolves its record times), refused before anything is read
+    time_kw = _time_option_kwargs(config)
 
     # Load mesh
     if verbose:
@@ -2627,6 +3017,13 @@ def run_tracking(
         mesh = reader.load_mesh(config.mesh, mode_cfg=config.mode)
     else:
         mesh = reader.load_mesh(config.mesh)
+
+    # mode.uv_vertical: refuse what the mesh and the reader rule out before
+    # anything is opened (the layout is checked at the pre-writer probe)
+    _check_uv_vertical_option(
+        _uv_vertical_option(config.mode),
+        fdrift3d=bool(getattr(config.mode, "Fdrift3D", False)), mesh=mesh,
+        uv_interp=config.numerics.uv_interp, reader=reader)
 
     # Exact nearest-node anchor guard: ALWAYS set from the config (False clears
     # a stale flag on a reused mesh object) — BEFORE the cell rule, whose mode
@@ -2656,20 +3053,7 @@ def run_tracking(
     # Slice vertical interfaces to match max_levels if configured.
     # For 3D staggered fields, max_levels is interpreted as the number of
     # interfaces to keep from the surface downward.
-    max_levels = getattr(config.mode, "max_levels", None)
-    if max_levels is not None and mesh.sigma.size > 0:
-        if config.mode.Fdrift3D and max_levels < 2:
-            raise ValueError(
-                f"max_levels must be >= 2 in 3D mode, got {max_levels}"
-            )
-        keep = min(int(max_levels), mesh.sigma.size)
-        mesh.sigma = mesh.sigma[:keep]
-        if verbose:
-            if getattr(mesh, "vertical_coord", "zlevel") == "sigma":
-                print(f"Vertical interfaces limited to {keep} (sigma mesh)")
-            else:
-                print(f"Depth levels limited to {keep} "
-                      f"(max depth {mesh.sigma[-1]:.1f}m)")
+    _apply_max_levels(mesh, config.mode, verbose)
 
     # Open velocity dataset
     if verbose:
@@ -2690,8 +3074,18 @@ def run_tracking(
             and getattr(_d0, "az_enabled", False)
             and getattr(_d0, "var_az", None)):
         _extra["diffusion"] = _d0
+    # the stamp options, only when set (only the fesom14 reader takes them)
+    _extra.update(time_kw)
+    # the beaching dry mask, for a reader that opens only the variables the
+    # run consumes (fesom14); empty for every other reader
+    _extra.update(_dry_mask_kwargs(config))
     ds = reader.open_dataset(config.data.ncinput, v_path=v_path, w_path=w_path,
                              mode_cfg=config.mode, **_extra)
+    # the reader's optional mesh-relative dataset hook, before anything
+    # below reads the dataset on the mesh (the sampling and dry-mask probes)
+    # and before the writer exists, so its refusals leave no output file;
+    # run_single_realization runs it again at each realization's entry
+    _prepare_dataset(reader, mesh, ds)
 
     # Load initial particle seeds (delayed-release aware: an optional 4th
     # column is the release offset in seconds).  The release STATE is built
@@ -2712,8 +3106,17 @@ def run_tracking(
     file_times, file_dt_detected = extract_time_info(ds)
 
     # -- time_averaging: warn if not set, apply midpoint shift --
+    # A reader that resolves its record times (fesom14) already placed each
+    # record at the centre of its window: no warning, no shift (a set
+    # data.time_averaging was refused by _time_option_kwargs).
     time_avg = config.data.time_averaging
-    if time_avg is None:
+    if config.mesh.type in _READER_RESOLVES_TIME:
+        time_avg = RESOLVED_BY_READER
+        record_times = _describe_record_times(
+            ds, getattr(config.data, "time_offset", None))
+        if record_times is not None:
+            print(f"  Record times:      {record_times}")
+    elif time_avg is None:
         mesh_type = config.mesh.type.lower()
         if "fesom2" in mesh_type:
             suggestion = "mean"
@@ -2959,8 +3362,13 @@ def run_tracking(
     # the step-0 in-loop guard as backstop.
     probe_fn = getattr(reader, "probe_uv_layout", None)
     if probe_fn is not None:
+        # mode.uv_vertical: linear also refuses element u/v on a mesh
+        # without the element bottoms or with ice-shelf cavities here
         _validate_uv_compat(probe_fn(ds, config.mode, mesh),
-                            config.numerics.uv_interp)
+                            config.numerics.uv_interp,
+                            uv_vertical_option=_uv_vertical_option(
+                                config.mode),
+                            mesh=mesh)
     if config.numerics.uv_interp != "leastsq":
         print(f"  uv_interp:         {config.numerics.uv_interp}")
     if (getattr(mesh, "metadata", None)
@@ -2974,6 +3382,17 @@ def run_tracking(
             "healpix pixel geometry v1 does not support spatial Kh "
             "fields (em/m1 diffusion) — use the dual geometry or "
             "uniform Kh.")
+    if (config.mesh.type == "fesom14"
+            and config.numerics.diffusion.enabled
+            and config.numerics.diffusion.scheme in ("em", "m1")):
+        # Same pre-writer rule: the reader never reads diffusivity fields,
+        # so the step would fail on the missing Kh after the output exists.
+        raise ValueError(
+            f"mesh.type 'fesom14': diffusion scheme "
+            f"{config.numerics.diffusion.scheme!r} reads spatial Kh fields "
+            "(diffusion.var_kh_zonal / var_kh_meridional), which FESOM 1.4 "
+            "output does not carry. Use diffusion.scheme: uniform with "
+            "kh_zonal / kh_meridional.")
     if config.numerics.uv_interp == "edge_leastsq":
         # Pre-warm the lazy edge-adjacency table so step 0 doesn't pay
         # the one-time build inside the tracking loop.
@@ -3117,6 +3536,17 @@ def run_tracking(
         cfg_eta = getattr(config.mode, "var_eta", None)
         if cfg_eta:
             eta_names.append(cfg_eta)
+        if (beach_cfg.use_eta and "fesom14_has_eta" in ds.attrs
+                and not int(ds.attrs["fesom14_has_eta"])):
+            # the FESOM 1.4 reader opened no sea-surface height: eta = 0
+            name = cfg_eta or "zos"
+            raise ValueError(
+                "beaching.use_eta: true needs the sea-surface height, but no "
+                f"file under data.ncinput holds {name!r} (FESOM 1.4 data "
+                "without it has eta = 0 everywhere, so eta never dries a "
+                f"node). Add the {name!r} files to data.ncinput (or set "
+                "mode.var_eta to the name the files use), or set "
+                "beaching.use_eta: false")
         if beach_cfg.use_eta and not any(k in ds for k in eta_names):
             raise ValueError(
                 "beaching.use_eta=true requires an ssh/eta/zos (or the "
@@ -3242,6 +3672,10 @@ def run_tracking(
                 meta["sample_interp"] = sample_interp
             if config.numerics.uv_interp != "leastsq":
                 meta["uv_interp"] = config.numerics.uv_interp
+            # depth-linear layer u/v ONLY when on (option-off files carry no
+            # new attr — byte-identity)
+            if _uv_vertical_option(config.mode) == "linear":
+                meta["uv_vertical"] = "linear"
             # always stamped (0/1) since the default flipped: an absent attribute
             # means a file written before the guard existed
             meta["exact_nearest"] = 1 if getattr(config.mesh, "exact_nearest", False) else 0
@@ -3424,7 +3858,8 @@ def track_particles(
     output_freq : int
         Output every output_freq steps.
     mode : ModeConfig or None
-        Defaults to 2D forward.
+        Defaults to 2D forward.  Carries ``mode.uv_vertical`` and
+        ``mode.max_levels`` to ``run_single_realization``.
     end_time_idx : int or None
         Legacy parameter.
     writer : TrajectoryWriter or None

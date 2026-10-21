@@ -146,7 +146,9 @@ random kick whose *amplitude* depends on the local `Kh` spends more time, and
 takes shorter steps, in low-diffusivity regions, so particles spuriously pile up
 where `Kh` is small. That is not what real diffusion does: Fick's law moves tracer
 *down* the diffusivity gradient, away from the bias, leaving a uniform tracer
-field uniform.
+field uniform. (A reader whose output holds no Kh fields refuses `em` and `m1`
+before the output file exists: FESOM 1.4, `mesh.type: fesom14`, where the
+`uniform` scheme works.)
 
 The fix is a deterministic **drift correction** equal to the gradient of the
 diffusivity, `∂Kh/∂x`. Added to the advecting velocity, it exactly cancels the
@@ -285,6 +287,11 @@ each matched to a scheme/integrator pairing:
 `em`/`m1` + Euler → `combined`; `em`/`m1` + RK → the user must set `split_rk`. The
 resolved value (not the raw config value) is what gets recorded in the output
 metadata. The configuration keys are documented in `configuration.md` §3.1.
+
+The kicks never read `u`/`v`, so a horizontal velocity linear in depth
+(`mode.uv_vertical: linear`, `vertical.md` §2.1) composes with the `split`
+uniform kick and the Az kick unchanged: the deterministic part of the step is
+the depth-linear step, the kicks follow as above; `em`/`m1` stay 2-D only.
 
 
 ## 6. What is called when

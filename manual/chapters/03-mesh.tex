@@ -2,7 +2,7 @@
 
 This chapter describes the static geometry on which the engine operates: the
 unstructured mesh, the quantities a model stores on it, and the conventions under which each source ---
-FESOM2, FESOM-C, HEALPix products and structured NEMO grids --- is read into the \fn{Mesh} structure of
+FESOM2, FESOM~1.4, FESOM-C, HEALPix products and structured NEMO grids --- is read into the \fn{Mesh} structure of
 \cref{sec:arch-data}. We use the triangular FESOM2 \emph{core2} mesh as the worked example and describe
 the other sources where they differ. The localization search of \cref{ch:localization} and every
 interpolation stencil of \crefrange{ch:hvel}{ch:sampling} are expressed in terms of
@@ -79,7 +79,8 @@ interfaces are the level boundaries; the layers are the volumes between them. Th
 distinction matters because, again, different fields live in different places: the
 vertical velocity $\Wvel$ is defined \emph{at the interfaces}, whereas the
 three-dimensional horizontal velocity and the scalar fields are defined \emph{at
-the mid-layers}. For the \emph{core2} mesh there are $48$ interfaces and hence $47$
+the mid-layers}. FESOM~1.4 is the exception: it stores every field on the levels, so its horizontal
+velocity shares the interfaces with $\Wvel$ (\cref{sec:mesh-fesom14}). For the \emph{core2} mesh there are $48$ interfaces and hence $47$
 layers, spanning depths from $0$ to approximately \SI{6250}{\metre}. The
 configuration key \conf{max\_levels} retains only the first $N$ interfaces from the
 surface downward (at least two in three dimensions, on either vertical family), which both saves memory
@@ -131,8 +132,8 @@ The alternative supported family, used by the FESOM-C model, is a
 terrain-following \emph{sigma} coordinate in which the interface depths are a
 fixed fraction of the local water-column thickness and therefore vary in space and
 with the sea-surface height. The two families differ only in how an interface depth
-is computed; we defer the sigma geometry to \cref{ch:vertical}. HEALPix products and NEMO grids use
-z-levels.
+is computed; we defer the sigma geometry to \cref{ch:vertical}. FESOM~1.4, HEALPix products and NEMO
+grids use z-levels.
 
 \section{Reading a mesh file}\label{sec:mesh-conventions}
 
@@ -167,6 +168,8 @@ File variable & \fn{Mesh} member & Conversion / convention \\
 \code{zbar\_n\_bottom}      & \code{depth}          & $|\cdot|$, per-node sea floor (positive-down) \\
 \code{elem\_area}           & element areas         & used directly when present \\
 \code{nod\_in\_elem2D} (+ count) & \code{node\_to\_elems} & one-based $\rightarrow$ zero-based; rebuilt if degenerate (\cref{sec:mesh-nodeelem}); required in a diagnostics file \\
+\code{zbar\_e\_bottom}, \code{nlevels} & element bottoms (metadata) & each element's bed and last whole layer, when present (\cref{sec:mesh-elem-bottoms}) \\
+\code{ulevels}             & element first levels (metadata) & above 1 under an ice-shelf cavity \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -204,9 +207,49 @@ behaviour explicitly because it is a precondition for any meaningful run on the
 rebuild call are in \srcfile{readers/fesom2.py}; the reconstruction
 \fn{build\_node\_to\_elems} (a two-pass count-and-fill) is in \srcfile{core/mesh.py}.}
 
+\section{Element bottoms}\label{sec:mesh-elem-bottoms}
+
+FESOM2 fixes the number of levels of each element first and gives a node the deepest of the elements
+around it, so the per-node floor \code{zbar\_n\_bottom} tells where the deepest element at a node ends,
+not where a given element ends. The depth-linear reading of element-layout velocities
+(\cref{sec:vert-uvdepth}) needs the bed of every element, and the FESOM2 reader takes it from the mesh
+diagnostic --- NetCDF or Zarr --- when the diagnostic holds the element level variables: \code{nlevels}
+(one-based; the element has $\code{nlevels}-1$ wet layers), \code{zbar\_e\_bottom} (its bed, negative
+down) and \code{ulevels} (its first level, above 1 under an ice-shelf cavity). From them it declares, in
+file element order, the bed $d_e$ and the last whole layer $D_e$ of each element,
+\begin{equation}\label{eq:mesh-elem-bed}
+  d_e = \begin{cases} |\code{zbar\_e\_bottom}_e| & \text{when present},\\
+                      z_{\code{nlevels}_e-1} & \text{otherwise},\end{cases}
+  \qquad
+  D_e = \max\{k : z_{k+1}\le d_e\}\quad(-1 \text{ when } z_1>d_e),
+\end{equation}
+that is, the last layer whose lower level lies at or above the bed. A bottom layer that the bed cuts ---
+a FESOM2 \emph{partial bottom cell} --- is therefore not counted, and the depth-linear rule never reads it,
+the same rule as the node table of \cref{eq:vert-uv-last}. The element first levels are kept as well.
+A variable read here that is not one finite value per element, or that holds levels outside $1,\dots,K$,
+refuses the mesh at load --- in layer runs too --- with a message that names the file and the fix, and
+the loader prints one line saying whether the bottoms came from the file. A mesh without either
+variable --- an ASCII mesh directory, a diagnostic that lacks them, a Zarr store without a level table, or
+a region extracted before the extraction tool kept them --- declares no bottoms, and
+\conf{mode.uv\_vertical: linear} on its element velocities is refused before the output file exists;
+\code{ulevels} alone declares nothing. A mesh with \code{ulevels}${}>1$ anywhere is refused for the
+same option: ice-shelf cavities are not supported in the code yet and are planned. The region-extraction
+tool \code{utils/extract\_fesom\_region.py} writes \code{nlevels}, \code{ulevels} and
+\code{zbar\_e\_bottom} of the kept elements, and \code{nlevels\_nod2D} of the kept nodes, whenever the
+source has them, with the values and signs of the source; a subset written before it did so must be
+extracted again to use the option on element data.
+
+\codeanchor{\raggedright \fn{\_elem\_level\_metadata} in \srcfile{readers/fesom2.py}, called by the NetCDF and the Zarr
+mesh loaders, declares \code{mesh.metadata["elem\_bed"]}, \code{["uv\_data\_last\_elem"]},
+\code{["elem\_ulevels"]} and \code{["elem\_levels\_source"]}; the element table that reads them is
+\fn{depth\_points} with \code{layout="element"} (\srcfile{numerics/vertical\_uv.py}); the subset writer is
+\srcfile{utils/extract\_fesom\_region.py}.}
+
+
 \section{Other mesh sources}\label{sec:mesh-sources}
 
-The other readers produce the same \fn{Mesh} from different inputs (\cref{tab:mesh-sources,fig:mesh-sources}).
+The other readers produce the same \fn{Mesh} from different inputs (\cref{tab:mesh-sources,fig:mesh-sources});
+the FESOM~1.4 reader has a section of its own (\cref{sec:mesh-fesom14}).
 
 \begin{table}[t]
 \centering\footnotesize\setlength{\tabcolsep}{4pt}
@@ -215,6 +258,7 @@ The other readers produce the same \fn{Mesh} from different inputs (\cref{tab:me
 source & nodes & elements & velocity layout & vertical & radius (m) \\
 \midrule
 FESOM2 & model nodes & triangles & node or element & z-level & \num{6367500} \\
+FESOM~1.4 & model nodes & triangles, from the mesh files or the cell polygons & node, on the levels & z-level & \num{6367500} \\
 FESOM-C & model nodes & triangles, quadrilaterals & element (node when stored so) & sigma & \num{6400000} \\
 HEALPix, dual & wet pixel centres & corner cells: quadrilaterals, some triangles & node & z-level & \num{6371000} \\
 HEALPix, pixel & pixel corners & wet pixels (quadrilaterals) & element & two-dim. & \num{6371000} \\
@@ -297,6 +341,112 @@ quadrilaterals whose four T-points are wet; one land point removes the quadrilat
 \fn{build\_healpix\_dual\_mesh}, \fn{build\_healpix\_pixel\_mesh} and \fn{HealpixReader.load\_mesh}
 (\srcfile{readers/healpix.py}); \fn{build\_structured\_mesh} and \fn{c\_grid\_to\_t}
 (\srcfile{readers/structured.py}); the NEMO adapter in \srcfile{readers/nemo.py}.}
+
+\section{The FESOM~1.4 mesh}\label{sec:mesh-fesom14}
+
+FESOM~1.4 \citep{wang2014fesom14} is a finite-element model on a triangular surface mesh that is the same
+at every level. Every surface node has a column of three-dimensional nodes, one per level, down to its
+bed, and all prognostic fields --- $u$, $v$, $\Wvel$, temperature and salinity --- are continuous,
+piecewise-linear (P1) functions on the tetrahedra between those nodes: they live \emph{on the levels at the
+nodes}. The reader therefore returns node-layout fields on the levels (\cref{sec:vert-uvdepth}), and it
+builds the \fn{Mesh} from either of two sources, decided by what \conf{mesh.meshpath} is.
+
+\paragraph{ASCII mesh directory.} A directory that holds \code{nod3d.out} is read as the model's mesh
+files: \code{nod2d.out} (the node coordinates and flags), \code{elem2d.out} (the triangles, one-based),
+\code{nod3d.out} (every three-dimensional node with its depth, numbered level by level) and
+\code{aux3d.out} in FESOM~1.4's own format --- the number of levels, the table of the three-dimensional
+node at each level of each column (a value $\le0$ marks a dry slot) and the surface node of every
+three-dimensional node; its last block, on the three-dimensional elements, is not parsed. This
+\code{aux3d.out} is not FESOM2's, and the FESOM2 reader would misread it. Each file is read as one stream
+of numbers, as a Fortran list-directed read sees it, so the spread of the records over lines does not
+matter; Fortran \code{D} exponents are accepted, and an integer field takes any number whose value is an
+integer. The levels are the depths of \code{nod3d.out} in file order --- every change of value starts a new
+level --- stored positive down, with the surface exactly at zero. Before anything is returned the files
+are checked against each other: indices in range, every three-dimensional node in exactly one slot, the
+wet slots a prefix of each column, and every slot's surface node and depth consistent with the node
+tables. A failure names the file and the first offending index.
+
+A FESOM~1.4 run may store its mesh in the rotated frame of the model. The key \conf{mesh.input\_rotation}
+takes the Euler angles $[\alpha,\beta,\gamma]$ of the run's namelist, in degrees, and rotates the node
+coordinates back to geographic on load, with the convention of \cref{sec:frame-rotation}. The angles are
+never guessed, since a rotated mesh looks like a geographic one; the reader warns when a global ASCII mesh
+(more than $350^\circ$ of longitude) without a node north of $85^\circ$\,N is loaded without them, because a
+geographic FESOM mesh reaches the Arctic. The key is refused for a mesh from cell polygons, whose
+coordinates are geographic, and for every other mesh type; it is independent of \conf{mesh.rotation}, the
+frame in which the engine tracks (\cref{ch:frame}).
+
+\paragraph{Cell polygons of level-wise data.} Published FESOM~1.4 output, such as the CMIP6 files, holds
+no element table. It holds, next to the node coordinates \code{lon}/\code{lat}, each node's
+\emph{median-dual cell} as a polygon (\code{lon\_bnds}/\code{lat\_bnds}, padded to a fixed vertex count by
+repeating the last vertex). An interior node's polygon alternates the midpoints of its edges and the
+centroids of its triangles; a coastal node's polygon also holds the midpoints of its boundary edges and the
+node itself. A polygon vertex shared by exactly three nodes is therefore the centroid of their triangle
+(\cref{fig:mesh-fesom14}), and the reader recovers the triangles exactly from that rule. The polygon
+vertices of all nodes are clustered on the unit sphere within $10^{-6}$ degrees (about \SI{0.1}{\metre});
+distinct clusters must lie at least a thousand times farther apart, so that no point split by rounding can
+pass for two. At a \emph{pinch node}, whose triangles form several fans that touch only at the node, the
+published polygon lists one fan only; a centroid listed by just two nodes then names its third node, and
+that triangle is recovered as well. The result is validated before it is used: a shared point within
+\SI{1}{\centi\metre} of the spherical centroid of its three nodes, every edge in one or two triangles with a
+polygon vertex at its midpoint, the Euler characteristic $V-E+F=2C-L$ of $C$ edge-connected components with
+$L$ boundary loops, and an accounting check that every distinct polygon vertex is a node, the midpoint of a
+recovered edge or the centroid of a recovered triangle. The levels are the file's depth coordinate (finite,
+starting at the surface, increasing), and the wet mask comes from the first record of $u$: a value counts
+as data when it is finite and smaller than $10^{29}$ in magnitude, and the data of every column must be a
+prefix of its levels, starting at the surface. When a file holds \code{deptho} (for instance the published
+fixed-field file in the same directory), its value must equal the depth of each column's last level with
+data within \SI{0.01}{\metre}. This is the only guard against level-wise files that write zero rather than
+a fill value below the bed, whose first record would look wet everywhere; without \code{deptho} that case
+cannot be detected.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.15]
+  \coordinate (A) at (0,0); \coordinate (B) at (4,0); \coordinate (C) at (1.6,2.8);
+  \coordinate (G) at (1.8667,0.9333);
+  \coordinate (Mab) at (2,0); \coordinate (Mbc) at (2.8,1.4); \coordinate (Mca) at (0.8,1.4);
+  \fill[lagnode!14] (A)--(Mab)--(G)--(Mca)--cycle;
+  \fill[lagelem!14] (B)--(Mbc)--(G)--(Mab)--cycle;
+  \fill[laggreen!14] (C)--(Mca)--(G)--(Mbc)--cycle;
+  \draw[meshedge] (A)--(B)--(C)--cycle;
+  \draw[lagnode!80!black,densely dashed,line width=0.7pt] (Mab)--(G) (Mbc)--(G) (Mca)--(G);
+  \foreach \p in {A,B,C} \node[meshnode] at (\p) {};
+  \foreach \p in {Mab,Mbc,Mca} \node[circle,fill=black,inner sep=0pt,minimum size=3pt] at (\p) {};
+  \node[elemcentre] at (G) {};
+  \node[nodelbl,below left] at (A) {$A$};
+  \node[nodelbl,below right] at (B) {$B$};
+  \node[nodelbl,above] at (C) {$C$};
+  \node[font=\footnotesize,anchor=west,align=left] at (4.3,1.55) {$G$: a vertex of the polygons of $A$, $B$\\and $C$ --- the centroid of triangle $ABC$};
+  \draw[gray!70,-{Stealth[length=4pt]}] (4.25,1.55)..controls (3.2,1.4)..(2.0,1.0);
+  \node[font=\footnotesize,anchor=west,align=left] at (4.3,0.35) {edge midpoint: a vertex of two\\polygons --- the edge $AB$};
+  \draw[gray!70,-{Stealth[length=4pt]}] (4.25,0.35)..controls (3.0,0.4)..(2.08,0.06);
+\end{tikzpicture}
+\caption{Triangle recovery from FESOM~1.4 cell polygons. The median-dual cell of each node (shaded, one
+colour per node) is bounded by the dashed segments joining the edge midpoints (dots) to the triangle
+centroid $G$ (square). Within one triangle each node's cell contributes the quadrilateral node, midpoint,
+centroid, midpoint, so $G$ is the only point that the polygons of exactly three nodes share: every cluster
+of polygon vertices owned by three nodes is a triangle of the mesh.}
+\label{fig:mesh-fesom14}
+\end{figure}
+
+\paragraph{The mesh in either case.} \code{mesh.sigma} holds the full level table, positive down, and
+\code{mesh.depth} the depth of each column's last wet level, exactly. The reader keeps the static wet mask
+of every column (against which every record of every variable is later compared, \cref{sec:input-reader}),
+the geographic node coordinates, and the index of each column's last wet level, which it declares as the
+data prefix of the depth-linear rule ($D_i$ in \cref{eq:vert-uv-last}). Element centres are circular means
+of the vertices, as for FESOM2, and the default radius is \SI{6367500}{\metre}, FESOM~1.4's value. A mesh
+whose columns do not all start at the surface --- a mesh with ice-shelf cavities --- is refused by the
+reader: an ASCII mesh whose top wet node lies below $z=0$, or level-wise data with a column that holds no
+surface value. Ice-shelf cavities are not supported in the code yet and are planned.
+
+\codeanchor{\raggedright The mesh is built by \fn{Fesom14Reader.load\_mesh} in \srcfile{readers/fesom14/reader.py},
+with the helpers \fn{\_from\_ascii}, \fn{\_from\_polygons}, \fn{\_check\_deptho} and \fn{\_assemble}
+of the same file; the ASCII files are parsed by \fn{read\_ascii\_mesh}
+(\srcfile{readers/fesom14/\_ascii\_mesh.py}) and the triangles recovered by \fn{recover\_triangles}
+(\srcfile{readers/fesom14/\_polygons.py});
+the validity predicate \fn{is\_data} and \fn{wet\_mask\_levelwise} (\srcfile{readers/fesom14/\_layout.py});
+the Euler rotation \fn{euler\_matrix} (\srcfile{core/rotation.py}).}
+
 
 \section{Convex quadrilaterals and derived tables}\label{sec:mesh-derived}
 

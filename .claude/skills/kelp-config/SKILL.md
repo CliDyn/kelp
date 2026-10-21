@@ -31,7 +31,9 @@ campaign order-of-operations and the setup pitfalls.
 2. **There is no typo protection.** Unknown or misspelled keys (including
    wrong case, e.g. `Fdrift2d`) are silently dropped and the default is used.
    After writing a config, re-check every key against `docs/configuration.md`.
-3. **Make the implicit explicit.** Always set `data.time_averaging`. FESOM2
+3. **Make the implicit explicit.** Always set `data.time_averaging` — except for `mesh.type: fesom14`, which
+   refuses the key: its reader resolves what time each record represents from the files (time bounds, the raw
+   writer's schedule, or `data.time_stamp` + `data.time_window`), so leave it unset there. FESOM2
    output is time-averaged at EVERY cadence, daily included: write
    `time_averaging: mean` (its timestamps are the window END). `instant` is for
    true snapshot archives only (FESOM-C); if you cannot prove the file holds
@@ -57,7 +59,8 @@ campaign order-of-operations and the setup pitfalls.
 ## Workflow
 
 1. **Interview / inspect.** Establish: model family (FESOM2 → z-levels,
-   FESOM-C → sigma), 2D or 3D, forward or backward, mesh path, velocity
+   FESOM 1.4 → `mesh.type: fesom14`, z-levels, u/v/w on the levels — start from
+   `examples/config_fesom14_levelwise.yaml`; FESOM-C → sigma), 2D or 3D, forward or backward, mesh path, velocity
    file(s), particle seed file, run length, output destination. If the data
    is on disk, look at it (`ncdump -h`, `ds.data_vars`) instead of guessing
    variable names and time cadence.
@@ -95,6 +98,12 @@ campaign order-of-operations and the setup pitfalls.
    - 3-D file whose vertical velocity has no `positive` attribute: write
      `mode.w_positive` explicitly, with the regional-mean number that decided it in a
      comment (equatorial upwelling; see `kelp-run` step 4).
+   - `mode.uv_vertical: linear` (u/v linear in depth instead of constant per layer): 3-D with `euler`/`rk2`/`rk4`;
+     node u/v need `uv_interp: barycentric`, element u/v `leastsq`/`edge_leastsq`/`barycentric`; FESOM2 element u/v
+     need `meshpath` = the `fesom.mesh.diag.nc` FILE (its `nlevels`/`zbar_e_bottom`; a mesh directory loads the
+     ASCII mesh and is refused); `fesom14` refuses `linear` — leave the key unset there (its u/v are always linear on the levels). Assert it in
+     `validate.py`; after a run the output attribute `uv_vertical = "linear"` proves it. Rules:
+     `docs/configuration.md` (`uv_vertical` row, §8 item 5).
    - `max_levels` is a RAM lever that inserts an artificial bottom; a depth
      study keeps it `null` (full column).
    - Multi-year exact layout works for `.zarr` stores too (the tail must be
@@ -179,7 +188,7 @@ numerics:
   #             kh_meridional: 100.0, seed: 42}
 
 mesh:
-  type: fesom2            # fesom2 / fesomc
+  type: fesom2            # fesom2 / fesom14 / fesomc
   meshpath: path/to/fesom.mesh.diag.nc
   # rotation: fesom2      # default when the release or the expected drift reaches poleward of 60 °N/S (FESOM2/HEALPix): the lon/lat metric degenerates near the pole; output stays geographic
   # grid_hash_cell_size: 0.5   # speed only: nodes per nearest-node hash window — pick with utils/check_grid_hash_cell.py
@@ -191,7 +200,7 @@ data:
   # ncinput_w: path/to/w.fesom.1958.nc    # 3D only
   inicloud:   particles.dat                # lon lat [depth] [release_sec]
   output_path: trajectories.zarr           # .zarr or .nc; empty = in-memory
-  time_averaging: mean    # ALWAYS set: mean (averages) / instant (snapshots)
+  time_averaging: mean    # ALWAYS set: mean (averages) / instant (snapshots) — fesom14: leave unset (refused)
 
 time:
   start_date: "2005-01-01"   # temporal_interp: the run starts at this instant; discrete: must equal a RAW file timestamp (list them: `ncdump -t -v time FILE`; `kelp info` shows only the first and last)
@@ -259,7 +268,7 @@ Counting strandings (which criterion can fire on this mesh, the default block, c
 - All five sections present, empty ones as `{}`?
 - Files pinned explicitly, or is directory discovery intentional and the
   directory clean?
-- `time_averaging` set explicitly?
+- `time_averaging` set explicitly (and absent for `fesom14`)?
 - dt ↔ `temporal_interp` consistent (discrete mode wants dt = file step)?
 - 3D: W variable actually resolves (`var_w` or `w`/`wo`/`wvel` for FESOM2,
   `w` = `Wvel` for FESOM-C — `w_cart` is refused), and its sign convention

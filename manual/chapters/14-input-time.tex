@@ -10,7 +10,8 @@ node can share one copy of each snapshot. The in-memory read-ahead that serves t
 
 \section{The reader layer}\label{sec:input-reader}
 
-A reader is selected by \conf{mesh.type}: \conf{fesom2}, \conf{fesomc}, \conf{nemo} or \conf{healpix}. Each
+A reader is selected by \conf{mesh.type}: \conf{fesom2}, \conf{fesom14}, \conf{fesomc}, \conf{nemo} or
+\conf{healpix}. Each
 provides the mesh, opens the forcing, and reads one snapshot at a time; the NEMO reader builds its mesh with
 the engine's generic builder for structured grids, which turns the wet cell centres of a logically
 rectangular grid into nodes and every four adjacent wet centres into a quadrilateral element. The forcing is opened \emph{lazily}: the dataset is mapped through \code{xarray}
@@ -24,6 +25,30 @@ without loading the field arrays, and a snapshot is materialized only when a ste
     \conf{unod} does not pull in fields that merely share a prefix. A directory in any other layout is
     assembled from the first matching file per velocity component and the other readable files on the mesh's
     dimensions.
+  \item[FESOM~1.4] The mesh comes from the model's ASCII mesh directory or from the cell polygons of
+    level-wise data (\cref{sec:mesh-fesom14}). The forcing, \conf{data.ncinput} (the files of
+    \conf{ncinput\_v} and \conf{ncinput\_w} simply join it), is a file, a directory (its \code{*.nc} files in
+    name order, hidden files skipped) or a glob pattern, for instance over the member directory of a CMIP6
+    tree. Every file's header is read, and the files are grouped by the variables they hold, never by their
+    names. Only the variables the run \emph{consumes} are opened: $u$ and $v$ (\conf{mode.var\_u},
+    \conf{var\_v}, default \code{uo}, \code{vo}), in three dimensions $\Wvel$ (\code{wo}), the sea-surface
+    height (\code{zos}) when a file holds it, every \conf{mode.sample\_vars} entry and, with beaching enabled,
+    \conf{beaching.dry\_mask\_var}; a required variable that no file holds is refused, and the message lists
+    what the files do hold. Two data forms are recognised from the dimensions: level-wise files
+    $(\text{time},\text{depth},\text{node})$, such as the published CMIP6 output, and the raw writer's
+    vectors over the three-dimensional nodes $(\text{time},\text{nodes\_3d})$, which are mapped onto the
+    levels through the index table of the ASCII mesh. Model restart files, the mean files of an older model
+    branch whose frame and time axis cannot be checked, and files whose layouts, levels or node coordinates
+    disagree are refused. Every record of every variable is compared with the static wet mask of the mesh
+    on every level before anything is changed; only then are $u$, $v$ and $\Wvel$ set to zero below the bed
+    and sampled scalars continued downward from the column's last wet value, so that no fill value reaches a
+    particle. The velocities come back on the levels, in node layout, with the placement \code{"level"}
+    (\cref{sec:vert-uvdepth}); a two-dimensional run reads one level (\conf{mode.sigma\_layer}), the depth
+    mean (\conf{mode.sigma\_mean}) or the surface. Without \code{zos} the surface height is zero. The
+    reader resolves the time each record represents itself (\cref{sec:input-timeavg}). Refused before the
+    output file exists: the \conf{em} and \conf{m1} diffusion schemes, since FESOM~1.4 output holds no
+    diffusivity fields, and \conf{beaching.use\_eta} without a sea-surface height; the offline
+    reconstruction of $\Wvel$ refuses FESOM~1.4 meshes, whose output holds \code{wo} itself.
   \item[FESOM-C] One NetCDF file carries the mesh and the forcing; separate files for $v$ and $w$ may be
     merged in.
   \item[HEALPix] The mesh is derived from the data store itself: its nodes are the wet pixel centres
@@ -37,8 +62,14 @@ without loading the field arrays, and a snapshot is materialized only when a ste
     token in its name and must share its time axis exactly. The first version is two-dimensional and requires
     a grid aligned with east and north.
 \end{description}
+A reader may also provide a hook \fn{prepare}, which checks the opened data against the mesh. It runs at every
+entry: right after the data are opened, before any output file exists, and again at the entry of each
+realization, after the \conf{max\_levels} cut, so it always sees the levels in use. The FESOM~1.4 hook only
+checks --- the horizontal sizes, the full level axis, the node coordinates and the wet mask of the first record
+of every variable --- and changes nothing. \code{kelp info} opens the data as a run does, the hook included.
+
 Every reader that reads a vertical velocity converts it to the engine's positive-down convention
-(\cref{sec:vert-wsign}), and with \conf{velocity\_float32} stores the velocity fields in single precision to
+(\cref{sec:vert-wsign}; FESOM~1.4 writes \code{wo} positive up), and with \conf{velocity\_float32} stores the velocity fields in single precision to
 halve their memory, the interpolation arithmetic staying in double precision.
 
 \section{One cadence at a time}\label{sec:input-cadence}
@@ -54,7 +85,8 @@ warning. On the other layouts every file attached to the velocity file (a separa
 remaining files of a directory) is matched to the velocity records by time stamp: a file on another axis is
 refused, and a finer one that contains every velocity stamp is thinned to them with a warning. A
 mixed-cadence selection is easy to write and is caught only when the forcing is opened, not when the
-configuration is read.
+configuration is read. The FESOM~1.4 reader applies the rule to the records it resolves: every consumed
+variable must have exactly the records of $u$ (\cref{sec:input-timeavg}).
 
 \begin{figure}[t]
 \centering
@@ -122,6 +154,50 @@ window earlier, at the shifted midpoint, while a date one second later started o
 half window, past the last midpoint, starts at the last record with a warning. In the discrete mode the run
 starts at the matched record.
 
+\paragraph{Record times resolved by the reader (FESOM~1.4).} The FESOM~1.4 reader does not hand on the
+stamps as written. It decodes every file with its own epoch and calendar --- the published CMIP6 files start a
+new epoch every decade, raw output one per job segment --- and resolves, once per variable, the instant each
+record represents: the \emph{centre of its averaging window} for a time mean, the stamp itself for a
+snapshot. The window comes from exactly one source, in this order. First, the explicit keys
+\conf{data.time\_stamp} (where a stamp sits in its window: \conf{start}, \conf{centre} or \conf{end}, or
+\conf{instant} for snapshots) and \conf{data.time\_window} (\conf{calendar\_month}, \conf{calendar\_year},
+\conf{calendar\_day} or a fixed duration such as \code{"5 d"}), given together; they decide for every file,
+and when a file also has time bounds or an output schedule a warning names what was overridden and the
+first record where the two disagree. Second, the files' time bounds, as in the CMIP6 files: a January record
+bounded by 0 and 31 days represents day 15.5, that is, 12:00 on the 16th. Third, the raw writer's
+\code{output\_schedule} attribute, whose stamps are the window ends in seconds since the job's start date; the
+reader enumerates the output events the schedule implies and requires the stamps to be exactly those events.
+Otherwise the run is refused with a message naming the two keys. The key \conf{data.time\_offset}
+(\code{"<$\pm$number> <s|min|h|d>"}) is added to the stamps, the bounds and the epoch of every file before any
+of this; it serves raw output of a job that started at a time of day other than midnight, whose stamps all sit
+early by that time of day, and for raw-writer files it must lie in $[0,\SI{24}{\hour})$. Calendar windows are
+computed exactly in the files' calendar, and with a calendar window a stamp that does not sit where
+\conf{data.time\_stamp} puts it --- on a boundary of the window, or at its centre --- is refused. A window is never estimated from the spacing of neighbouring stamps, every record the source says must
+exist has to be present --- a gap, a missing month or file, refuses the run --- and every consumed variable
+must resolve to exactly the records of $u$, the same instants and windows to within \SI{1}{\milli\second}. The
+last rule is the reader's form of the single-cadence requirement of \cref{sec:input-cadence}: the default raw
+output, which writes \code{zos} daily and the velocities monthly, is refused, and the message suggests leaving
+\code{zos} out of the input.
+
+The resolved instants become the dataset's time axis, and nothing downstream moves them again. For this reader
+the engine gives no warning, applies no midpoint shift, refuses a set \conf{data.time\_averaging}, and writes
+\code{time\_averaging = "resolved\_by\_reader"} to the output. The refusal is deliberate: the shift of this
+section assumes stamps at the window ends, whereas the reader's instants are already window centres --- a
+CMIP6 monthly stamp, for instance, already sits in the middle of its month --- so a second shift would move
+every record by half a window. Daily means therefore sit at 12:00, and a \conf{start\_date} is matched against
+these centres: a discrete-mode start at midnight matches no record and needs \conf{temporal\_interp}. Monthly
+means lie a calendar month apart, an irregular spacing that the discrete mode refuses, so they need the
+interpolated mode. The three keys are refused for every other mesh type, and the run summary and
+\code{kelp info} print one line saying what resolved the times, with the first and the last instant.
+
+\codeanchor{\raggedright The record times are \fn{resolve\_axis} in \srcfile{readers/fesom14/\_timeaxis.py}, called per
+consumed variable by \fn{Fesom14Reader.open\_dataset} (\srcfile{readers/fesom14/reader.py}); the keys reach it
+through \fn{\_time\_option\_kwargs}, which also refuses \conf{data.time\_averaging} for the mesh types in
+\code{\_READER\_RESOLVES\_TIME}, and \fn{\_describe\_record\_times} prints the summary line
+(\srcfile{readers/\_\_init\_\_.py}); \fn{run\_tracking} (\srcfile{tracking.py}) skips the midpoint shift and
+records \code{RESOLVED\_BY\_READER}.}
+
+
 \section{The velocity handed to a step}\label{sec:input-payload}
 
 Snapshots are read through a small cache keyed by record index, which keeps the bracketing pair, the PCHIP
@@ -136,7 +212,10 @@ loop that is bit-identical to the array expression; fields stored in single prec
 
 \codeanchor{The readers live in \srcfile{readers/} (one module per model; the registry and
 \fn{extract\_time\_info} in \srcfile{readers/\_\_init\_\_.py}); the multi-year assembly and its cadence check
-are in \srcfile{readers/fesom2.py}; the structured-grid builder is \srcfile{readers/structured.py}; the
+are in \srcfile{readers/fesom2.py}; the structured-grid builder is \srcfile{readers/structured.py}; the FESOM~1.4 reader is the package
+\srcfile{readers/fesom14/} (\fn{Fesom14Reader} in \srcfile{reader.py}, the two data forms and the validity
+predicate in \srcfile{\_layout.py}), and the \fn{prepare} hook is run by \fn{\_prepare\_dataset}
+(\srcfile{readers/\_\_init\_\_.py}); the
 midpoint shift (\fn{\_shift\_to\_midpoints}), the start date (\fn{\_resolve\_start\_date}), the payload
 (\fn{\_build\_vel\_payload}) and the cache \fn{\_VelCache} are in \srcfile{tracking.py}; the lazy view
 \fn{LazyLerpField} and its blend are in \srcfile{core/io.py}.}

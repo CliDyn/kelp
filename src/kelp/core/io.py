@@ -33,6 +33,11 @@ except Exception:  # pragma: no cover - exercised only without numba
 
 _VALID_KH_LAYOUTS = ("node", "element")
 _VALID_UV_LAYOUTS = ("element", "node")
+#: Placement of the 3-D horizontal velocity data points in the vertical:
+#: ``"layer"`` (layer centres, piecewise constant in depth — the default),
+#: ``"level"`` (on the levels, linear in depth) and ``"layer_linear"``
+#: (layer-centred data evaluated linearly in depth).
+_VALID_UV_VERTICAL = ("layer", "level", "layer_linear")
 
 #: Arrays smaller than this take the plain numpy path in :func:`_blend` —
 #: below ~64K elements the numba thread fork/join overhead exceeds the
@@ -112,6 +117,65 @@ def _blend(a: np.ndarray, b: np.ndarray, alpha: float) -> np.ndarray:
         + alpha * np.asarray(b, dtype=np.float64)
 
 
+def _check_uv_vertical(u, w, uv_layout: str, uv_vertical: str) -> None:
+    """The placement value and its shape contract (``VelocityField``).
+
+    A 2-D field (``u`` 1-D) is always ``"layer"``.  ``"level"`` needs node
+    layout, with or without ``w`` (level data sit on the nodes' levels);
+    ``"layer_linear"`` takes node or element layout.  The rows are checked
+    against ``w`` only for 3-D fields (``u`` 2-D and ``w`` present):
+    ``"layer"`` and ``"layer_linear"`` need ``u.shape[0] == w.shape[0] - 1``
+    (one row per layer), ``"level"`` needs ``u.shape[0] == w.shape[0]``
+    (one row per level).
+    """
+    if uv_vertical not in _VALID_UV_VERTICAL:
+        raise ValueError(
+            f"VelocityField.uv_vertical must be one of {_VALID_UV_VERTICAL}, "
+            f"got {uv_vertical!r}"
+        )
+    u_ndim = getattr(u, "ndim", None)
+    if u_ndim == 1:
+        if uv_vertical != "layer":
+            raise ValueError(
+                f"VelocityField: a 2-D field (u shape {u.shape}) must carry "
+                f"uv_vertical='layer', got {uv_vertical!r}"
+            )
+        return
+    if uv_vertical == "level" and uv_layout != "node":
+        raise ValueError(
+            f"VelocityField: uv_vertical={uv_vertical!r} needs "
+            f"uv_layout='node', got {uv_layout!r}"
+        )
+    if u_ndim != 2 or w is None:
+        return
+    k_w = w.shape[0]
+    want = k_w if uv_vertical == "level" else k_w - 1
+    if u.shape[0] != want:
+        rows = ("one per level, K" if uv_vertical == "level"
+                else "one per layer, K-1")
+        raise ValueError(
+            f"VelocityField: uv_vertical={uv_vertical!r} needs u with "
+            f"{want} rows ({rows}, K = {k_w} from w {w.shape}), got u "
+            f"{u.shape}"
+        )
+
+
+def _require_same_uv_vertical(site: str, *placements: str) -> str:
+    """Refuse mixed placements at a field-rebuild site; return the common one.
+
+    ``site`` prefixes the message (the caller's name, e.g.
+    ``"VelocityField.lerp"``); the message lists every placement in input
+    order, so the odd one out is visible.
+    """
+    first = placements[0]
+    if any(p != first for p in placements[1:]):
+        raise ValueError(
+            f"{site}: uv_vertical mismatch "
+            + " vs ".join(repr(p) for p in placements)
+        )
+    return first
+
+
 @dataclass
 class VelocityField:
     """Velocity data for one timestep.
@@ -156,6 +220,18 @@ class VelocityField:
         ``(K, N)`` (same layout as ``w``), read when the run configures
         ``diffusion.var_az`` (TODO 2.2b).  Lerped when both sides carry
         it; dropped to None otherwise.
+    uv_vertical : str
+        Placement of ``u`` / ``v`` in the vertical: ``"layer"`` (the
+        default — layer centres, ``(K-1, ·)``, piecewise constant in
+        depth), ``"level"`` (on the levels, ``(K, N)``, node layout,
+        linear in depth) or ``"layer_linear"`` (layer centres
+        ``(K-1, ·)``, node or element layout, evaluated linearly in
+        depth).  The constructor checks a 3-D field's u rows against
+        ``w`` (only when ``u`` is 2-D and ``w`` is present), so a dropped
+        or wrong flag raises instead of mis-placing the data; a 2-D field
+        (``u`` 1-D) is always ``"layer"``.  ``lerp``, ``LazyLerpField``,
+        the PCHIP reconstruction and the shared cache keep it and refuse
+        mixed placements.
     """
     u: np.ndarray
     v: np.ndarray
@@ -168,6 +244,7 @@ class VelocityField:
     uv_layout: str = "element"  # "element" (centres) or "node" (FESOM2 unod/vnod)
     scalars: Optional[Dict[str, np.ndarray]] = None  # {varname: (N,) | (K-1, N) | (K, N)} node fields
     az: Optional[np.ndarray] = None  # vertical diffusivity (K, N) at interfaces
+    uv_vertical: str = "layer"  # "layer" | "level" | "layer_linear"
 
     def __post_init__(self) -> None:
         # All-or-nothing: kh_zonal/kh_meridional/kh_layout must be
@@ -205,6 +282,7 @@ class VelocityField:
                 f"uv_layout must be 'element' or 'node', got "
                 f"{self.uv_layout!r}"
             )
+        _check_uv_vertical(self.u, self.w, self.uv_layout, self.uv_vertical)
         if self.scalars is not None and len(self.scalars) == 0:
             self.scalars = None
 
@@ -234,6 +312,8 @@ class VelocityField:
                 "VelocityField.lerp: uv_layout mismatch "
                 f"{self.uv_layout!r} vs {other.uv_layout!r}"
             )
+        uv_vertical = _require_same_uv_vertical(
+            "VelocityField.lerp", self.uv_vertical, other.uv_vertical)
         beta = 1.0 - alpha
         w_interp = None
         if self.w is not None and other.w is not None:
@@ -299,6 +379,7 @@ class VelocityField:
             uv_layout=self.uv_layout,
             scalars=scalars_interp,
             az=az_interp,
+            uv_vertical=uv_vertical,
         )
 
 
@@ -329,6 +410,8 @@ class LazyLerpField:
             raise ValueError(
                 "LazyLerpField: uv_layout mismatch "
                 f"{vel_a.uv_layout!r} vs {vel_b.uv_layout!r}")
+        uv_vertical = _require_same_uv_vertical(
+            "LazyLerpField", vel_a.uv_vertical, vel_b.uv_vertical)
         # Fail-fast metadata validation mirroring VelocityField.lerp —
         # all shape/layout/key checks are metadata-only (no blends), so
         # incompatible snapshots surface at payload-build time with the
@@ -381,6 +464,9 @@ class LazyLerpField:
         # Plain (non-lazy) metadata — identical rules to VelocityField.lerp:
         # kh_layout survives only when BOTH sides carry Kh.
         self.uv_layout = vel_a.uv_layout
+        # the placement: a plain attribute, never lazy (__getattr__ raises
+        # for unknown names)
+        self.uv_vertical = uv_vertical
         self.kh_layout = vel_a.kh_layout if both_kh else None
         self.t = (None if vel_a.t is None or vel_b.t is None
                   else (1.0 - self.alpha) * vel_a.t + self.alpha * vel_b.t)
@@ -441,7 +527,7 @@ class LazyLerpField:
             u=self.u, v=self.v, eta=self.eta, w=self.w, t=self.t,
             kh_zonal=self.kh_zonal, kh_meridional=self.kh_meridional,
             kh_layout=self.kh_layout, uv_layout=self.uv_layout,
-            scalars=self.scalars, az=self.az,
+            scalars=self.scalars, az=self.az, uv_vertical=self.uv_vertical,
         )
 
 

@@ -7,6 +7,214 @@ the tracker was developed privately from 2026-06.
 
 ## [Unreleased]
 
+### Added — horizontal velocity linear in depth (`mode.uv_vertical`)
+
+- New option `mode.uv_vertical`: `layer` (default, unchanged — the horizontal
+  velocity is constant within each layer) or `linear` — linear in depth between
+  the layer centres, the value of the first centre above it and of each column's
+  last wet centre below it, never extrapolated; a partial bottom layer is never
+  read, and every vertex of the interpolation stencil is read in its own column
+  (`docs/vertical.md` §2.1; a vertex whose bed lies above the particle is a
+  wall: next section). For 3-D z-level runs with node-layout u/v (FESOM2
+  `unod`/`vnod`, the HEALPix dual geometry), `numerics.uv_interp: barycentric`
+  and `euler`, `rk2` or `rk4`, steady, linearly interpolated or PCHIP in time
+  (each stored value is blended in time first, then read in depth). Refused before
+  the output file is written: 2-D runs, other u/v interpolators, `rk45` (FESOM2
+  element-layout u/v and FESOM-C sigma meshes: the next sections).
+- Each record a run reads with the option is checked once, when the run stores
+  it: a non-finite `u` or `v` above a column's last usable layer centre stops the
+  run with the node, the layer and the record named; the interpolators and the
+  step functions do not check again. The HEALPix reader also checks the raw record
+  before it zeroes missing values (so a drifting surface mask is refused, not
+  zeroed; a HEALPix record is therefore scanned twice); a mesh loaded with the option declares where each column's u data end
+  (`mesh.metadata["uv_data_last"]`, one extra pass over u's first record), and a
+  run with the option on a mesh loaded without it is refused at its first record.
+- Output files of runs with the option carry the global attribute
+  `uv_vertical = "linear"` — the proof the option was on (a misspelled key is
+  ignored silently, like every unknown key). Runs without it are bit for bit
+  unchanged and carry no new attribute.
+- The rule cannot change inside one trajectory: `load_restart` returns the rule
+  a checkpoint was written with (`uv_vertical`, `None` = `layer`;
+  `write_restart_file` takes `uv_vertical=`), `tracking._validate_restart_uv_vertical`
+  refuses a resume under the other rule (the resume recipe calls it next to the
+  frame check).
+- Engine: `VelocityField.uv_vertical` (`"layer"`, `"layer_linear"`, `"level"`)
+  records where u/v sit in the vertical and travels through every time blend and
+  the shared snapshot cache; the new module `numerics/vertical_uv.py` holds the
+  data-point table, the bracket and the record check. Readers may set
+  `native_uv_vertical = "level"` (u/v on the levels, always linear in depth) and
+  provide a hook `prepare(mesh, ds)`; the FESOM 1.4 reader (next section) uses
+  both.
+  `prepare` runs at every entry: right after `open_dataset` (before any output
+  file exists) and again at the entry of each realization, after the
+  `max_levels` cut — 1 + R calls for R realizations, one per direct
+  `run_single_realization` — so mesh facts a dataset declares (`uv_data_last`)
+  are always those of the dataset, mesh, levels and reader in use; the engine
+  keeps no record of earlier calls. The depth-point table is built from the
+  declaration's values at first use and kept while the levels, the bed and the
+  declaration are the same arrays: assign a new array to change one (a write
+  into an array in place is not seen).
+- The cost of the option is measured by
+  `benchmarks/single_node/depth_linear_cost.py` (128 threads, 1e5 particles,
+  with the walls at depth of the next section): +10 % per fused 3-D node RK2
+  step with a linear time blend, no measurable cost with PCHIP; element
+  `leastsq`: +6 % per fused 3-D Euler step, +3 % per unfused 3-D RK2 step,
+  no measurable cost with PCHIP.
+
+### Added — depth-linear u/v on FESOM2 element layout; walls at depth
+
+- `mode.uv_vertical: linear` works on FESOM2 element-layout u/v (`u`/`v` on
+  the triangles) with `numerics.uv_interp` `leastsq` (the default),
+  `edge_leastsq` (either `edge_leastsq_bc`) or `barycentric`, and `euler`,
+  `rk2` or `rk4`, steady, linearly interpolated or PCHIP in time, with
+  `elem_search: walk`, the split uniform and Az kicks, prefetch windows, the
+  shared snapshot cache, checkpoints and restarts, multi-realization runs and
+  `max_levels`. Each element is read linearly in depth between its own layer
+  centres, down to its own last wet layer (`docs/vertical.md` §2.1). The fused
+  3-D Euler kernel has a depth-linear twin (bit for bit the unfused step);
+  RK2 and RK4 on element data run unfused, as in layer mode.
+- **Walls at depth, for nodes too** — a change of the node-layout rule of the
+  previous section, which is in no release yet: a member of the
+  interpolation stencil (a vertex, or an element) whose bed lies above the
+  particle is a wall, like the coast. It is left out of the barycentric sum
+  (the weights of the wet vertices renormalised, a negative one — a particle
+  just outside an edge — counted as zero) or of the `leastsq` fit; for
+  `edge_leastsq` its edge is a boundary edge with the `edge_leastsq_bc` ghost;
+  for element `barycentric` it is left out of each vertex mean. Not a zero
+  velocity, which would brake every particle along the wall, and no longer the
+  shallow vertex's bottom value read below its bed (the earlier node rule),
+  which could speed a particle up. When the wet members cannot support the
+  interpolator, their area-weighted mean (`leastsq`, `edge_leastsq`) or the
+  equal-weight mean of the remaining vertices (`barycentric`, when their
+  weights vanish); when none is wet, the containing element (node layout: the
+  vertex with the largest bed) at its last usable point. With every member wet
+  the result is the layer interpolator's arithmetic. The velocity jumps where
+  a particle crosses the depth of a neighbour's bed, and near the bed the two
+  modes differ by more than the vertical interpolation: layer mode reads a
+  shallow neighbour's stored zeros, linear mode leaves that neighbour out.
+- Element bottoms: the FESOM2 reader reads `nlevels`, `zbar_e_bottom` and
+  `ulevels` from the mesh diagnostic (NetCDF or Zarr) when present and
+  declares each element's bed and last wet layer in `mesh.metadata`
+  (`elem_bed`, `uv_data_last_elem`; `elem_ulevels`). A level variable the
+  reader uses (`zbar_e_bottom`, else `nlevels`; and `ulevels`) that is not one
+  finite value per element, or holds levels outside `1..K`, refuses the mesh at
+  load, in layer runs too, naming the file and the fix.
+  `utils/extract_fesom_region.py` keeps `nlevels`, `ulevels`, `zbar_e_bottom`
+  and `nlevels_nod2D` in the subset mesh when the source has them; a subset
+  written before must be extracted again to use the option on element data.
+- Refused before the output file exists, naming the mesh file: element data on
+  a mesh without element bottoms (a diagnostic with neither `nlevels` nor
+  `zbar_e_bottom`, an ASCII mesh directory, an older subset), meshes with
+  ice-shelf cavities (`ulevels > 1` anywhere; not supported yet), and an
+  interpolator outside the table (node layout: `barycentric`; element layout:
+  `leastsq`, `edge_leastsq`, `barycentric`). Each element record a run reads is
+  checked like a node record: a non-finite `u` or `v` at a usable layer refuses
+  the run, naming the element, the layer and the record. Runs without the
+  option are bit for bit unchanged.
+- Engine: `VelocityField(uv_vertical="layer_linear")` accepts element layout;
+  `numerics.vertical_uv.depth_points(mesh, placement, layout)` builds one table
+  per placement and layout, with the physical bed of every column
+  (`DepthPoints.bed`, the wet test `uv_wet`). Analytic tests through the public
+  run path (`tests/test_depth_linear_analytic.py`, with a mutation pass): a
+  depth-constant field gives the layer answer, a field linear in depth is
+  exact, a smooth profile converges at second order in the layer thickness
+  (layer mode at first), and a flow along a trench keeps its speed at the
+  trench walls.
+
+### Added — depth-linear u/v on FESOM-C sigma meshes
+
+- `mode.uv_vertical: linear` works on FESOM-C sigma meshes (`mesh.type:
+  fesomc`): element u/v (`u`/`v`) with `leastsq`, `edge_leastsq` or
+  `barycentric`, node u/v with `barycentric`; `euler`, `rk2` or `rk4`, steady,
+  linearly interpolated or PCHIP in time, with the same companions as on FESOM2
+  (edge walk, kicks, caches, restarts, multi-realization runs, `max_levels`).
+  u/v are read linearly in the sigma fraction `s = z / H_p` of the particle's
+  column between the sigma layer centres `1 − (σ_k + σ_{k+1}) / 2`, each RK
+  stage at the `s` of its own depth and column height; every column is wet to
+  the bed (no walls at depth, no element bottoms needed), and every layer of
+  every record read must be finite (`docs/vertical.md` §2.1). Exact for a field
+  linear in `s`; on a sloping bed a field linear in `z` is not claimed. The
+  sigma path stays unfused, as in layer mode; runs without the option are bit
+  for bit unchanged. Analytic tests through `run_tracking` (the layer answer
+  for a depth-constant field, second order in the sigma layer thickness for a
+  smooth profile, layer mode first) with sigma mutants in their mutation pass;
+  `benchmarks/single_node/depth_linear_cost.py --vertical sigma` measures the
+  cost per unfused 3-D RK2 step (128 threads, 1e5 particles): element
+  `leastsq` no measurable cost with a linear time blend, +3 % with PCHIP;
+  node `barycentric` +3 % and +4 %.
+
+### Added — FESOM 1.4 reader (`mesh.type: fesom14`)
+
+- A reader for FESOM 1.4 output. The mesh comes from a FESOM 1.4 ASCII mesh
+  directory (`nod2d.out`, `elem2d.out`, `nod3d.out`, `aux3d.out`, cross-checked
+  on load) or from level-wise data files that hold the node cell polygons
+  (`lon_bnds`/`lat_bnds`): the triangles are recovered exactly from the
+  polygons, and a `deptho` variable is checked against the wet mask. A mesh
+  stored in the model's rotated frame is rotated back with
+  `mesh.input_rotation` (the Euler angles of the run; refused for other mesh
+  types); a global ASCII mesh without a node north of 85° N draws a warning
+  when the angles are missing.
+- Data in either form FESOM 1.4 writes: level-wise `(time, depth, node)` files
+  (e.g. the published CMIP6 output) and the raw writer's vectors over the 3-D
+  nodes `(time, nodes_3d)`, mapped through the ASCII mesh's index table. Files
+  are grouped by the variables they hold, not by their names; only the
+  variables a run consumes are opened (the velocities, `zos`, the
+  `mode.sample_vars` and, with beaching enabled, `beaching.dry_mask_var`). u, v and w come back on the levels and
+  are always read linearly in depth (`uv_vertical = "level"`): a prism-wise
+  approximation (barycentric on the triangle, linear in depth per vertex) of
+  FESOM 1.4's own interpolation on tetrahedra. Every record of every variable
+  is checked against the mesh's static wet mask on every level before anything
+  is changed; values below the bed are then 0 (u, v, w) or the column's last
+  value (sampled scalars). 2-D tracking takes one level (`mode.sigma_layer`),
+  the depth mean (`mode.sigma_mean`) or the surface.
+- Time: each file is decoded with its own epoch and calendar, and the reader
+  resolves what each record represents — the centre of its averaging window
+  for a mean, the stamp for a snapshot — from the files' time bounds, the raw
+  writer's `output_schedule` (checked against the stamps) or the new keys
+  `data.time_stamp` + `data.time_window`; `data.time_offset` shifts the raw
+  stamps first (a raw job that started mid-day). A window is never estimated
+  and a gap in the records refuses the run. For this reader `run_tracking`
+  applies no midpoint shift, refuses `data.time_averaging`, and writes
+  `time_averaging = "resolved_by_reader"`; the three new keys are refused for
+  every other mesh type.
+- Refused before the output file exists: em/m1 diffusion (FESOM 1.4 output
+  has no Kh fields) and `beaching.use_eta: true` without a sea-surface
+  height in the files. The offline W reconstruction (`w_reconstruct.py`,
+  `utils/reconstruct_w.py`) refuses FESOM 1.4 meshes and data on the levels:
+  FESOM 1.4 output holds `wo` itself.
+- Validation: the level-wise form against the published CMIP6 AWI-CM-1-1-LR
+  output (data-gated `tests/test_fesom14_published_lr.py`, directory from
+  `KELP_TEST_FESOM14_DATA`): mesh recovery, the absolute time axis, first-step
+  velocities against hand values, the w sign, PCHIP in time. The raw form and
+  the ASCII mesh are checked against FESOM 1.4's description of its formats
+  and by a round trip on real geometry (the published mesh and fields written
+  in those forms give bit-identical trajectories), not against real raw
+  output. Example: `examples/config_fesom14_levelwise.yaml`; I/O cost on that
+  mesh: `benchmarks/single_node/fesom14_lr_cost.md`.
+- `cftime` is a declared runtime dependency (it was installed with `netCDF4`
+  already).
+
+### Changed
+
+- `kelp info` opens the data as a run does, for every reader: `data.ncinput`
+  together with `data.ncinput_v` / `data.ncinput_w` (before, `ncinput` only),
+  the stamp options, and the reader's `prepare` checks against the mesh. It no
+  longer imports the tracking loop: the helpers it shares with a run
+  (`_prepare_dataset`, `_time_option_kwargs`, `_describe_record_times`) moved
+  from `tracking.py` to `readers/__init__.py`, and `tracking` imports them
+  under the same names.
+- `VelocityField` checks the rows of a 3-D `u`/`v` against `w`: layer data must
+  carry `K-1` rows (one per layer). A FESOM2 dataset whose u/v carry `K` rows
+  (on the levels) now raises in the constructor instead of running on the first
+  `K-1` rows.
+- `mode.max_levels` keeps the uncut level table (`mesh.metadata["sigma_full"]`)
+  and cuts from it, so a mesh used again with another limit gets that limit;
+  `run_single_realization` re-applies the limit to a mesh cut this way before
+  (also for runs without the option).
+- A HEALPix 3-D mesh load for a depth-linear run (dual geometry,
+  `mode.uv_vertical: linear`) reads the first record of `u` once more, down every
+  column, to declare the u data prefix; other loads do not.
+
 ### Documentation
 
 - The per-module notes of `CLAUDE.md` (the module details and the import graph)

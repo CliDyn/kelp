@@ -8,7 +8,8 @@
 > docs `velocity_interpolation.md`, `vertical.md`, `field_sampling.md`,
 > `diffusion.md`); config keys (see `configuration.md`).
 > **Code:** `src/kelp/numerics/interpolate.py`,
-> `src/kelp/numerics/vertical.py`, `src/kelp/core/mesh.py`.
+> `src/kelp/numerics/vertical.py`, `src/kelp/numerics/vertical_uv.py`,
+> `src/kelp/core/mesh.py`.
 > **Verified at:** see `docs/doc_map.yaml` (stamped via check_doc_sync --bless).
 
 This document is the formula-level reference for every interpolation the tracker
@@ -78,7 +79,7 @@ sphere** whose poles sit far from any ocean point:
   precision (validated against `fesom.mesh.diag.nc`).
 - `[α, β, γ]` — a custom 3-list of Euler angles in degrees.
 
-It is supported on FESOM2 and HEALPix (fesomc/nemo reject it). The FESOM-C reader **rejects** `mesh.rotation` with a
+It is supported on FESOM2, HEALPix and FESOM 1.4 (fesomc/nemo reject it). The FESOM-C reader **rejects** `mesh.rotation` with a
 `ValueError` (FESOM-C is a coastal model with no near-pole use case and no
 vector-rotation path). **Both** readers emit a one-time `RuntimeWarning` when the
 mesh reaches `max|lat| > 88°` while rotation is OFF; the FESOM2 message recommends
@@ -190,7 +191,8 @@ fit** over element centres (below), the default path; the
 **barycentric** containing-element vertex blend (§1.1); or the **edge-neighbor
 least-squares** fit over the containing element and its edge-sharing neighbors
 (§1.2, FESOM-style). All run in 2D and 3D (in
-3D each particle uses its own vertical layer to slice the field first). The
+3D each particle uses its own vertical layer to slice the field first, or,
+for a field linear in depth, reads each member at its depth, §1.3). The
 registry `numerics.interpolate.get_interpolator(name)` resolves the config name to
 the vectorised interpolator and `get_interpolator_single` to the single-particle
 twin (the single-point API for tests and direct callers; RK stage loops use the
@@ -448,6 +450,62 @@ cheap path. Combined em/m1 diffusion fails fast when
 vectorised wrapper `interp_edge_leastsq` (+ `_loop_interp_edge_lsq` /
 `_loop_interp_edge_lsq_3d`), single-particle entry
 `interp_edge_leastsq_single`; adjacency `core.mesh.build_elem_neighbors`.
+
+### 1.3 Depth-linear `u`/`v` in the vertical (`mode.uv_vertical: linear`)
+
+By default a 3-D layer-centred `u`/`v` is piecewise constant in depth: every
+member of the stencil (a vertex, or an element) reads the row of the
+particle's layer. A depth-linear field (`VelocityField.uv_vertical`
+`"layer_linear"` — what `mode.uv_vertical: linear` makes of layer data — or
+`"level"`) is evaluated by `barycentric` on node layout (§1.1) and by
+`leastsq`, `edge_leastsq` (§1.2) and `barycentric` on element layout, each
+member `c` (a vertex `i` or an element `e`) at the particle depth `z`
+(positive-down metres):
+
+$$ z_c = \max\big(p_0,\ \min(z,\ p_{\ell_c})\big), \qquad
+f_c(z) = (1-\alpha)\,f_{k,c} + \alpha\,f_{k+1,c}, \qquad
+\alpha = \frac{z_c - p_k}{p_{k+1} - p_k}, $$
+
+with `p_k <= z_c < p_{k+1}`, and `f_c = f_{k,c}` read directly when `z_c` is on
+a point or at an end (of two coincident points the deeper — except at
+the surface end: at or above `p_0` point 0 is read even when point 1
+coincides with it; a spacing `< 1e-12 m` reads `p_k`, the shallower). The data points `p` are the layer
+centres `(z_k + z_{k+1})/2` (`"layer_linear"`, `K-1` points) or the levels
+(`"level"`, `K` points, node layout only). `ℓ_c` is the column's last usable
+point: per node
+
+$$ \ell_i = \max\Big(0,\ \min\big(M-1,\ \max(\{k : \mathrm{lower}_k \le d_i\} \cup \{0\}),\ D_i\big)\Big), $$
+
+`lower_k = p_k` for levels, `z_{k+1}` (the layer's lower level) for layers, `d_i`
+the node's bed depth and `D_i` an optional reader declaration; per element
+`ℓ_e = max(0, min(M-1, D_e))`, `D_e` the element's last wet layer that the
+FESOM2 reader declares from the mesh diagnostic (`vertical.md` §2.1).
+Points below `ℓ_c` are never read. On a sigma mesh (FESOM-C) `z` is the
+sigma fraction `s = z/H_p ∈ [0, 1]` of the particle's column, the points are
+the sigma layer centres `p_k = 1 − (σ_k + σ_{k+1})/2`, and `ℓ_c = M − 1`,
+`d_c = +∞` for every column (every member wet).
+
+A member is wet while `z <= d_c`, its physical bed (a node's `mesh.depth`, an
+element's declared bed). The wet members enter the interpolator of §1 with
+the values `f_c(z)`: node layout `U = time_dir · Σ_i λ_i⁺ f_i(z) / Σ_i λ_i⁺`
+over the wet vertices, `λ_i⁺ = max(λ_i, 0)` when a vertex is dry (a particle
+just outside an edge, which containment accepts, has a slightly negative
+weight; the result stays between the wet values), `λ_i` itself when every
+vertex is wet (`Σ_i λ_i = 1`: the plain blend of §1.1); element layout the
+plane fit of §1 over the wet ring elements, the fit of §1.2 with a dry edge
+neighbour replaced by a boundary ghost, or the vertex blend of §1.1 over vertex
+means of the wet elements (a vertex without one left out, the same `λ⁺`). A
+dry member is left out as the coast is; the fallbacks when the wet members
+cannot support the fit, or none is wet, are in `vertical.md` §2.1. In
+time-interpolated runs each stored value `f_{k,c}` is first blended in time
+(linear or PCHIP, §6), then this rule applies.
+
+**Code:** `numerics.vertical_uv.depth_points` (`p`, `ℓ`, the bed), `uv_bracket`
+(`k`, `α`), `uv_at`, `uv_wet`; node layout
+`numerics.interpolate._interp_barycentric_core_dl` and its fused time-blend
+twins `_interp_barycentric_core_{tinterp,pchip4}_dl`; element layout
+`_interp_leastsq_core_dl`, `_interp_edge_leastsq_core_dl`,
+`_interp_bary_elem_core_dl` and their shared fallback `_dl_elem_wet_mean`.
 
 ## 2. Vertical `W` profile — linear between interfaces
 

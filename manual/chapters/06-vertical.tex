@@ -3,10 +3,11 @@
 In a three-dimensional run the particle also moves vertically, driven by the model vertical velocity
 $\Wvel$. This chapter describes the sign convention of $\Wvel$ and how each reader establishes it,
 how the depth coordinate is organized for the two vertical-coordinate families, how the layer
-containing a particle is found, how $\Wvel$ is interpolated to the particle in the vertical and then
+containing a particle is found, how the horizontal velocity is read in depth --- per layer or linearly
+between its data points --- how $\Wvel$ is interpolated to the particle in the vertical and then
 in the horizontal, how a step advances the depth on a terrain-following mesh, and how a particle is
-held within the water column. The two families are the fixed depth levels (z-levels) of FESOM2 and of
-the HEALPix products, and the terrain-following sigma coordinate of FESOM-C; they are implemented by
+held within the water column. The two families are the fixed depth levels (z-levels) of FESOM2, FESOM~1.4
+and the HEALPix products, and the terrain-following sigma coordinate of FESOM-C; they are implemented by
 \emph{separate} routines throughout, and we give each explicitly. Depth $\depx$ and vertical velocity
 $\Wvel$ are positive downward (\cref{sec:intro-conv}). On a z-level mesh the vertical position update
 is
@@ -67,7 +68,9 @@ HEALPix and FESOM-C readers; the key \conf{mode.w\_positive} is validated in \sr
 The two families are distinguished only by how an interface depth is obtained, but the difference
 propagates through every routine below. For the \emph{z-level} family the interface depths are a
 fixed array $z_0=0<z_1<\dots<z_{K-1}$, the same at every horizontal location; the per-node sea floor is
-the separate array \code{depth}. FESOM2 meshes carry the levels in the mesh file. A HEALPix product
+the separate array \code{depth}. FESOM2 meshes hold the levels in the mesh file. FESOM~1.4 meshes take
+them from \code{nod3d.out} or from the depth coordinate of level-wise data, and their per-node floor is
+the depth of each column's last wet level (\cref{sec:mesh-fesom14}). A HEALPix product
 takes them from \conf{mesh.levels} --- the path of a level table or an inline list of depths, required to
 be strictly increasing --- or from the table a regional extract embeds; its per-node floor comes from
 a bathymetry variable when the store has one, otherwise from the deepest level with finite data. For
@@ -82,9 +85,10 @@ $\sigma=0$ maps to $z=H$ (the floor). The key \conf{mode.max\_levels} keeps the 
 \conf{max\_levels} interfaces of either family.
 
 \codenote{The FESOM2 NetCDF and Zarr loaders store the z-levels positive down; the
-\code{mesh.z\_levels} property takes the absolute value once more. Three-dimensional runs on the legacy
-ASCII mesh format are unsupported: its level reader takes the whole \code{aux3d.out} file, node depths
-included, as the level table. For sigma meshes the orientation $\sigma=1$ (surface) to $\sigma=0$ (floor) is
+\code{mesh.z\_levels} property takes the absolute value once more. Three-dimensional runs on FESOM2's
+legacy ASCII mesh format are unsupported: its level reader takes the whole \code{aux3d.out} file, node depths
+included, as the level table. (The FESOM~1.4 reader reads its own, different \code{aux3d.out} format
+correctly, \cref{sec:mesh-fesom14}.) For sigma meshes the orientation $\sigma=1$ (surface) to $\sigma=0$ (floor) is
 assumed by \cref{eq:sigma} but is \emph{not} validated when the mesh is read: a file written with the
 opposite ordering would silently invert the column.}
 
@@ -111,6 +115,318 @@ families at the deepest layer, not merely a difference in formulae.
 z-level) and \fn{find\_layer\_sigma}/\fn{find\_layers\_sigma} (\srcfile{numerics/vertical\_sigma.py},
 sigma, with the particle column passed as \code{H\_particle}); the per-particle layer index is
 assembled by \fn{\_compute\_layers} (\srcfile{numerics/integrators.py}).}
+
+\section{Horizontal velocity in depth: layers or linear}\label{sec:vert-uvdepth}
+
+The horizontal velocity of a three-dimensional run is stored at a few discrete depths per column,
+and the engine offers two rules for reading it in between, selected by \conf{mode.uv\_vertical}.
+Most producers write $u$ and $v$ once per layer, at the layer centre: the FESOM2 node fields
+\code{unod}/\code{vnod} and element fields \code{u}/\code{v}, the HEALPix \code{uo}/\code{vo}, and the
+FESOM-C \code{u}/\code{v} on its sigma layers, $K-1$ rows each. Under the default, \conf{layer}, the
+velocity is \emph{piecewise constant in depth}: every member of the horizontal stencil of \cref{ch:hvel}
+--- a vertex or an element --- reads the row of the particle's layer, found by the rule of
+\cref{sec:vert-layer} in the nearest node's column (on a sigma mesh, in the particle's own column), so a
+particle that crosses a level sees the velocity jump. Under \conf{linear} the same data are read
+\emph{linearly in depth} between the layer centres, and every member is read in its own column. FESOM~1.4
+writes $u$ and $v$ on the levels themselves, and its fields are always read linearly in depth. Inside the
+engine the rule is a property of the field, its \emph{placement} \code{VelocityField.uv\_vertical}, with the
+three values of \cref{tab:vert-uv-placement}. This section gives the rule, the treatment of a stencil
+member whose sea floor lies above the particle, its form on sigma meshes and for FESOM~1.4, and the
+combinations the engine refuses.
+
+\begin{table}[t]
+\centering\footnotesize\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{27mm}>{\raggedright\arraybackslash}p{24mm}>{\raggedright\arraybackslash}p{46mm}>{\raggedright\arraybackslash}p{40mm}@{}}
+\toprule
+placement & rows of $u$, $v$ & data points $p_k$ (positive down) & set by \\
+\midrule
+\code{"layer"} & $K-1$ & none: one value per layer & every reader; the default \\
+\code{"layer\_linear"} & $K-1$, node or element layout & the layer centres $\tfrac12(z_k+z_{k+1})$; on a sigma mesh $1-\tfrac12(\sigma_k+\sigma_{k+1})$, in the sigma fraction & \conf{mode.uv\_vertical: linear}; the tracking layer marks every field it reads \\
+\code{"level"} & $K$, node layout & the levels $z_k$ & the FESOM~1.4 reader; the option is refused there \\
+\bottomrule
+\end{tabular}
+\caption{The three placements of the horizontal velocity in depth. Only \code{"layer"} is piecewise
+constant; the other two are read by the depth-linear rule of this section.}
+\label{tab:vert-uv-placement}
+\end{table}
+
+\paragraph{The data-point table.} For a depth-linear field the engine builds, once per mesh, placement
+and layout, a table of the data points $p_0\le p_1\le\dots\le p_{M-1}$ ($M=K$ for levels, $M=K-1$ for
+layer centres) and, for every \emph{column} $c$ --- a node for node-layout fields, an element for
+element-layout fields --- two numbers: the index $\ell_c$ of its \emph{last usable point}, the deepest
+point it may be read at, and its \emph{bed} $d_c$, the physical depth of its sea floor. For a node $i$,
+\begin{equation}\label{eq:vert-uv-last}
+  \ell_i = \max\Bigl(0,\ \min\bigl(M-1,\ \max(\{k : l_k\le d_i\}\cup\{0\}),\ D_i\bigr)\Bigr),
+\end{equation}
+where $l_k=p_k$ for level data and $l_k=z_{k+1}$, the layer's \emph{lower} level, for layer data;
+$d_i$ is the node's bed \code{mesh.depth}, and $D_i$ an optional declaration by the reader of the last
+finite point of its own data column (\code{mesh.metadata["uv\_data\_last"]}). For layer data this is the
+rule of the layer search (\cref{sec:vert-layer}): a \emph{partial bottom layer}, one whose lower level lies
+below the bed, is never read. The HEALPix reader declares where each column's $u$ data end when the mesh
+is loaded for a run with the option, and the FESOM~1.4 reader declares each column's last wet level; $D_i=-1$ means ``the surface only'', and the
+surface value must then be finite. A NaN bed matches no level, which gives $\ell_i=0$; an infinite bed
+follows the formula as written ($+\infty$ keeps every point, $-\infty$ the surface point only). For an
+element $e$ the node depths cannot tell where its water ends --- FESOM2 fixes the number of levels of each
+element first and gives a node the deepest of its elements --- so the element table takes both numbers
+from the reader: $\ell_e=\max(0,\min(M-1,D_e))$ with $D_e$ the element's last wet layer
+(\code{uv\_data\_last\_elem}), and $d_e$ its bed (\code{elem\_bed}), which the FESOM2 reader derives from
+the mesh diagnostic (\cref{sec:mesh-elem-bottoms}). A \conf{mode.max\_levels} cut caps every $\ell_c$ at
+the last kept point and leaves the bed unchanged. Points below $\ell_c$ are \emph{never read}, not even
+multiplied by zero, so dry or fill values stored there are harmless.
+
+\codeanchor{The table is \fn{depth\_points} with the frozen dataclass \fn{DepthPoints} (fields \code{p},
+\code{last}, \code{bed}) and the builder \fn{\_build\_depth\_points}, in \srcfile{numerics/vertical\_uv.py}.
+It is cached on the mesh per placement and layout and rebuilt whenever \code{mesh.sigma}, the bed array or
+the declaration is replaced; it is built from their values and keeps its own arrays, so a write into one of
+them in place after the first use is not seen (assign a new array).}
+
+\paragraph{Bracket and blend.} At a column $c$ and particle depth $z$ the depth is first clipped into the
+column's usable range, the bracketing points $p_k\le z_c<p_{k+1}$ (with $k+1\le\ell_c$) are found, and
+the stored values $f$ ($u$ or $v$) are blended:
+\begin{equation}\label{eq:vert-uv-blend}
+  z_c = \max\bigl(p_0,\ \min(z,\ p_{\ell_c})\bigr),\qquad
+  f_c(z) = (1-\interpfrac)\,f_{k,c} + \interpfrac\,f_{k+1,c},\qquad
+  \interpfrac = \frac{z_c-p_k}{p_{k+1}-p_k}.
+\end{equation}
+Above the first point and below the last usable point the value of that point is used: the ends are
+constant, and nothing is extrapolated. A depth exactly on a point, at either end, or in a degenerate
+interval (a spacing below $10^{-12}$) reads the point directly, without touching its neighbour; of two
+coincident points the deeper one is read, except at the surface end, where a depth at or above $p_0$
+reads point~0. Single-precision data are widened to double precision before the blend. Because the
+bracket depends only on the column's own $\ell_c$, a member whose last usable point lies above the
+particle --- a partial bottom layer, a \conf{max\_levels} cut, a declared prefix that ends above the bed ---
+contributes the value of that point, provided it holds water at $z$ (\cref{fig:vert-uv}).
+
+\codeanchor{\fn{uv\_bracket} returns $(k,\interpfrac)$, with $\interpfrac<0$ meaning ``read point $k$
+directly'', and \fn{uv\_at} applies \cref{eq:vert-uv-blend}; both are compiled kernels in
+\srcfile{numerics/vertical\_uv.py}.}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.15]
+  % levels z_0..z_5
+  \foreach \y in {0,-0.8,-1.6,-2.4,-3.2,-4.0} \draw[interface] (0.1,\y)--(5.75,\y);
+  \node[font=\footnotesize,left] at (0.1,0) {$z_0=0$};
+  \node[font=\footnotesize,left] at (0.1,-0.8) {$z_1$};
+  % beds: a thick floor segment and hatching below each column
+  \foreach \x/\b in {0.8/-4.0,3.4/-1.9,5.0/-2.95}{
+    \fill[pattern=north east lines,pattern color=gray!45] (\x-0.42,\b) rectangle (\x+0.42,-4.35);
+    \draw[laggreen,line width=1.0pt] (\x-0.42,\b)--(\x+0.42,\b);
+    \draw[gray!60] (\x,0)--(\x,\b);
+    \node[meshnode] at (\x,0) {};}
+  \node[font=\footnotesize,align=center,anchor=south] at (0.8,0.08) {vertex $A$\\wet};
+  \node[font=\footnotesize,align=center,anchor=south] at (3.4,0.08) {vertex $B$\\dry at $z$};
+  \node[font=\footnotesize,align=center,anchor=south] at (5.0,0.08) {vertex $C$\\wet};
+  % data points (layer centres) down to each column's last usable point
+  \foreach \y in {-0.4,-1.2,-2.0,-2.8,-3.6} \node[uvpoint] at (0.8,\y) {};
+  \foreach \y in {-0.4,-1.2} \node[uvpoint] at (3.4,\y) {};
+  \foreach \y in {-0.4,-1.2,-2.0} \node[uvpoint] at (5.0,\y) {};
+  \node[uvpointopen] at (5.0,-2.8) {};
+  \node[font=\footnotesize,left] at (0.68,-0.4) {$p_0$};
+  \node[font=\footnotesize,left] at (0.68,-2.0) {$p_k$};
+  \node[font=\footnotesize,left] at (0.68,-2.8) {$p_{k+1}$};
+  % the particle depth
+  \draw[gray!60,densely dotted,line width=0.7pt] (0.1,-2.62)--(5.75,-2.62);
+  \node[drifter] at (2.5,-2.62) {};
+  \node[font=\footnotesize,kelp!70!black,anchor=north] at (2.5,-2.74) {depth $z$};
+  % A: the bracket
+  \draw[<->,gray!80] (1.1,-2.0)--(1.1,-2.62) node[midway,right,font=\scriptsize,text=black]{$\interpfrac\,(p_{k+1}-p_k)$};
+  % B: a wall at this depth
+  \node[kelp!80!black,font=\large] at (3.4,-2.62) {$\times$};
+  \node[font=\scriptsize,fill=white,inner sep=1pt,align=center] at (3.4,-3.6) {bed above $z$:\\a wall};
+  % C: clipped to its last usable point
+  \draw[-{Stealth[length=4pt]},lagnode,line width=0.8pt] (5.0,-2.62)--(5.0,-2.1);
+  \node[font=\scriptsize,anchor=west] at (5.12,-2.15) {reads $p_{\ell_C}$};
+  \node[font=\scriptsize,anchor=west] at (5.12,-2.79) {partial layer, never read};
+  % what each column contributes
+  \node[font=\scriptsize,anchor=north] at (0.8,-4.42) {$(1-\interpfrac)f_{k}+\interpfrac f_{k+1}$};
+  \node[font=\scriptsize,anchor=north] at (3.4,-4.42) {left out};
+  \node[font=\scriptsize,anchor=north] at (5.0,-4.42) {$f_{\ell_C}$};
+  % depth axis
+  \draw[-{Stealth[length=5pt]},gray] (-0.85,0.05)--(-0.85,-4.2);
+  \node[gray,rotate=90,anchor=south,font=\footnotesize] at (-1.0,-2.1){depth (positive down)};
+\end{tikzpicture}
+\caption{The depth-linear rule at one particle (star, depth $z$) whose containing triangle has the
+vertices $A$, $B$, $C$, drawn as three columns side by side. Diamonds are the data points --- here layer
+centres between the levels (grey lines) --- down to each column's last usable point $p_{\ell_c}$; green
+segments are the beds. Vertex $A$ is wet at $z$ and blends its two bracketing points. The bed of $B$ lies
+above $z$, so $B$ is dry there: a wall, left out of the sum. Vertex $C$ is wet, but its bottom layer is cut
+by its bed (a partial layer, open diamond, never read), so it contributes the value of its last usable
+point. The node-layout result is $U=\tdir(w_A^{+}u_A+w_C^{+}u_C)/(w_A^{+}+w_C^{+})$
+(\cref{eq:vert-uv-bary}); for element layout the columns are the elements of the stencil, under the same
+rule.}
+\label{fig:vert-uv}
+\end{figure}
+
+\paragraph{Walls at depth.} A column is \emph{wet} at the particle depth when $z\le d_c$, with $d_c$ the
+node's \code{mesh.depth} --- the bed the end-of-step clamp of \cref{sec:vert-clamp} uses --- or the
+element's \code{elem\_bed}. A NaN particle depth is read as $+\infty$, the layer path's reading of a NaN
+depth, and is therefore dry wherever the bed is finite. A member whose bed lies above the particle is
+\emph{dry}, and it is treated as a wall, like the coast: it is left out of the interpolation. We emphasize
+that this is neither a zero velocity, which would brake every particle travelling along the wall, nor the
+dry member's bottom value read below its bed, which could accelerate it. Each interpolator applies the
+rule the way it treats the coast (\cref{tab:vert-uv-walls}). The node-layout barycentric scheme leaves a
+dry vertex out of the sum of \cref{eq:bary-blend} and renormalises the weights of the wet vertices,
+\begin{equation}\label{eq:vert-uv-bary}
+  U = \tdir\,\frac{\sum_{i\ \text{wet}} \bwt{i}^{+}\,u_i(z)}{\sum_{i\ \text{wet}} \bwt{i}^{+}},
+  \qquad \bwt{i}^{+}=\max(\bwt{i},0),
+\end{equation}
+where a negative weight --- a particle just outside an edge, which the containment test accepts down to
+$-10^{-6}$ --- is counted as zero, so the result stays a convex blend of the wet vertex values; $V$ is
+formed alike. The least-squares scheme leaves a dry element out of the plane fit \cref{eq:leastsq} over
+the nearest node's ring, as the elements beyond a coast are absent from a coastal node's ring. The edge
+least-squares scheme makes the edge to a dry neighbour a boundary edge, whose ghost \cref{eq:edge-ghost}
+is built from the own element's value at $z$, mirrored (free slip) or negated (no slip); with no slip a wall
+at depth therefore brakes the flow as the coast does. The element-layout barycentric scheme leaves a dry
+element out of each vertex's area-weighted mean, and a vertex without a wet element out of the sum, the
+weights of the others renormalised as in \cref{eq:vert-uv-bary}.
+
+When every member is wet, the result is exactly the layer interpolator's arithmetic --- metric, summation
+order and singular guard --- applied to the depth-linear values $f_c(z)$; a fit that is singular with every
+member wet, such as a coastal ring, still fails the particle as in layer mode. Fallbacks apply only when
+at least one member is dry, and only in three situations. First, when the wet members cannot support the
+interpolator, the least-squares scheme (fewer than three wet elements, or a singular fit over them --- one
+or two wet elements in a narrow trench, where the fit would otherwise fail and freeze the particle) and
+the edge least-squares scheme (a singular fit over the own element and its wet neighbours) take the
+area-weighted mean of the wet members, $\sum_e A_e f_e(z)/\sum_e A_e$, with the element areas of
+\cref{sec:hvel-quad}; the barycentric scheme, in either layout, takes the equal-weight mean of the
+remaining vertex values when their weights sum below $10^{-12}$ (the particle on a left-out vertex).
+Second, when no member is wet --- possible, because the end-of-step clamp uses the nearest node's bed
+only --- the node-layout scheme reads the vertex with the largest bed (the first on ties) and the element
+schemes read the containing element, each at its last usable point; the least-squares scheme, whose ring
+does not need the containing element, searches for it in this case only --- a particle outside the mesh
+fails, and a containing element that the search finds outside the ring and wet at $z$ is read at $z$. Third, when the containing element of the edge least-squares scheme is itself dry, the scheme
+takes the area-weighted mean of its wet edge neighbours, without ghosts, and with none wet the containing
+element at its last usable point.
+
+\begin{table}[t]
+\centering\footnotesize\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{24mm}>{\raggedright\arraybackslash}p{40mm}>{\raggedright\arraybackslash}p{38mm}>{\raggedright\arraybackslash}p{34mm}@{}}
+\toprule
+interpolator & a dry member & wet members insufficient & no member wet \\
+\midrule
+\conf{barycentric}, node layout & vertex left out; wet weights renormalised, negative ones as zero & weights sum $<10^{-12}$: equal-weight mean of the wet vertices & the vertex with the largest bed, at $p_{\ell}$ \\
+\conf{leastsq} & element left out of the ring fit & fewer than three wet, or a singular fit: area-weighted mean of the wet elements & the containing element (searched), at $p_{\ell}$ \\
+\conf{edge\_leastsq} & its edge a boundary edge with the \conf{edge\_leastsq\_bc} ghost & a singular fit: area-weighted mean of the wet members; the own element dry: of its wet neighbours & the containing element, at $p_{\ell}$ \\
+\conf{barycentric}, element layout & element left out of each vertex mean; a vertex without one left out & weights sum $<10^{-12}$: equal-weight mean & the containing element, at $p_{\ell}$ \\
+\bottomrule
+\end{tabular}
+\caption{The wall rule and its fallbacks per interpolator. With every member wet none of the three
+right-hand columns applies and the result is the layer interpolator's arithmetic on the depth-linear
+values.}
+\label{tab:vert-uv-walls}
+\end{table}
+
+The velocity therefore jumps where a particle crosses the depth of a neighbour's bed, because that member
+leaves or enters the stencil --- the analogue of the jump at a layer interface in layer mode. Near the bed
+the two rules differ by more than the vertical interpolation. Layer mode reads every member in the row of
+the nearest node's layer, a vertex or an element shallower than that layer included; FESOM2 files store
+zeros there, so a shallow neighbour pulls the velocity --- for the least-squares scheme, the fitted plane
+--- towards zero. Linear mode leaves that member out. For instance, a uniform flow along a trench, below
+the bed of the shelf beside it, keeps its speed in linear mode and is slowed in layer mode
+(\cref{sec:val-depth-linear}).
+
+\paragraph{Time and stages.} In a time-interpolated run every stored value is first blended in time
+(linear or PCHIP, \cref{ch:temporal}), then read in depth by \cref{eq:vert-uv-blend}, and then combined
+horizontally. PCHIP is not linear, so this order is part of the contract: the fused kernels follow it and
+agree bit for bit with the unfused path, which materializes the time blend first. A dry member is never
+read, not even blended in time. Every Runge--Kutta stage reads the horizontal velocity at its own stage
+depth --- Euler at the step-entry depth, RK2 at the entry and the midpoint depth, RK4 at its four stage
+depths --- before any clamp: a stage below a member's bed meets that wall, a stage below every bed of its
+stencil takes the no-member-wet fallback, and a stage above the surface reads $p_0$ everywhere.
+
+\codeanchor{\raggedright The node-layout core is \fn{\_interp\_barycentric\_core\_dl} with the wall rule
+\fn{\_dl\_node\_wall}; the element-layout cores are \fn{\_interp\_leastsq\_core\_dl},
+\fn{\_interp\_edge\_leastsq\_core\_dl} and \fn{\_interp\_bary\_elem\_core\_dl}, which share the fallback
+\fn{\_dl\_elem\_wet\_mean}; the wet test is \fn{uv\_wet} (\srcfile{numerics/vertical\_uv.py}). The fused
+twins are \fn{\_fused\_euler\_step\_3d\_dl} (element layout, least squares, Euler) and
+\fn{\_fused\_rk2\_step\_3d\_bary\_tinterp\_dl} and \fn{\_fused\_rk2\_step\_3d\_bary\_pchip\_dl} (node
+layout, RK2, linear and PCHIP in time), in \srcfile{numerics/integrators.py}, with the time-blend vertex
+cores \fn{\_interp\_barycentric\_core\_tinterp\_dl} and \fn{\_interp\_barycentric\_core\_pchip4\_dl}.
+Element-layout RK2 and RK4 run unfused, as in layer mode.}
+
+\paragraph{Sigma meshes.} A sigma column has the same layers everywhere, stretched to its own height, so
+on a FESOM-C mesh the coordinate of the rule is the particle's \emph{sigma fraction} rather than its
+depth --- the fraction of \cref{eq:vert-sigma-frac}, written $s$ here as in the code --- and the data points
+are the layer centres in that fraction:
+\begin{equation}\label{eq:vert-uv-sigma}
+  s = \min\bigl(\max(z/H_p,\,0),\,1\bigr),\qquad p_k = 1-\tfrac12(\sigma_k+\sigma_{k+1}),\quad k=0,\dots,K-2,
+\end{equation}
+with the interfaces at $s_k=1-\sigma_k$ (0 at the surface, 1 at the bed). Only \code{"layer\_linear"}
+data are served, on either layout. Every layer of every column holds water, so the table reads no
+bathymetry, no declaration and no element bottom: $\ell_c=M-1$ and $d_c=+\infty$ for every column.
+Every member is therefore wet at every $s$; there are no walls at depth and none of their fallbacks, and
+the record check below requires every layer of every column to be finite. Every member is read at the
+particle's $s$, that is, along the sigma surface through the particle --- as the vertical velocity is
+(\cref{fig:vert-sigma}) and as layer mode reads every member in the row of the particle's sigma layer.
+Each Runge--Kutta stage takes its $s$ from its own position, time and column: the integrators hand the
+interpolator $s=\min(\max(z_{\text{stage}}/H_p(\pos_{\text{stage}},t_{\text{stage}}),0),1)$, with $H_p$
+interpolated at the stage position from the stage's surface elevation (Euler at the entry, RK2 at the
+entry and the midpoint, RK4 at all four stages), and keep metres for the vertical velocity, its layers
+and the depth clamp. A NaN fraction is read as $+\infty$, that is, the bottom centre, and a
+\conf{max\_levels} cut keeps the first interfaces from the surface, so every column reads down to the last
+kept centre. On a sigma mesh ``exact'' means exact for a field linear in $s$. On a flat bed that is also
+linear in $z$; on a sloping bed, however, a field linear in $z$ is not claimed, since sigma data cannot
+represent it exactly under either rule.
+
+\codeanchor{The sigma branch of \fn{\_build\_depth\_points} (\srcfile{numerics/vertical\_uv.py}); the
+stage fraction is \fn{\_sigma\_frac\_for\_uv} with the stage column \fn{\_sigma\_col\_H}, in the sigma
+branches of the unfused steps of \srcfile{numerics/integrators.py}. The sigma path stays unfused, as in
+layer mode (\cref{ch:fused}).}
+
+\paragraph{FESOM~1.4: velocities on the levels.} FESOM~1.4 is a P1 finite-element model: $u$, $v$, $\Wvel$,
+temperature and salinity share the same three-dimensional nodes, which sit on the levels, and vary
+linearly over the tetrahedra of its three-dimensional mesh. Its reader returns $u$ and $v$ with $K$ rows,
+on the levels, in node layout and with the placement \code{"level"}, so every three-dimensional run on
+FESOM~1.4 output is depth-linear between the levels, down to each column's last wet level, which the
+reader declares as $D_i$ in \cref{eq:vert-uv-last}. The option \conf{mode.uv\_vertical: linear} is refused
+for it, with the advice to remove the option. The engine does not interpolate on the model's tetrahedra:
+it combines the barycentric weights of the surface triangle with the linear profile in depth of each
+vertex's own column. The two agree on the levels and along each node's column. Inside the prism between
+two levels they differ: the model's field is linear within each tetrahedron, whereas the engine's is
+barycentric at every depth and linear in depth at every position, so it holds products of the two. We
+therefore call it a \emph{prism-wise approximation} of FESOM~1.4's own interpolation. The vertical
+velocity of FESOM~1.4 is also stored on the levels, which serve as the interfaces of
+\cref{sec:vert-wprofile}.
+
+\paragraph{The record check.} Every record a run reads with a depth-linear field is checked once, when the
+run stores it: a non-finite $u$ or $v$ at a point $k\le\ell_c$ of any column stops the run, and the message
+names the component, the node or element, the point and the record. The time blends of
+\cref{ch:temporal}, the interpolators and the step functions use the checked records and do not check
+again. Points below $\ell_c$ may hold anything. With the option the HEALPix reader checks the raw record before it zeroes
+missing values, so a surface mask that drifts between records is refused rather than zeroed.
+
+\paragraph{Refusals.} The option \conf{linear} is refused for two-dimensional tracking
+(\conf{Fdrift3D: false}); for a mesh that is neither z-level nor sigma; for an interpolator outside the
+layout's row --- node layout takes \conf{barycentric} only, element layout \conf{leastsq},
+\conf{edge\_leastsq} or \conf{barycentric}; for the \conf{rk45} integrator, which is two-dimensional only
+(the step's entry gate refuses a depth-linear field for it as well); for a reader whose $u$ and $v$ sit
+on the levels (FESOM~1.4); for element-layout data on a z-level mesh without element bottoms (a mesh
+diagnostic with neither \code{nlevels} nor \code{zbar\_e\_bottom}, an ASCII mesh directory, or a region
+extracted before the extraction tool kept them, \cref{sec:mesh-elem-bottoms}); and for element-layout data
+on a mesh with ice-shelf cavities (\code{ulevels}${}>1$ anywhere). Ice-shelf cavities are not supported in
+the code yet and are planned. Every one of these refusals comes before the output file exists: the value of
+the key and the two-dimensional case when the configuration is loaded; the mesh type, the interpolator and
+the reader right after the mesh is loaded; the layout and the element bottoms at the metadata-only probe
+that precedes the writer (\cref{sec:hvel-leastsq}).
+A bad record is refused when it is read. A field already marked depth-linear that reaches a run with the
+option off is refused too, and so are the fields of one step whose placements differ. A run with the option
+on a HEALPix mesh loaded without it (no declaration) is refused at its first record: the mesh must be loaded
+with the run's mode configuration, as \fn{run\_tracking} and the command line do.
+
+\codeanchor{\raggedright The key is validated in \srcfile{core/config.py}; \fn{\_check\_uv\_vertical\_option} (after the mesh load), \fn{\_validate\_uv\_compat} and
+\fn{\_check\_linear\_element\_mesh} (the pre-writer probe), and \fn{\_mark\_depth\_linear}, which marks
+every field the velocity cache stores, in \srcfile{tracking.py}; \fn{refuse\_elem\_cavities} and
+\fn{check\_depth\_linear\_record} in \srcfile{numerics/vertical\_uv.py}; the step-entry gate
+\fn{\_check\_depth\_linear\_entry} in \srcfile{numerics/integrators.py}.}
+
+\paragraph{Exactness.} Where every member is wet the rule reproduces the layer answer where it should:
+data uniform in depth give the layer result bit for bit wherever every member reads a data point directly,
+and between points within a few units in the last place of the largest member value (2 for node-layout
+barycentric, 4 for element-layout barycentric, 8 for the two least-squares schemes; absolute bounds,
+since member values of opposite sign may cancel). A field linear in depth is reproduced exactly between the
+first and the last centre of the columns read, and a smooth profile converges at second order in the
+layer thickness, layer mode at first order (\cref{sec:val-depth-linear}).
 
 \section{The vertical velocity profile}\label{sec:vert-wprofile}
 

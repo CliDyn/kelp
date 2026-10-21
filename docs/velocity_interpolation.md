@@ -2,7 +2,7 @@
 
 > **Covers:** how the horizontal `u`/`v` velocity at a particle is computed once its nearest node and containing element are known — the default least-squares plane fit (and why it is particle-centered), the barycentric/Wachspress vertex blend, and node- vs element-based velocity layouts.
 > **Does not cover:** finding the nearest node / containing element (see `localization.md`); the full weight formulas and normal-equation derivations (see `interpolation.md` §1, §1.1, §7); the vertical `W` velocity (see `vertical.md`); where the velocity layout is detected on input (see `io_and_time.md`, `configuration.md`).
-> **Code:** `src/kelp/numerics/interpolate.py:_interp_leastsq_core`, `src/kelp/numerics/interpolate.py:_interp_barycentric_core`, `src/kelp/numerics/interpolate.py:get_interpolator`.
+> **Code:** `src/kelp/numerics/interpolate.py:_interp_leastsq_core`, `src/kelp/numerics/interpolate.py:_interp_barycentric_core`, `src/kelp/numerics/interpolate.py:_interp_barycentric_core_dl`, `src/kelp/numerics/interpolate.py:_interp_leastsq_core_dl`, `src/kelp/numerics/interpolate.py:get_interpolator`.
 > **Verified at:** see `docs/doc_map.yaml` (stamped via check_doc_sync --bless).
 
 This document explains how the tracker turns a particle's position into a
@@ -222,6 +222,20 @@ and once as a step-0 backstop inside the realization loop for callers that
 bypass the probe. Where and how the layout is detected from the input files is
 covered in `io_and_time.md` and `configuration.md`.
 
+A **depth-linear** field (`uv_vertical` `"level"` or `"layer_linear"`, §7) is
+evaluated by the same layout rule: node layout (`"level"` or
+`"layer_linear"`) by `barycentric` only; element layout (`"layer_linear"`:
+FESOM2 or FESOM-C `u`/`v` with `mode.uv_vertical: linear`) by `leastsq`,
+`edge_leastsq` and `barycentric`. `leastsq` and `edge_leastsq` refuse a depth-linear node
+field with a `ValueError` naming the layout and the interpolator; the
+nearest-element read and every single-particle entry refuse any depth-linear
+field; both before reading any data. With the option on, the tracking layer
+checks the layout and the interpolator against that table at the same sites as
+above and once more at the entry of each realization, and, for element
+layout on a z-level mesh, that the mesh declares the element bottoms and has
+no ice-shelf cavities (`configuration.md`, `mode.uv_vertical`; a sigma mesh
+needs neither).
+
 
 ## 5. What is called when
 
@@ -230,7 +244,9 @@ substep, per alive particle (dead particles are skipped — see `localization.md
 §6). The call-flow depends on whether a fused Numba kernel is in play:
 
 - **Fused 2-D kernels** (Euler / RK2 / RK4 for 2-D tracking, and the fused 3-D
-  Euler kernel) **inline** `_interp_leastsq_core` directly. Two time-aware
+  Euler kernel) **inline** `_interp_leastsq_core` directly (a depth-linear
+  element field: the 3-D Euler twin `_fused_euler_step_3d_dl` inlines
+  `_interp_leastsq_core_dl`, §7). Two time-aware
   variants inline a sibling core that fits the same least-squares plane but
   blends the per-element value in time first: `_interp_leastsq_core_tinterp` (the
   two-snapshot linear blend) and `_interp_leastsq_core_pchip4` (the four-snapshot
@@ -277,4 +293,100 @@ search, compacted vertex ring, centroid-anchored dateline-safe metric
 projection, `_polygon_weights` — is byte-for-byte the untouched 2-D
 core's; the only difference is that every vertex read happens at the
 particle's mid-layer (`u[layer, node]`), because u/v are layer-piecewise
-in the vertical.
+in the vertical. A depth-linear field (§7) is read linearly in depth instead,
+by the `_dl` twins of these cores.
+
+## 7. Depth-linear horizontal velocity (`uv_vertical`, 2026-10)
+
+With `mode.uv_vertical: linear` the layer-centred u/v are linear in depth
+between the layer centres (a reader with level data, `uv_vertical =
+"level"` — the FESOM 1.4 reader — between the levels); the rule — the data
+points, each column's last usable point, constant ends, never a point below
+the bed, a stencil member dry at the particle depth as a wall — is in
+`vertical.md` §2.1, with the note that for FESOM 1.4 this
+barycentric-times-linear-in-depth reading is a prism-wise approximation of the
+model's own interpolation on tetrahedra. Every route below reads each particle
+at its own depth `state.z` (the `layer` argument is ignored) and trusts the
+values it receives: a run checks every record once
+(`check_depth_linear_record`), where it stores it. On a sigma mesh (FESOM-C)
+the routes are the same
+and `state.z` holds the stage's sigma fraction `s = clip(z / H_p, 0, 1)`,
+which the integrators put there; the table's points are the sigma layer
+centres in `s` and every column is wet to the bed (`bed = +inf`), so no member
+is ever a wall and no fallback runs (`vertical.md` §2.1, *Sigma columns*).
+
+**Node layout.** `interp_barycentric` hands such a field to
+`_interp_barycentric_dl` → `_loop_interp_bary_dl` →
+`_interp_barycentric_core_dl`. The geometry — containment,
+the elements hint of the edge walk, the compacted vertex ring, the
+centroid-anchored projection, `_polygon_weights` — is the node-layout
+`_interp_barycentric_core`'s; the vertex value differs: at vertex `nd`,
+`(k, α) = uv_bracket(p, last[nd], z)` and `u_nd = uv_at(u, nd, k, α)`
+(`src/kelp/numerics/vertical_uv.py`). A vertex whose bed lies above the
+particle (`z > bed[nd]`, `bed` = `mesh.depth`; `uv_wet`) is a wall, left out
+of the sum like the coast, and the weights of the wet vertices are
+renormalised (`_dl_node_wall`), a negative one (a particle just outside an
+edge, which containment accepts down to `-1e-6`) counted as zero so that the
+result stays a convex blend of the wet vertex values: their equal-weight mean
+when those weights sum below 1e-12; with no vertex wet, the vertex with the
+largest bed (the first on ties) at its last usable point; with every vertex
+wet, the plain sum — the arithmetic of the layer kernel (`vertical.md` §2.1).
+
+**Element layout** (`"layer_linear"`, FESOM2 or FESOM-C `u`/`v`). Each
+interpolator has its own route, on the element table `depth_points(mesh,
+"layer_linear", "element")` (the FESOM2 reader's element bottoms; on a sigma
+mesh none) and the element areas
+(`build_elem_areas`): `interp_leastsq` → `_interp_leastsq_dl` →
+`_loop_interp_leastsq_3d_dl` → `_interp_leastsq_core_dl`;
+`interp_edge_leastsq` → `_interp_edge_leastsq_dl` →
+`_loop_interp_edge_lsq_3d_dl` → `_interp_edge_leastsq_core_dl`;
+`interp_barycentric` → `_interp_barycentric_dl` (both layouts) →
+`_loop_interp_bary_elem_dl` → `_interp_bary_elem_core_dl`. Element `e` is
+read at `(k, α) = uv_bracket(p, last[e], z)`, `u_e = uv_at(u, e, k, α)`, and
+is wet while `z <= bed[e]` (`bed` = `mesh.metadata["elem_bed"]`). Each core
+keeps its layer core's geometry and arithmetic — the `leastsq` ring around
+the nearest node with its metric, antimeridian gate, summation order, Sarrus
+determinant and singular guard; the `edge_leastsq` containment, compacted
+ring, ghosts and guard; the element `barycentric` containment, projection,
+`_polygon_weights` and area-weighted vertex mean — and leaves dry members out
+as `vertical.md` §2.1 describes: out of the `leastsq` fit, a boundary edge
+with the `edge_leastsq_bc` ghost for `edge_leastsq`, out of each vertex mean
+(and a vertex without a wet element out of the sum, the weights of the others
+renormalised as for nodes, a negative one counted as zero) for `barycentric`.
+The fallbacks share one helper, `_dl_elem_wet_mean`: the area-weighted mean of
+the wet elements of a list and, when none of them is wet, one given element
+(the containing element) read at `z`; it also returns how many were wet.
+`edge_leastsq` and element `barycentric` take the edge walk's pre-validated
+elements (`elems=`) as their layer twins do; `leastsq` needs no containing
+element except in its no-member-wet fallback, where it searches one
+(`_find_containing_element_local`). The fused 3-D Euler kernel has a
+depth-linear twin, `_fused_euler_step_3d_dl`, which inlines
+`_interp_leastsq_core_dl` — bit for bit the unfused step. There is no
+fused element-layout RK2 or RK4 kernel in 3-D: their stages go through the
+vectorised interpolators above.
+
+The fused 3-D RK2 kernels (node layout) have depth-linear twins of their
+time-blend cores, `_interp_barycentric_core_tinterp_dl` and
+`_interp_barycentric_core_pchip4_dl`.
+Per vertex they blend every stored value they need in **time first** (the
+same expressions and endpoint shortcuts as the layer twins;
+`_tinterp_point_uv` widens each stored value to float64 before the blend),
+**then** apply the vertical rule to the blended values, **then** combine the
+vertices with the same walls at depth (a dry vertex is never read, not even
+blended in time) — bit for bit the unfused path, which materializes the time
+blend before `_interp_barycentric_core_dl`. PCHIP is not linear, so the order
+is part of the contract (the vertical-first result differs).
+
+Exactness: where every member is wet, depth-uniform depth-linear data
+reproduce the layer answer bit for bit wherever every member reads a data
+point directly (the depth on a point, or clipped at either end); between
+points each member value `(1 − α)·c + α·c` is within 1 ulp of `c`, and the
+combined velocity within 2 ulp of the largest vertex value for node
+`barycentric`
+(`tests/test_interp_depth_linear.py::test_depth_uniform_field_reproduces_layer_answer`),
+within 4 ulp for element `barycentric` (two levels of weighted means) and
+within 8 ulp for `leastsq` and `edge_leastsq` (plane fits) of the largest
+element value (`tests/test_interp_depth_linear_elements.py`) — absolute
+bounds: when member values of opposite sign cancel, the relative error of the
+result is unbounded. Where a member is dry the layer kernel still reads it and
+the two answers differ by design.

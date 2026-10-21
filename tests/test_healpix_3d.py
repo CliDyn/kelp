@@ -1,5 +1,6 @@
 """HEALPix 3-D tracking (Phase 4): interface convention, W wiring, T/S
-sampling, max_levels, self-contained 3-D extracts.
+sampling, max_levels, self-contained 3-D extracts; depth-linear u/v with
+walls at depth (``mode.uv_vertical: linear``).
 
 The ng5 conventions verified on the real store (closed
 2026-07-06): u/v sit on the K-1 layer mids with an all-NaN padding level K;
@@ -156,7 +157,7 @@ class TestCContiguity3D:
 
 class TestTracking3D:
     def _run(self, tmp_path, store, seeds, sample_vars=(), n_steps=2,
-             levels=LEVELS_M, meshpath=None):
+             levels=LEVELS_M, meshpath=None, uv_vertical="layer"):
         from kelp.tracking import run_tracking
         from kelp.writers import load_trajectories
         seeds_path = tmp_path / "seeds3d.txt"
@@ -166,7 +167,8 @@ class TestTracking3D:
         out = tmp_path / "traj3d.nc"
         cfg = AppConfig(
             mode=ModeConfig(Fdrift2D=False, Fdrift3D=True,
-                            sample_vars=list(sample_vars)),
+                            sample_vars=list(sample_vars),
+                            uv_vertical=uv_vertical),
             numerics=NumericsConfig(uv_interp="barycentric"),
             mesh=MeshConfig(type="healpix", meshpath=str(meshpath or store),
                             levels=levels),
@@ -282,6 +284,172 @@ class TestTracking3D:
                          sample_vars=["avg_thetao"])
         assert abs(traj["z"][0, -1] - 20.0) < 1e-9
         np.testing.assert_allclose(traj["avg_thetao"][0], 275.0)
+
+
+# ---------------------------------------------------------------------------
+# Depth-linear u/v (mode.uv_vertical: linear): walls at depth
+# ---------------------------------------------------------------------------
+
+DL_NSIDE = 8
+#: the layer centres of LEVELS_M: the depth-linear data points
+DL_CENTRES = (5.0, 20.0, 50.0)
+#: the particle depth, between the centres 20 and 50 m
+DL_Z = 40.0
+#: the bed of every column (the deepest level) unless a test sets another
+DL_BED = 70.0
+#: where the particle sits in the quad: these weights on its four
+#: vertices, in the mesh's cyclic order, in lon/lat (vertex 0 the nearest
+#: node, vertex 2, across the quad from it, the column a test changes)
+DL_LAMBDA = (0.4, 0.25, 0.2, 0.15)
+DL_SPECIAL = 2
+
+
+def _dl_u(k, lon, lat):
+    """u (m/s) of layer ``k`` at a cell: it varies across the cells and
+    with depth."""
+    return 0.06 + 0.004 * (lon - 40.0) - 0.003 * (lat - 15.0) + 0.02 * k
+
+
+def _dl_quad():
+    """A quad of the dual mesh near 40E 15N, its four vertices in the
+    mesh's cyclic order: their store cells (NEST) and coordinates."""
+    from kelp.readers.healpix import build_healpix_dual_mesh
+    _, lat = _pix_lonlat(DL_NSIDE, "nest")
+    mesh = build_healpix_dual_mesh(DL_NSIDE, order="nest", wet_mask=_wet(lat))
+    quad = np.flatnonzero(mesh.elem_nodes[:, 3] >= 0)
+    gap = ((mesh.elem_center_lon[quad] - 40.0) ** 2
+           + (mesh.elem_center_lat[quad] - 15.0) ** 2)
+    nodes = mesh.elem_nodes[quad[np.argmin(gap)]]
+    lon, lat = mesh.nodes_lon[nodes], mesh.nodes_lat[nodes]
+    cells = healpy.ang2pix(DL_NSIDE, lon, lat, nest=True, lonlat=True)
+    return cells, lon, lat
+
+
+def _wachspress(px, py, x, y):
+    """Product-form Wachspress weights of the point ``(px, py)`` in the
+    convex quad ``(x, y)`` — ratios of areas, so the same in lon/lat as
+    in any affine (e.g. a local metric) frame."""
+    def area(a, b, c):
+        return 0.5 * ((b[0] - a[0]) * (c[1] - a[1])
+                      - (c[0] - a[0]) * (b[1] - a[1]))
+    v = list(zip(x, y))
+    a = [area((px, py), v[i], v[(i + 1) % 4]) for i in range(4)]
+    c = [area(v[i - 1], v[i], v[(i + 1) % 4]) for i in range(4)]
+    w = np.array([c[i] * a[(i + 1) % 4] * a[(i + 2) % 4] for i in range(4)])
+    return w / w.sum()
+
+
+def _dl_store(tmp_path, name, n_fin_at, bed_at):
+    """A 3-D store (nside 8) with ``u = _dl_u`` and ``v = w = 0``: every
+    wet column three layers of u and a ``deptho`` of ``DL_BED``, except
+    the cells in ``n_fin_at`` / ``bed_at`` (cell -> finite u layers /
+    bed)."""
+    lon, lat = _pix_lonlat(DL_NSIDE, "nest")
+    wet = _wet(lat)
+    n_fin = np.where(wet, NLEV - 1, 0)
+    for cell, n in n_fin_at.items():
+        n_fin[cell] = n
+    raw = _store_3d(tmp_path, name=f"{name}.raw.nc", nside=DL_NSIDE,
+                    n_finite_levels=n_fin, w_value=0.0, with_deptho=True)
+    ds = xr.open_dataset(raw).load()
+    ds.close()
+    u = ds["avg_uoe"].values.copy()
+    for k in range(NLEV):
+        u[:, k, :] = np.where(np.isfinite(u[:, k, :]),
+                              _dl_u(k, lon, lat)[None, :], np.nan)
+    ds["avg_uoe"] = (("time", "level", "value"), u)
+    bed = np.where(wet, DL_BED, np.nan)
+    for cell, b in bed_at.items():
+        bed[cell] = b
+    ds["deptho"] = ("value", bed)
+    path = tmp_path / name
+    ds.to_netcdf(path)
+    return path
+
+
+def _dl_at(cell_lon, cell_lat, last, z):
+    """A column's depth-linear u at ``z``: between the two bracketing layer
+    centres, the value of layer ``last`` below its centre."""
+    p = DL_CENTRES
+    if z >= p[last]:
+        return _dl_u(last, cell_lon, cell_lat)
+    k = int(np.searchsorted(p, z, side="right")) - 1
+    a = (z - p[k]) / (p[k + 1] - p[k])
+    return ((1.0 - a) * _dl_u(k, cell_lon, cell_lat)
+            + a * _dl_u(k + 1, cell_lon, cell_lat))
+
+
+class TestDepthLinearWalls3D:
+    """``mode.uv_vertical: linear`` on the dual geometry, one Euler step
+    from a point inside a quad near 40E 15N at 40 m (u = ``_dl_u``, v = w
+    = 0): the recorded ``vel_u`` and the position are the hand blend of
+    the vertex values, with the quad's Wachspress weights computed here.
+    A vertex whose bed (``deptho``) lies above the particle is a wall and
+    left out (the weights of the others renormalised); a vertex whose
+    ``deptho`` lies below the end of its u data is wet and reads its last
+    value."""
+
+    def _check(self, tmp_path, store, lon, lat, keep):
+        """Run one step from the point ``DL_LAMBDA`` of the quad ``(lon,
+        lat)`` and compare with the hand blend; ``keep(i)`` gives vertex
+        ``i``'s value at ``DL_Z``, or None for a wall.  Returns the hand
+        value, the weights and the vertex values."""
+        lam = np.array(DL_LAMBDA)
+        lon0, lat0 = float(lam @ lon), float(lam @ lat)
+        w = _wachspress(lon0, lat0, lon, lat)
+        vals = [keep(i) for i in range(4)]
+        wet = np.array([v is not None for v in vals])
+        hand = (sum(w[i] * vals[i] for i in range(4) if wet[i])
+                / w[wet].sum())
+        traj = TestTracking3D()._run(tmp_path, store, [(lon0, lat0, DL_Z)],
+                                     n_steps=1, uv_vertical="linear")
+        assert traj["status"][0, -1] == 1           # ALIVE
+        assert abs(traj["vel_u"][0, 0] - hand) <= 1e-9 * abs(hand), (
+            traj["vel_u"][0, 0], hand)
+        assert traj["vel_v"][0, 0] == 0.0
+        dlon = 86400.0 * hand / (np.cos(np.radians(lat0)) * METERS_PER_DEG_LAT)
+        assert abs(traj["lon"][0, 0] - (lon0 + dlon)) <= 1e-9 * abs(dlon)
+        assert traj["lat"][0, 0] == lat0
+        assert traj["z"][0, 0] == DL_Z               # no bed clamp
+        return hand, w, vals
+
+    def test_linear_dry_vertex_left_out_healpix(self, tmp_path):
+        """One vertex of the quad has its bed at 30 m (two layers of u),
+        above the particle at 40 m: it is left out, and the three wet
+        vertices, each read between its 20 and 50 m centres, are blended
+        with their weights renormalised — not with the dry vertex read at
+        its last value (20 m), the clip rule of a column without walls."""
+        cells, lon, lat = _dl_quad()
+        dry = cells[DL_SPECIAL]
+        store = _dl_store(tmp_path, "3D_dlwall_ocean.nc", {dry: 2},
+                          {dry: 30.0})
+        hand, w, vals = self._check(
+            tmp_path, store, lon, lat,
+            lambda i: (None if i == DL_SPECIAL
+                       else _dl_at(lon[i], lat[i], 2, DL_Z)))
+        # the test can tell the wall from the clip rule
+        clip = sum(w[i] * (_dl_u(1, lon[i], lat[i]) if i == DL_SPECIAL
+                           else vals[i]) for i in range(4))
+        assert abs(clip - hand) > 1e-3 * abs(hand), (clip, hand)
+
+    def test_linear_wet_below_last_point_healpix(self, tmp_path):
+        """One vertex has u on two layers only (down to 30 m) but its
+        ``deptho`` is 70 m, the bed of the others (the u and the bathymetry
+        remaps of a HEALPix product end at different depths): at 40 m,
+        between its last centre (20 m) and its bed, it is wet and reads its
+        last value, never the zero the reader writes below its u data; all
+        four vertices take their full weights."""
+        cells, lon, lat = _dl_quad()
+        short = cells[DL_SPECIAL]
+        store = _dl_store(tmp_path, "3D_dlshort_ocean.nc", {short: 2}, {})
+        hand, w, vals = self._check(
+            tmp_path, store, lon, lat,
+            lambda i: _dl_at(lon[i], lat[i], 1 if i == DL_SPECIAL else 2,
+                             DL_Z))
+        # the test can tell the wet column from a wall at the end of its u
+        wall = (sum(w[i] * vals[i] for i in range(4) if i != DL_SPECIAL)
+                / (1.0 - w[DL_SPECIAL]))
+        assert abs(wall - hand) > 1e-3 * abs(hand), (wall, hand)
 
 
 class TestRecommendedPath3D:
