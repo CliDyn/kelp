@@ -68,31 +68,34 @@ done
 that calls the CLI re-runs leg 1 forever):
 ```python
 # leg_driver.py  <config> <segment_dir> <restart_dir> <restart_every_steps> <leg_budget_s>
-import glob, os, re, sys, time, warnings
+import glob, inspect, os, re, sys, time, warnings
 import numpy as np
 from kelp.core.config import load_config
 from kelp.core.mesh import set_grid_hash_cell, set_exact_nearest, apply_grid_hash_cell_rule
-from kelp.readers import get_reader, extract_time_info
-from kelp.tracking import run_single_realization, _shift_to_midpoints, _validate_restart_frame, _validate_restart_uv_vertical, _shared_fields_tag, _resolve_particle_offset, _resolve_start_date
+from kelp.readers import get_reader, extract_time_info, _time_option_kwargs, _dry_mask_kwargs, _prepare_dataset, _READER_RESOLVES_TIME
+from kelp.tracking import run_single_realization, _apply_max_levels, _shift_to_midpoints, _validate_restart_frame, _validate_restart_uv_vertical, _shared_fields_tag, _resolve_particle_offset, _resolve_start_date
 from kelp.writers import TrajectoryWriter, load_restart, write_restart_file
 cfg = load_config(sys.argv[1]); SEG, RDIR, EVERY, BUDGET = sys.argv[2], sys.argv[3], int(sys.argv[4]), float(sys.argv[5]); T0 = time.time()
 os.makedirs(SEG, exist_ok=True); os.makedirs(RDIR, exist_ok=True)   # a missing restart dir fails AFTER the first chunk, and the next leg re-runs it
 reader = get_reader(cfg.mesh.type)
+time_kw = _time_option_kwargs(cfg)   # the fesom14 stamp options; refuses data.time_averaging there (the reader resolves the record times)
 poff = _resolve_particle_offset(cfg)   # the shard's place in the release: keys its random draws (header or data.particle_offset)
-mesh = reader.load_mesh(cfg.mesh, mode_cfg=cfg.mode) if cfg.mesh.type == "healpix" else reader.load_mesh(cfg.mesh)
+mesh = reader.load_mesh(cfg.mesh, mode_cfg=cfg.mode) if "mode_cfg" in inspect.signature(reader.load_mesh).parameters else reader.load_mesh(cfg.mesh)   # healpix, fesom14
 # --- what run_tracking does after load_mesh; the CLI would do it for you, a driver must not skip it ---
 set_exact_nearest(mesh, bool(cfg.mesh.exact_nearest))                 # before the cell rule, whose mode depends on it
 if cfg.mesh.grid_hash_cell_size is not None: set_grid_hash_cell(mesh, cfg.mesh.grid_hash_cell_size); CELL_RULE = "explicit"
 else: CELL_RULE = apply_grid_hash_cell_rule(mesh, cfg.mesh.grid_hash_cell_rule)["rule"]   # the automatic cell, as run_tracking chooses it
-if cfg.mode.max_levels is not None and mesh.sigma.size > 0: mesh.sigma = mesh.sigma[:min(int(cfg.mode.max_levels), mesh.sigma.size)]
+_apply_max_levels(mesh, cfg.mode)   # the level cut as run_tracking makes it (keeps the full table in metadata)
 d = cfg.numerics.diffusion; az_family = cfg.mesh.type == "fesom2" and d.enabled and d.az_enabled and d.var_az
 ds = reader.open_dataset(cfg.data.ncinput, v_path=cfg.data.ncinput_v or None, w_path=cfg.data.ncinput_w or None, mode_cfg=cfg.mode,
                          **({"eta_path": cfg.data.ncinput_eta} if getattr(cfg.data, "ncinput_eta", "") else {}),
-                         **({"diffusion": d} if az_family else {}))   # multi-year FESOM2: assembles var_az too
+                         **({"diffusion": d} if az_family else {}),   # multi-year FESOM2: assembles var_az too
+                         **time_kw, **_dry_mask_kwargs(cfg))          # fesom14: stamp options + the beaching dry mask (empty elsewhere)
+_prepare_dataset(reader, mesh, ds)   # the reader's dataset check, before the writer exists (run_single_realization repeats it)
 user_sv = list(cfg.mode.sample_vars or []); b = cfg.numerics.beaching     # sampled variables + the internal dry mask
 read_sv = user_sv + ([b.dry_mask_var] if b.enabled and b.dry_mask_var and b.dry_mask_var not in user_sv else [])
 n_time_total = ds.sizes["time"]; ft, file_dt = extract_time_info(ds)
-ft = _shift_to_midpoints(ft) if cfg.data.time_averaging == "mean" else ft
+ft = _shift_to_midpoints(ft) if cfg.mesh.type not in _READER_RESOLVES_TIME and cfg.data.time_averaging == "mean" else ft   # fesom14 records already sit at their window centres
 shared = None
 if cfg.numerics.shared_fields_dir:                      # the node-local cache, exactly as run_tracking builds it
     from kelp.core.shared_fields import SharedFieldCache
