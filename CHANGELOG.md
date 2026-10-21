@@ -24,9 +24,9 @@ the tracker was developed privately from 2026-06.
 - Each record a run reads with the option is checked once, when the run stores
   it: a non-finite `u` or `v` above a column's last usable layer centre stops the
   run with the node, the layer and the record named; the interpolators and the
-  step functions do not check again. The HEALPix reader checks the raw record
+  step functions do not check again. The HEALPix reader also checks the raw record
   before it zeroes missing values (so a drifting surface mask is refused, not
-  zeroed); a mesh loaded with the option declares where each column's u data end
+  zeroed; a HEALPix record is therefore scanned twice); a mesh loaded with the option declares where each column's u data end
   (`mesh.metadata["uv_data_last"]`, one extra pass over u's first record), and a
   run with the option on a mesh loaded without it is refused at its first record.
 - Output files of runs with the option carry the global attribute
@@ -211,8 +211,9 @@ the tracker was developed privately from 2026-06.
   and cuts from it, so a mesh used again with another limit gets that limit;
   `run_single_realization` re-applies the limit to a mesh cut this way before
   (also for runs without the option).
-- A HEALPix 3-D mesh load (dual geometry) reads the first record of `u` once
-  more, down every column, to declare the u data prefix; 2-D loads do not.
+- A HEALPix 3-D mesh load for a depth-linear run (dual geometry,
+  `mode.uv_vertical: linear`) reads the first record of `u` once more, down every
+  column, to declare the u data prefix; other loads do not.
 
 ### Documentation
 
