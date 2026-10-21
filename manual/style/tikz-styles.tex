@@ -5,12 +5,16 @@
 %    * element CENTRE     -> filled orange square
 %    * vertical INTERFACE -> grey horizontal rule / open marker
 %    * the DRIFTER        -> red five-pointed star
+%    * u/v DATA POINT of a column in depth (Ch. 6) -> filled blue diamond;
+%      a point that is never read -> open grey diamond
 % =====================================================================
 \tikzset{
   meshnode/.style     ={circle,fill=lagnode,draw=lagnode,inner sep=0pt,minimum size=4pt},
   meshnodeopen/.style ={circle,draw=lagnode,fill=white,line width=0.7pt,inner sep=0pt,minimum size=4.5pt},
   elemcentre/.style   ={rectangle,fill=lagelem,draw=lagelem,inner sep=0pt,minimum size=4pt},
   interfacept/.style  ={circle,draw=gray!70,fill=white,inner sep=0pt,minimum size=3.5pt},
+  uvpoint/.style      ={diamond,fill=lagnode,draw=lagnode,inner sep=0pt,minimum size=5pt},
+  uvpointopen/.style  ={diamond,draw=gray!70,fill=white,line width=0.6pt,inner sep=0pt,minimum size=5pt},
   drifter/.style      ={star,star points=5,star point ratio=2.3,fill=kelp,draw=kelp!60!black,inner sep=0pt,minimum size=8pt},
   meshedge/.style     ={draw=gray!65,line width=0.7pt},
   meshface/.style     ={draw=gray!65,line width=0.7pt,fill=lagblue!5},

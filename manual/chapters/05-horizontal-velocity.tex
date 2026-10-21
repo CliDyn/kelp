@@ -19,7 +19,7 @@ and states the accuracy each achieves.
 velocity source & layout & admissible \conf{uv\_interp} \\
 \midrule
 FESOM2 \code{u}/\code{v}; FESOM-C element fields; HEALPix pixel geometry & element & \conf{leastsq}, \conf{edge\_leastsq}, \conf{barycentric} \\
-FESOM2 \code{unod}/\code{vnod}; FESOM-C node fields; HEALPix dual mesh; NEMO (C-grid faces averaged to T-points) & node & \conf{barycentric} \\
+FESOM2 \code{unod}/\code{vnod}; FESOM~1.4 \code{uo}/\code{vo}; FESOM-C node fields; HEALPix dual mesh; NEMO (C-grid faces averaged to T-points) & node & \conf{barycentric} \\
 \bottomrule
 \end{tabular}
 \caption{Velocity layouts by source and the interpolation schemes each admits. The layout is detected
@@ -381,12 +381,23 @@ appear only as ratios, their absolute scale is immaterial.
 
 \section{Common properties}\label{sec:hvel-common}
 
-\paragraph{Three dimensions.} In a three-dimensional run the horizontal velocity is piecewise constant
-in the vertical: each particle reads the layer found in \cref{sec:vert-layer}, and the scheme is applied
-to that layer's field without vertical interpolation.
+\paragraph{Three dimensions.} In a three-dimensional run the horizontal velocity is, by default,
+piecewise constant in the vertical: each particle reads the layer found in \cref{sec:vert-layer}, and the
+scheme is applied to that layer's field without vertical interpolation. With a depth-linear field ---
+\conf{mode.uv\_vertical: linear}, or FESOM~1.4 velocities on the levels --- the order is reversed for
+each member of the stencil: every vertex or element is first evaluated in depth, in its own column, at the
+particle depth (\cref{eq:vert-uv-blend}), and the scheme then combines these values horizontally with its
+unchanged weights, plane fit or ghosts. A member whose sea floor lies above the particle is treated as a
+wall, the way each scheme treats the coast: the barycentric schemes leave it out and renormalise the
+remaining weights, the least-squares scheme leaves it out of the plane fit, and the edge least-squares
+scheme replaces it by the ghost of \cref{eq:edge-ghost} (\cref{sec:vert-uvdepth},
+\cref{tab:vert-uv-walls}). With every member wet the arithmetic is exactly that of the layer scheme. The
+depth-linear rule is served by \conf{barycentric} on node layout and by all three schemes on element
+layout.
 
 \paragraph{Time.} Between two snapshots the time-aware variants blend the two fields in time for each
-element or vertex they read, before the unchanged spatial formula (\cref{ch:temporal,ch:fused}).
+element or vertex they read, before the unchanged spatial formula (\cref{ch:temporal,ch:fused}); with a
+depth-linear field the order is time, then depth, then the horizontal combination.
 
 \paragraph{Failure.} A scheme that cannot interpolate --- a singular fit, no containing element, a
 degenerate triangle --- reports failure; the particle's step is undone, its status set to
@@ -400,7 +411,11 @@ plain least-squares scheme does not use it.
 \fn{\_barycentric\_weights\_tri} and \fn{\_wachspress\_weights\_quad}; the convexity check is
 \fn{validate\_quad\_convexity} with \fn{find\_nonconvex\_quads}; element areas are
 \fn{build\_elem\_areas}; all in \srcfile{core/mesh.py}. The vertex compaction is in
-\fn{\_interp\_barycentric\_core} (\srcfile{numerics/interpolate.py}).}
+\fn{\_interp\_barycentric\_core} (\srcfile{numerics/interpolate.py}). The public interpolators
+\fn{interp\_barycentric}, \fn{interp\_leastsq} and \fn{interp\_edge\_leastsq} hand a depth-linear field to
+their twins \fn{\_interp\_barycentric\_dl} (both layouts), \fn{\_interp\_leastsq\_dl} and
+\fn{\_interp\_edge\_leastsq\_dl} in the same file, which read every particle at its own depth and ignore
+the layer argument.}
 
 \codenote{The projections use three radii: the barycentric horizontal-velocity kernel uses the mesh
 radius, the containment test and the vertical-velocity and scalar barycentric kernels use

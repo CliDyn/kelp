@@ -95,6 +95,51 @@ payload is \fn{LazyLerpField} in \srcfile{core/io.py}; the stage dedup is in
 pays 15--20\,\% for the conversion on gather. The PCHIP blend converts first and keeps its parallel
 path. Single precision is a memory lever, not a speed lever.}
 
+\paragraph{The depth-linear rule.} Reading the horizontal velocity linearly in depth
+(\cref{sec:vert-uvdepth}) costs two data points per stencil member instead of one, a search of the member's
+column for the bracket and a test of the member against its bed. \Cref{tab:perf-depth-linear} gives what
+this adds to one three-dimensional step, timed with the same arrays read in layer and in linear mode on
+the compute node above (128 threads, \num{100000} particles at random positions, a synthetic HEALPix dual
+mesh of \num{49152} nodes or its triangulated twin of \num{98300} elements, 21 layers down to
+\SI{4000}{\metre} with varied bathymetry, a six-hour step; the median of fifteen interleaved steps per mode,
+measured in October 2026). With a linear blend in time the rule adds about 10\,\% to the fused node-layout
+RK2 step, 6\,\% to the fused element-layout Euler step and 3\,\% to the unfused element-layout RK2 step; with
+the four-snapshot PCHIP blend the difference lies within the run-to-run spread, presumably because the
+time blend then dominates the work per member. On a sigma mesh, where every step is unfused, the rule in the sigma
+fraction costs between nothing measurable and 4\,\%. In the element workload about 16\,\% of the particles had
+a dry element in their least-squares ring and about 4\,\% fewer than three wet ones, so the walls and the
+area-mean fallback were exercised. Reading the records and the once-per-record check are not included.
+
+\begin{table}[t]
+\centering\footnotesize\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+step & time blend & layer [ms] & linear [ms] & ratio \\
+\midrule
+node layout, barycentric, fused RK2 & linear & 9.59 & 10.52 & 1.10 \\
+ & PCHIP & 12.51 & 12.45 & 1.00 \\
+element layout, least squares, fused Euler & linear & 7.30 & 7.75 & 1.06 \\
+element layout, least squares, unfused RK2 & linear & 24.18 & 24.79 & 1.03 \\
+ & PCHIP & 37.21 & 36.18 & 0.97 \\
+sigma, element least squares, unfused RK2 & linear & 32.54 & 31.92 & 0.98 \\
+ & PCHIP & 36.57 & 37.69 & 1.03 \\
+sigma, node barycentric, unfused RK2 & linear & 36.51 & 37.51 & 1.03 \\
+ & PCHIP & 34.49 & 35.71 & 1.04 \\
+\bottomrule
+\end{tabular}
+\caption{Cost of the depth-linear rule per three-dimensional step: median milliseconds per step in layer
+and in linear mode and their ratio, with the walls at depth of \cref{sec:vert-uvdepth}; \num{100000}
+particles, 128 threads, two AMD EPYC 7763 processors. The Euler step reads its start field only and has no
+PCHIP row.}
+\label{tab:perf-depth-linear}
+\end{table}
+
+\codeanchor{\raggedright \srcfile{benchmarks/single\_node/depth\_linear\_cost.py} and its rows in
+\srcfile{benchmarks/single\_node/depth\_linear\_cost.md}; the kernels compared are
+\fn{\_fused\_rk2\_step\_3d\_bary\_tinterp} and \fn{\_fused\_rk2\_step\_3d\_bary\_pchip} against their
+\code{\_dl} twins, \fn{\_fused\_euler\_step\_3d} against \fn{\_fused\_euler\_step\_3d\_dl}, and
+\fn{\_rk2\_step\_unfused} with the layer and the depth-linear interpolation cores.}
+
 \section{The nearest-node anchor}\label{sec:perf-anchor}
 
 Every evaluation site starts from the nearest mesh node (\cref{sec:loc-nearest}), found by scanning

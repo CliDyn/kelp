@@ -1,7 +1,7 @@
 \chapter{Verification and Validation}\label{ch:validation}
 
 The numerical methods of the preceding chapters are exercised by an automated test suite of about
-\num{2450} tests, plus \num{18} slow ones that need external data and run separately. The large majority guard low-level invariants --- array shapes, configuration parsing,
+\num{4700} tests, plus \num{47} slow ones that need external data and run separately. The large majority guard low-level invariants --- array shapes, configuration parsing,
 byte-for-byte reproducibility --- and are not individually informative. This chapter does not enumerate
 them. Instead it describes the tests that verify the numerical \emph{physics} against independent
 references, organized by the kind of evidence they provide, and names each so that a reader may locate it.
@@ -10,6 +10,7 @@ specified to compute, not to assess the physical realism of any simulation. Vali
 tolerances are themselves tested: the code or the data is perturbed on purpose in a number of ways, and each
 pin must fail; where a result has a natural ordering --- a finer resolution closer to the reference --- the
 ordering is pinned as well.
+
 
 \section{Closed-form analytic flows}\label{sec:val-analytic}
 
@@ -42,6 +43,53 @@ vertical, a uniform column in a diffusivity that varies tenfold must stay unifor
 of eight depth bins stays within 20\,\% of its share, forward and backward; without the drift term the density
 would follow $1/A_z$ instead.
 
+\section{The depth-linear horizontal velocity}\label{sec:val-depth-linear}
+
+The depth-linear rule of \cref{sec:vert-uvdepth} is checked against answers known in closed form, through
+the public run path: synthetic FESOM2 files are read by the FESOM2 reader and tracked by the ordinary run
+entry, on node layout (barycentric) and on element layout (least squares, edge least squares, element
+barycentric), with element beds that include partial bottom cells. Five properties are pinned. First, a
+velocity independent of depth --- per-column constants that vary from column to column and in time, with
+NaN stored below each column's last usable point, so that a read there would show --- gives the same
+trajectory in linear and in layer mode at every record: bit for bit wherever every member reads a stored
+value (above the first centre, at a centre, below the last one, a particle exactly at its members' bed),
+and within a few units in the last place elsewhere. Second, a velocity linear in depth,
+$u=u_0+g\,(\latx-\latx_c)+b\,z$, is followed exactly: the linear run moves by the closed form, also with a uniform
+vertical velocity that moves particles across layers (exact for RK2 and RK4), while the layer run is
+off by $b\,(p_k-z)\,T$, with $p_k$ the centre of the particle's layer. Third, for the smooth profile
+$u=G(x)\cos(\pi z/H)$ on 10, 20 and 40 layers the largest reconstruction error falls by a factor of four
+per halving of the layer thickness in linear mode and by two in layer mode --- second order against first.
+Fourth, the same field tracked with RK4 shows the same orders in the end positions of fifty particles,
+with the time-step error below 1\,\% of either mode's error. Fifth, a uniform flow along a straight
+trench, below the bed of the shelf beside it, keeps its speed in linear mode, where the shelf is a wall,
+and is slowed in layer mode, which reads the shelf's zeros; with the no-slip ghost the edge least-squares
+scheme brakes it as at a coast.
+
+The sigma counterparts use synthetic FESOM-C files read by the FESOM-C reader, with a bed sloping in both
+directions and a rising, tilted surface. Per-column constants give the layer run bit for bit beyond the
+outer centres and within a few units in the last place between them; the profile $u=G(x)\cos(\pi s)$
+converges at second order in the sigma layer thickness on uniform and on stretched sigma levels, layer
+mode at first order. A separate suite checks the sigma step by hand: with a bed linear in longitude and
+latitude, a dia-sigma velocity linear in $s$ and $u$ linear in $s$, every interpolator is exact, so each
+expected position is a hand-written combination of stages, and a probe on the interpolators records the
+fraction $s$ that every stage hands them --- its own position, time and column height
+(\cref{sec:vert-uvdepth}). The fused depth-linear kernels reproduce the unfused path bit for bit, with
+walls at depth included.
+
+These suites received a mutation pass. Eighteen deliberate defects were put into a copy of the code one at
+a time --- among them the two blend weights swapped, the wet test made strict, a dry element kept in the
+least-squares fit or in the wet-member mean, the too-few fallback returning zero, the RK2 second stage
+read at the entry depth, the fused Euler twin reading the layer row, the bracket reading the nearest point,
+every vertex counted wet, the sigma points placed at the interfaces instead of the centres, and a stage
+fraction handed in metres --- and each turned specific tests red by the expected mechanism, for instance
+first-order convergence where second order is pinned, or a trench flow 18--50\,\% too slow.
+
+\codeanchor{\raggedright \srcfile{tests/test\_depth\_linear\_analytic.py} (the five properties, their sigma counterparts
+and the mutation record in its docstring); \srcfile{tests/test\_integrators\_depth\_linear\_sigma.py} (the
+sigma step by hand); \srcfile{tests/test\_interp\_depth\_linear.py} and
+\srcfile{tests/test\_interp\_depth\_linear\_elements.py} (the rounding bounds of the interpolators);
+\srcfile{tests/test\_fused\_3d\_depth\_linear.py} (the fused twins).}
+
 \section{Contracts with model data}\label{sec:val-data}
 
 Some properties can only be checked against real model output; these tests run when the data are available
@@ -58,6 +106,24 @@ The sigma step of \cref{sec:vert-sigma-step} has exact solutions: with a tide, a
 flow and a uniform dia-sigma velocity, the fraction of the column is linear in time, and Euler, RK2 and RK4
 reproduce it to a relative $10^{-9}$, forward and backward, with uniform and stretched sigma levels; with a
 dia-sigma velocity linear in the fraction the three schemes converge at orders one, two and four.
+
+The FESOM~1.4 reader is checked against published output: the monthly means of a CMIP6 experiment of the
+AWI-CM-1-1-LR model, in the directory layout of the CMIP6 archive, read from the directory named by
+\code{KELP\_TEST\_FESOM14\_DATA}. The tests pin the mesh recovered from the cell polygons (\num{126859}
+nodes and \num{244660} triangles, checked independently of the recovery, with \code{deptho} equal to the
+depth of the last wet level at every node); the absolute time axis, every resolved instant equal to the
+centre of its time bounds decoded from each file's own epoch; the first-step velocity of probes placed on
+mesh nodes a quarter of a layer below a level, computed by hand as the lerp in depth between two levels of
+the records that bracket the start; three-month runs with linear and PCHIP time interpolation, whose
+first-step velocities follow the order time first, then depth (\cref{sec:vert-uvdepth}), including probes
+released after the PCHIP window has moved; the sign of $\Wvel$ against the equatorial upwelling; the
+separation of level-linear from layer-constant reading; and the equivalence of the two file forms --- the
+published fields and the recovered mesh rewritten as an ASCII mesh and as raw-writer files give
+bit-identical trajectories. The raw form and the ASCII mesh are thereby checked against the model's
+description of its formats and on real geometry, not against real raw output. A mutation pass --- the
+level points moved half a layer, the sign of $\Wvel$ inverted, the resolved axis shifted by a day, the
+midpoint shift applied a second time, the depth and time blends in the reversed order, among others ---
+failed the pins named in the test module.
 
 \begin{figure}[t]
 \centering
@@ -111,7 +177,7 @@ Fortran prototype and its reference trajectories are not part of this repository
 families (\fn{test\_analytical\_3d\_benchmarks.py}, \fn{test\_downwelling\_psi.py}, \fn{test\_3d\_analytical.py},
 \fn{test\_quad\_mesh\_benchmarks.py}); the random walks (\fn{test\_spherical\_random\_walk.py},
 \fn{test\_az\_diffusion.py}); the data contracts (\fn{test\_w\_sign\_contract.py},
-\fn{test\_healpix\_native\_twin.py}, \fn{test\_fesomc\_w\_contract.py}); the bit-identity pins
+\fn{test\_healpix\_native\_twin.py}, \fn{test\_fesomc\_w\_contract.py}, \fn{test\_fesom14\_published\_lr.py}); the bit-identity pins
 (\fn{test\_fused\_3d\_bary.py}, \fn{test\_exact\_nearest.py}, \fn{test\_node\_xyz.py}, \fn{test\_edge\_walk.py},
 \fn{test\_checkpoint\_integrity.py}, \fn{test\_sharding.py}); and the reconstruction-order tests
 (\fn{test\_temporal\_reconstruction.py}); the benchmark flows and diffusion benchmarks are the suites marked

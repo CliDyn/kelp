@@ -204,7 +204,7 @@ Tests use synthetic data built in `tmp_path` fixtures or small committed fixture
 - Output format 2 is pinned by `tests/test_output_format.py` (layout, CF attributes, time units per calendar, the record clock in both modes incl. backward/cycle/chain cuts, release variables, velocity NaN rule, lazy restart block, format-1 reads, concat refusals).
 
 ```bash
-python -m pytest tests/          # default: 3879 collected (3844 pass, 35 data/plot skips as of 2026-10-19), 47 slow deselected
+python -m pytest tests/          # default: 4712 collected (4670 pass, 42 data/plot skips as of 2026-10-21), 47 slow deselected
 python -m pytest tests/ -m slow  # Parcels comparison + data-gated HEALPix-twin / W-sign suites
 ```
 
