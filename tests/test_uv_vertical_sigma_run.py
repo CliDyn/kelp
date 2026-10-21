@@ -57,7 +57,6 @@ from kelp.core.geometry import (DEG2RAD, METERS_PER_DEG_LAT,  # noqa: E402
 from kelp.core.mesh import (find_containing_elements,  # noqa: E402
                             find_nearest_nodes)
 from kelp.core.particles import ParticleStatus, make_state  # noqa: E402
-from kelp.numerics.vertical_uv import is_checked  # noqa: E402
 from kelp.readers import extract_time_info, get_reader  # noqa: E402
 from kelp.writers import (TrajectoryWriter, load_restart,  # noqa: E402
                           load_trajectories)
@@ -362,8 +361,8 @@ def test_prefetch_and_shared_cache_sigma(tmp_path, monkeypatch, layout,
                                          uv_interp):
     """Prefetch windows of 3 and the shared snapshot cache each give the
     plain run bit for bit; a second shared cache attaches the published
-    record without reading it, marked ``"layer_linear"`` and checked, bit
-    for bit the local read."""
+    record without reading it, marked ``"layer_linear"`` and checked (once
+    per stored record), bit for bit the local read."""
     from kelp.core.shared_fields import SharedFieldCache
     path = _file(tmp_path)
     kw = dict(layout=layout, uv_interp=uv_interp, integrator="rk2")
@@ -402,6 +401,13 @@ def test_prefetch_and_shared_cache_sigma(tmp_path, monkeypatch, layout,
     reader, mesh, ds = _open(path, layout)
     r2 = _CountingReader()
     mode = _mode(layout)
+    checks = []
+    real_check = tracking.check_depth_linear_record
+
+    def counting_check(vel, mesh_, *, record=""):
+        checks.append(record)
+        return real_check(vel, mesh_, record=record)
+    monkeypatch.setattr(tracking, "check_depth_linear_record", counting_check)
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
         c1 = tracking._VelCache(shared=SharedFieldCache(shm / "c", "tagS"))
@@ -413,7 +419,7 @@ def test_prefetch_and_shared_cache_sigma(tmp_path, monkeypatch, layout,
     local = tracking._VelCache().get(3, reader, ds, mesh, mode)
     for v in (v2, local):
         assert v.uv_layout == layout and v.uv_vertical == "layer_linear"
-        assert is_checked(v, mesh)
+    assert checks == ["time index 3"] * 3
     for f in ("u", "v", "w", "eta"):
         assert_bitwise(getattr(v2, f), getattr(local, f), f)
     ds.close()

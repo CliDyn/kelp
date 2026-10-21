@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from kelp.core.io import LazyLerpField, VelocityField
+from kelp.core.io import VelocityField
 from kelp.core.mesh import Mesh
 
 from tests._bitwise import assert_bitwise
@@ -146,198 +146,19 @@ def test_layer_linear_matches_find_layer_on_many_depths():
     assert dp.last.tolist() == want
 
 
-def test_declaration_snapshot_at_first_use():
-    """The table keeps the declaration by identity, so the engine builds it
-    from its own snapshot: an owned, read-only copy that replaces the
-    reader's array in ``mesh.metadata``.  A later write into the reader's
-    array changes nothing, a write into the snapshot raises, and a new array
-    is a new declaration (snapshot in turn)."""
-    vu = _vu()
-    decl = np.array([0, 2, 1, 1], dtype=np.int32)
-    mesh = _mesh()
-    mesh.metadata["uv_data_last"] = decl
-    dp = vu.depth_points(mesh, "level")
-    snap = mesh.metadata["uv_data_last"]
-    assert snap is not decl and snap.base is None
-    assert snap.dtype == decl.dtype and snap.tolist() == [0, 2, 1, 1]
-    assert not snap.flags.writeable and decl.flags.writeable
-    assert mesh._uv_depth_points[("level", "node")].decl is snap
-    # the reader's own array is no longer the declaration
-    decl[:] = 3
-    assert vu.depth_points(mesh, "level") is dp
-    assert mesh.metadata["uv_data_last"] is snap
-    assert snap.tolist() == [0, 2, 1, 1]
-    with pytest.raises(ValueError, match="read-only"):
-        snap[0] = 3
-    # the other placement reuses the snapshot, it does not copy it again
-    vu.depth_points(mesh, "layer_linear")
-    assert mesh.metadata["uv_data_last"] is snap
-    assert mesh._uv_depth_points[("layer_linear", "node")].decl is snap
-    # a new array is a new declaration
-    mesh.metadata["uv_data_last"] = np.array([3, 2, 1, 0], dtype=np.int32)
-    assert vu.depth_points(mesh, "level").last.tolist() == [3, 2, 1, 0]
-
-
-def test_declaration_snapshot_shared_by_shallow_copies():
-    """Two shallow copies made before either built a table share one
-    metadata dict: the second reuses the first's snapshot instead of
-    replacing it, so alternating lookups settle after one build each."""
-    import copy
-    vu = _vu()
-    mesh = _mesh()
-    mesh.metadata["uv_data_last"] = np.array([0, 2, 1, 1], dtype=np.int32)
-    a, b = copy.copy(mesh), copy.copy(mesh)
-    assert a.metadata is b.metadata
-    dp_a = vu.depth_points(a, "level")
-    snap = a.metadata["uv_data_last"]
-    dp_b = vu.depth_points(b, "level")
-    assert b.metadata["uv_data_last"] is snap
-    for _ in range(3):
-        assert vu.depth_points(a, "level") is dp_a
-        assert vu.depth_points(b, "level") is dp_b
-    assert a.metadata["uv_data_last"] is snap
-    assert dp_b.last.tolist() == dp_a.last.tolist() == [0, 2, 1, 0]
-
-
-def test_reader_frozen_array_is_copied():
-    """A read-only array the READER froze is not an engine snapshot: the
-    build copies it like any other declaration."""
-    vu = _vu()
-    decl = np.array([0, 2, 1, 1], dtype=np.int32)
-    decl.setflags(write=False)
-    mesh = _mesh()
-    mesh.metadata["uv_data_last"] = decl
-    vu.depth_points(mesh, "level")
-    snap = mesh.metadata["uv_data_last"]
-    assert snap is not decl and snap.base is None
-    assert vu._SNAPSHOTS.get(id(snap)) is snap
-    assert vu._SNAPSHOTS.get(id(decl)) is None
-
-
-def test_snapshot_registry_forgets_freed_snapshots():
-    """A freed snapshot drops out of the registry, so an array that later
-    gets its id is never taken for an engine snapshot."""
-    import gc
-    vu = _vu()
-    mesh = _mesh()
-    mesh.metadata["uv_data_last"] = np.array([0, 2, 1, 1], dtype=np.int32)
-    vu.depth_points(mesh, "level")
-    old_id = id(mesh.metadata["uv_data_last"])
-    assert vu._SNAPSHOTS.get(old_id) is not None
-    del mesh
-    gc.collect()
-    assert vu._SNAPSHOTS.get(old_id) is None
-
-
-@pytest.mark.parametrize("alias", ["base", "view"])
-def test_declaration_alias_cannot_change_the_table(alias):
-    """A write through the reader's base array, or through a writable view
-    of its declaration taken before the first build, reaches neither the
-    declaration in effect nor a table built later: both come from the
-    engine's snapshot.  Surface-only at the build, then "all five levels"
-    through the alias, then a rebuild (a new bed array, same values): a new
-    record with u = 1 at the surface and a finite fill 1e30 below passes the
-    record check judged against the snapshot, and the particle (jitted
-    kernels) reads 1.0, never the fill.  The other way round (five levels,
-    then the surface only through the alias) the declaration in effect
-    keeps the table's five levels."""
-    from tests.test_interp_depth_linear import _mesh as _mesh_3x3
-    from tests.test_interp_depth_linear import _run, _state
-    vu = _vu()
-
-    def declared(value):
-        """The declaration and a write through its alias."""
-        if alias == "base":
-            owner = np.full((2, 9), value, dtype=np.int32)
-
-            def write(v):
-                owner[0, :] = v
-            return owner[0], write
-        decl = np.full(9, value, dtype=np.int32)
-        view = decl[:]                 # writable, taken before the build
-
-        def write(v):
-            view[:] = v
-        return decl, write
-
-    # levels 0..40 m, every bed below the deepest level
-    mesh = _mesh_3x3(depths=np.full(9, 200.0))
-    decl, write = declared(0)          # surface only
-    mesh.metadata["uv_data_last"] = decl
-    dp = vu.depth_points(mesh, "level")
-    write(4)
-    mesh.depth = mesh.depth.copy()     # rebuild from the declaration in effect
-    u = np.full((5, 9), 1.0e30)
-    u[0] = 1.0
-    vel = VelocityField(u=u, v=np.zeros_like(u), eta=np.zeros(9),
-                        w=np.zeros((5, 9)), uv_layout="node",
-                        uv_vertical="level")
-    vu.check_depth_linear_record(vel, mesh)
-    u_p, _, ok = _run(mesh, vel, _state([(4.3, 4.2)], 30.0))
-    assert ok[0] and u_p[0] == 1.0
-    dp2 = vu.depth_points(mesh, "level")
-    assert dp2 is not dp and dp2.last.tolist() == [0] * 9
-    assert mesh.metadata["uv_data_last"].tolist() == [0] * 9
-    # judged against the snapshot: NaN below the surface is never read,
-    # NaN at the surface is refused
-    u[1:] = np.nan
-    vu.check_depth_linear_record(_field(u), mesh)
-    u[0, 3] = np.nan
-    with pytest.raises(ValueError, match=r"node 3, point 0 "):
-        vu.check_depth_linear_record(_field(u), mesh)
-
-    # the reverse: five levels at the build, the surface only through the
-    # alias afterwards — the declaration in effect is still the table's
-    mesh = _mesh_3x3(depths=np.full(9, 200.0))
-    decl, write = declared(4)
-    mesh.metadata["uv_data_last"] = decl
-    dp = vu.depth_points(mesh, "level")
-    write(0)
-    assert mesh.metadata["uv_data_last"].tolist() == [4] * 9
-    assert vu.depth_points(mesh, "level") is dp
-    assert dp.last.tolist() == [4] * 9
-
-
-@pytest.mark.parametrize("placement", ["level", "layer_linear"])
-@pytest.mark.parametrize("how", ["deepcopy", "pickle"])
-def test_copied_mesh_revalidates_its_declaration(placement, how):
-    """A deep copy or an unpickled mesh (default protocol) carries a NEW,
-    WRITEABLE declaration array (numpy drops the read-only flag of the
-    snapshot), while its table cache still matches it by identity: the
-    first use of the copy rebuilds the table from the current values — an
-    in-place write made before it is seen — and installs a new read-only
-    snapshot, so a later write into the copy's old array changes nothing
-    and a write into the snapshot raises."""
-    import copy
-    import pickle
-    vu = _vu()
-    mesh = _mesh(decl=[3, 2, 1, 0])
-    dp0 = vu.depth_points(mesh, placement)
-    assert not mesh.metadata["uv_data_last"].flags.writeable
-    clone = (copy.deepcopy(mesh) if how == "deepcopy"
-             else pickle.loads(pickle.dumps(mesh)))
-    decl = clone.metadata["uv_data_last"]
-    assert decl.flags.writeable                     # numpy's copy semantics
-    decl[0] = 0                                     # unseen without the fix
-    dp = vu.depth_points(clone, placement)
-    assert dp.last[0] == 0 and dp0.last[0] > 0
-    snap = clone.metadata["uv_data_last"]
-    assert snap is not decl and not snap.flags.writeable
-    assert snap.tolist() == [0, 2, 1, 0]
-    with pytest.raises(ValueError, match="read-only"):
-        snap[1] = 0
-    decl[1] = 0                                     # no longer the declaration
-    assert vu.depth_points(clone, placement) is dp   # snapshot: cached
-    # the original is untouched
-    assert vu.depth_points(mesh, placement) is dp0
-
-
 def test_declared_prefix_caps_last():
+    """The declaration caps ``last``; the table is built from its values
+    (``last`` is the table's own array) and the declaration in the metadata
+    stays the reader's array; a new array is a new declaration."""
     vu = _vu()
     mesh = _mesh(decl=[0, 2, 1, 1])
+    decl = mesh.metadata["uv_data_last"]
     dp = vu.depth_points(mesh, "level")
     # geometric [3, 2, 1, 0] capped by the declaration [0, 2, 1, 1]
     assert_bitwise(dp.last, np.array([0, 2, 1, 0], dtype=np.int32), "last")
+    assert mesh.metadata["uv_data_last"] is decl and decl.flags.writeable
+    assert not np.shares_memory(dp.last, decl)
+    assert vu.depth_points(mesh, "level") is dp
     # -1 (surface only) -> point 0 only, and it must be finite (below)
     mesh.metadata["uv_data_last"] = np.array([-1, 5, 1, 1], dtype=np.int32)
     dp2 = vu.depth_points(mesh, "level")
@@ -394,9 +215,6 @@ def test_refuses_layer_placement():
     with pytest.raises(ValueError, match="layer"):
         vu.check_depth_linear_record(
             _field(np.ones((3, 4)), placement="layer"), _mesh())
-    # a layer field is never checked (and asking does not raise)
-    assert not vu.is_checked(_field(np.ones((3, 4)), placement="layer"),
-                             _mesh())
 
 
 # ---------------------------------------------------------------------------
@@ -601,8 +419,6 @@ def test_check_record_refuses_nan_in_prefix(comp, bad):
     assert "point 1 " in msg
     assert f" {comp} " in msg
     assert "t=7" in msg
-    assert vel._dl_token is None
-    assert not vu.is_checked(vel, mesh)
 
 
 def test_check_record_reports_first_node():
@@ -622,7 +438,6 @@ def test_check_record_reports_first_node():
         vu.check_depth_linear_record(vel32, mesh)
     u32[3, 0] = u32[2, 1] = u32[0, 2] = 1.0
     vu.check_depth_linear_record(vel32, mesh)
-    assert vu.is_checked(vel32, mesh)
 
 
 def test_check_record_accepts_fill_below_last():
@@ -636,16 +451,12 @@ def test_check_record_accepts_fill_below_last():
     v[3, 2] = np.inf
     w = np.full((4, 4), np.nan)                      # w is never checked
     vel = _field(u, v, w=w)
-    assert not vu.is_checked(vel, mesh)
     vu.check_depth_linear_record(vel, mesh)
-    assert vu.is_checked(vel, mesh)
-    assert vel._dl_token is vu.depth_points(mesh, "level")
     # a finite fill value inside the prefix is the reader's business
     u2 = u.copy()
     u2[0, 0] = 1.0e30
     vel2 = _field(u2, v)
     vu.check_depth_linear_record(vel2, mesh)
-    assert vu.is_checked(vel2, mesh)
 
 
 def test_check_record_refuses_wrong_shape():
@@ -660,7 +471,10 @@ def test_check_record_refuses_wrong_shape():
         vu.check_depth_linear_record(_field(np.ones((4, 5))), mesh)
 
 
-def test_token_invalidated():
+def test_check_follows_the_current_table():
+    """The check judges a record against the mesh's table as it is now: a
+    ``max_levels`` cut, a new ``mesh.depth`` and a new declaration each
+    rebuild it, so a record that passed before is judged again."""
     vu = _vu()
     mesh_a = _mesh(depths=(30.0, 20.0, 10.0, 0.0))   # last = [3, 2, 1, 0]
     mesh_b = _mesh(depths=(30.0, 20.0, 10.0, 0.0))   # same shapes and values
@@ -669,26 +483,16 @@ def test_token_invalidated():
     u[3, 2] = np.nan                                 # below node 2's last (1)
     vel = _field(u)
     vu.check_depth_linear_record(vel, mesh_a)
-    assert vu.is_checked(vel, mesh_a)
-    # another mesh, even an identical one
-    assert not vu.is_checked(vel, mesh_b)
 
     # max_levels cut
     vu.check_depth_linear_record(vel, mesh_b)
-    assert vu.is_checked(vel, mesh_b)
     mesh_b.sigma = mesh_b.sigma[:3]
-    assert not vu.is_checked(vel, mesh_b)
     with pytest.raises(ValueError, match="rows"):    # the field is not cut
         vu.check_depth_linear_record(vel, mesh_b)
-    vel_cut = _field(u[:3])
-    vu.check_depth_linear_record(vel_cut, mesh_b)
-    assert vu.is_checked(vel_cut, mesh_b)
+    vu.check_depth_linear_record(_field(u[:3]), mesh_b)
 
     # a new mesh.depth: node 3 deepens, its NaN at point 1 becomes usable
-    vu.check_depth_linear_record(vel, mesh_a)
-    assert vu.is_checked(vel, mesh_a)
     mesh_a.depth = np.array([30.0, 20.0, 10.0, 30.0])
-    assert not vu.is_checked(vel, mesh_a)
     with pytest.raises(ValueError, match=r"node 3, point 1 "):
         vu.check_depth_linear_record(vel, mesh_a)
 
@@ -696,9 +500,7 @@ def test_token_invalidated():
     mesh_c = _mesh(depths=(30.0, 20.0, 30.0, 0.0), decl=[3, 2, 2, 0])
     vel_c = _field(u)
     vu.check_depth_linear_record(vel_c, mesh_c)
-    assert vu.is_checked(vel_c, mesh_c)
     mesh_c.metadata["uv_data_last"] = np.array([3, 2, 3, 0], dtype=np.int32)
-    assert not vu.is_checked(vel_c, mesh_c)
     with pytest.raises(ValueError, match=r"node 2, point 3 "):
         vu.check_depth_linear_record(vel_c, mesh_c)
     # the declaration removed altogether: also a new table
@@ -730,59 +532,6 @@ def test_cache_survives_id_reuse():
 
 
 # ---------------------------------------------------------------------------
-# Lazy fields: parents checked, no blend
-# ---------------------------------------------------------------------------
-
-def test_check_record_lazy_field_checks_parents_without_blend(monkeypatch):
-    vu = _vu()
-    import kelp.core.io as kio
-    mesh = _mesh()
-    a = _field(np.ones((4, 4)))
-    b = _field(np.full((4, 4), 2.0))
-    lazy = LazyLerpField(a, b, 0.25)
-    assert lazy._dl_token is None
-
-    blends = []
-
-    def no_blend(*args, **kwargs):
-        blends.append(args)
-        raise AssertionError("the record check blended a lazy field")
-
-    monkeypatch.setattr(kio, "_blend", no_blend)
-    checked = []
-    real = vu._check_components
-
-    def spy(vel, *args, **kwargs):
-        checked.append(vel)
-        return real(vel, *args, **kwargs)
-
-    monkeypatch.setattr(vu, "_check_components", spy)
-
-    vu.check_depth_linear_record(a, mesh)          # vel_a already checked
-    checked.clear()
-    assert not vu.is_checked(lazy, mesh)
-    vu.check_depth_linear_record(lazy, mesh, record="t=3")
-    assert blends == []
-    assert lazy._cache == {}
-    assert "u" not in vars(lazy) and "v" not in vars(lazy)
-    assert [c is b for c in checked] == [True]     # only the unchecked parent
-    assert vu.is_checked(a, mesh) and vu.is_checked(b, mesh)
-    assert vu.is_checked(lazy, mesh)
-    assert lazy._dl_token is vu.depth_points(mesh, "level")
-
-    # a NaN in one parent's prefix: refused, the lazy field stays unchecked
-    c = _field(np.ones((4, 4)))
-    bad_u = np.ones((4, 4))
-    bad_u[2, 0] = np.nan
-    d = _field(bad_u)
-    lazy2 = LazyLerpField(c, d, 0.5)
-    with pytest.raises(ValueError, match=r"node 0, point 2 .*t=9"):
-        vu.check_depth_linear_record(lazy2, mesh, record="t=9")
-    assert lazy2._dl_token is None
-    assert blends == []
-
-
-# ---------------------------------------------------------------------------
 # Mesh: the new cache field does not leak through copies
 # ---------------------------------------------------------------------------
 
@@ -805,16 +554,12 @@ def test_mesh_field_declared_and_copies_do_not_share():
         assert vu.depth_points(mesh, "level") is dp
         assert mesh._uv_depth_points[("level", "node")].depth is mesh.depth
 
-    # pickling and deep copies carry consistent tables but a field checked
-    # on the original is unchecked on the copy (another DepthPoints object)
-    vel = _field(np.ones((4, 4)))
-    vu.check_depth_linear_record(vel, mesh)
+    # pickling and deep copies hold consistent tables
     for clone in (pickle.loads(pickle.dumps(mesh)), copy.deepcopy(mesh)):
         dpc = vu.depth_points(clone, "level")
         assert_bitwise(dpc.p, dp.p, "p")
         assert_bitwise(dpc.last, dp.last, "last")
-        assert not vu.is_checked(vel, clone)
-        assert vu.is_checked(vel, mesh)
+        assert vu.depth_points(mesh, "level") is dp
 
 
 # ---------------------------------------------------------------------------
@@ -934,8 +679,7 @@ def test_elem_table_missing_bed_refused():
     with pytest.raises(ValueError, match="uv_data_last_elem") as ei:
         _etable(vu, mesh)
     assert "nlevels" in str(ei.value) and "elem_bed" in str(ei.value)
-    # the declaration is not snapshotted by a refused build
-    assert mesh.metadata["uv_data_last_elem"].flags.writeable
+    assert mesh._uv_depth_points is None
 
 
 def test_elem_table_cavities_refused():
@@ -1004,55 +748,6 @@ def test_bed_independent_of_cut():
     assert dpn2.p[dpn2.last[0]] == 20.0 and dpn2.bed[0] == 60.0
 
 
-def test_elem_declaration_snapshot():
-    """The element declaration follows the node declaration's rules: an
-    owned, read-only snapshot installed in its place at first use (writes
-    into the reader's array change nothing, a write into the snapshot
-    raises), reused by a rebuild and by a shallow copy, renewed for a new
-    array and for a deep-copied or unpickled mesh."""
-    vu = _vu()
-    decl = np.array([2, 0, 1], dtype=np.int32)
-    mesh = _elem_mesh(decl=None)
-    mesh.metadata["uv_data_last_elem"] = decl
-    dp = _etable(vu, mesh)
-    snap = mesh.metadata["uv_data_last_elem"]
-    assert snap is not decl and snap.base is None
-    assert snap.dtype == decl.dtype and snap.tolist() == [2, 0, 1]
-    assert not snap.flags.writeable and decl.flags.writeable
-    assert vu._SNAPSHOTS.get(id(snap)) is snap
-    assert mesh._uv_depth_points[("layer_linear", "element")].decl is snap
-    assert "uv_data_last" not in mesh.metadata     # the node key untouched
-    decl[:] = 0
-    assert _etable(vu, mesh) is dp
-    assert mesh.metadata["uv_data_last_elem"] is snap
-    with pytest.raises(ValueError, match="read-only"):
-        snap[0] = 0
-    # a shallow copy sharing the metadata reuses the snapshot
-    other = copy.copy(mesh)
-    other._uv_depth_points = None
-    assert _etable(vu, other).last.tolist() == [2, 0, 1]
-    assert other.metadata["uv_data_last_elem"] is snap
-    # a max_levels cut rebuilds from the same snapshot
-    mesh.sigma = mesh.sigma[:3]
-    dp2 = _etable(vu, mesh)
-    assert dp2 is not dp and dp2.last.tolist() == [1, 0, 1]
-    assert mesh.metadata["uv_data_last_elem"] is snap
-    # a new array is a new declaration
-    mesh.metadata["uv_data_last_elem"] = np.array([0, 0, 1], dtype=np.int32)
-    assert _etable(vu, mesh).last.tolist() == [0, 0, 1]
-    snap = mesh.metadata["uv_data_last_elem"]
-    # a deep copy or an unpickled mesh gets a writeable array: revalidated
-    for clone in (copy.deepcopy(mesh), pickle.loads(pickle.dumps(mesh))):
-        d = clone.metadata["uv_data_last_elem"]
-        assert d.flags.writeable
-        d[0] = 1
-        assert _etable(vu, clone).last.tolist() == [1, 0, 1]
-        new = clone.metadata["uv_data_last_elem"]
-        assert new is not d and not new.flags.writeable
-    assert _etable(vu, mesh).last.tolist() == [0, 0, 1]
-    assert mesh.metadata["uv_data_last_elem"] is snap
-
-
 @pytest.mark.parametrize("comp", ["u", "v"])
 def test_elem_record_check_names_element(comp):
     vu = _vu()
@@ -1068,8 +763,6 @@ def test_elem_record_check_names_element(comp):
     assert f" {comp} " in msg and "t=4" in msg
     assert "of this element" in msg
     assert "node" not in msg
-    assert vel._dl_token is None
-    assert not vu.is_checked(vel, mesh)
     # the column count and the rows, per element
     with pytest.raises(ValueError, match=r"has 4 elements, the mesh has 3 "
                                          r"\(element layout expected\)"):
@@ -1087,19 +780,9 @@ def test_elem_record_check_ignores_below_last():
     v[2, 2] = np.inf                                 # below element 2's last
     u[2, 2] = 1.0e30
     vel = _efield(u, v, w=np.full((4, 5), np.nan))   # w is never checked
-    assert not vu.is_checked(vel, mesh)
     vu.check_depth_linear_record(vel, mesh)
-    assert vu.is_checked(vel, mesh)
-    assert vel._dl_token is _etable(vu, mesh)
-    assert vel._dl_token is not vu.depth_points(mesh, "layer_linear")
-    # a lazy element field: checked through its parents, no blend
-    lazy = LazyLerpField(_efield(np.ones((3, 3)), w=np.zeros((4, 5))), vel,
-                         0.5)
-    vu.check_depth_linear_record(lazy, mesh)
-    assert lazy._dl_token is _etable(vu, mesh) and lazy._cache == {}
-    # a deeper declaration makes a NaN usable: a new table, unchecked
+    # a deeper declaration makes a NaN usable: a new table
     mesh.metadata["uv_data_last_elem"] = np.array([2, 1, 1], dtype=np.int32)
-    assert not vu.is_checked(vel, mesh)
     with pytest.raises(ValueError, match=r"element 1, point 1 "):
         vu.check_depth_linear_record(vel, mesh)
 
@@ -1118,33 +801,30 @@ def test_node_and_elem_tables_cached_separately():
                                           ("layer_linear", "element")}
     assert vu.depth_points(mesh, "layer_linear") is dpn
     assert _etable(vu, mesh) is dpe
-    node_vel = _field(np.ones((3, 5)), placement="layer_linear")
-    elem_vel = _efield(np.ones((3, 3)))
-    vu.check_depth_linear_record(node_vel, mesh)
-    vu.check_depth_linear_record(elem_vel, mesh)
-    assert node_vel._dl_token is dpn and elem_vel._dl_token is dpe
-    assert vu.is_checked(node_vel, mesh) and vu.is_checked(elem_vel, mesh)
+    # each field against its own layout's table (5 nodes, 3 elements)
+    vu.check_depth_linear_record(
+        _field(np.ones((3, 5)), placement="layer_linear"), mesh)
+    vu.check_depth_linear_record(_efield(np.ones((3, 3))), mesh)
+    with pytest.raises(ValueError, match=r"has 5 elements, the mesh has 3"):
+        vu.check_depth_linear_record(_efield(np.ones((3, 5))), mesh)
     # a new element bed: the element table only
     mesh.metadata["elem_bed"] = np.array([60.0, 25.0, 45.0])
     assert vu.depth_points(mesh, "layer_linear") is dpn
     dpe2 = _etable(vu, mesh)
     assert dpe2 is not dpe and dpe2.bed.tolist() == [60.0, 25.0, 45.0]
-    assert vu.is_checked(node_vel, mesh)
-    assert not vu.is_checked(elem_vel, mesh)
     # a new mesh.depth or node declaration: the node table only
-    vu.check_depth_linear_record(elem_vel, mesh)
     mesh.depth = mesh.depth.copy()
     assert _etable(vu, mesh) is dpe2
     dpn2 = vu.depth_points(mesh, "layer_linear")
     assert dpn2 is not dpn
     mesh.metadata["uv_data_last"] = np.full(5, 1, dtype=np.int32)
     assert _etable(vu, mesh) is dpe2
-    assert vu.depth_points(mesh, "layer_linear").last.tolist() == [1] * 5
-    assert vu.is_checked(elem_vel, mesh)
+    dpn3 = vu.depth_points(mesh, "layer_linear")
+    assert dpn3.last.tolist() == [1] * 5
     # a cut: both
     mesh.sigma = mesh.sigma[:3]
     assert _etable(vu, mesh) is not dpe2
-    assert not vu.is_checked(elem_vel, mesh)
+    assert vu.depth_points(mesh, "layer_linear") is not dpn3
 
 
 def test_uv_wet():
@@ -1200,7 +880,7 @@ def test_sigma_table_centres(layout):
     """The points are the layer centres in s, every column reads every
     layer (``last = K - 2``) and is wet at every s (``bed = +inf``); no
     declaration and no element bottom is read: a malformed declaration
-    is neither validated nor replaced by a snapshot."""
+    is neither validated nor replaced."""
     vu = _vu()
     mesh = _sigma_mesh(layout=layout)
     n_cols = mesh.n_nodes if layout == "node" else mesh.n_elements
@@ -1292,7 +972,6 @@ def test_sigma_record_check_all_layers(layout, comp):
     col = "node" if layout == "node" else "element"
     good = _sigma_field(layout, np.ones((3, n)), np.ones((3, n)))
     vu.check_depth_linear_record(good, mesh)
-    assert vu.is_checked(good, mesh)
     for k, bad in ((2, np.nan), (0, np.inf), (1, -np.inf)):
         u = np.ones((3, n))
         v = np.ones((3, n))
@@ -1304,7 +983,6 @@ def test_sigma_record_check_all_layers(layout, comp):
                 rf"this {col} \(every layer of a sigma column; 1 {col}\(s\) "
                 r"affected\)")):
             vu.check_depth_linear_record(fld, mesh)
-        assert not vu.is_checked(fld, mesh)
 
 
 def test_sigma_level_placement_refused():

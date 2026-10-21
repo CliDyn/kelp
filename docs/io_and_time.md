@@ -799,13 +799,7 @@ depth-linear horizontal velocity. `load_restart` returns the rule a checkpoint
 was written with (`r["uv_vertical"]`: the trajectory file's `uv_vertical`
 attribute, or `write_restart_file(..., uv_vertical=)`'s
 `restart_uv_vertical`; `None` = `layer`, so checkpoints of runs without the
-option carry nothing new). A driver that writes several segments through ONE
-writer gets the same protection without a call: the first segment binds its
-rule to the writer before it writes anything (in memory only — no attribute
-is added to a file without the option), so even a segment that wrote only a
-checkpoint counts, and `run_single_realization` refuses a later segment with
-the other rule before it writes anything. `open()` creates a new file, so a
-writer object reopened for a new run starts unbound. The reason a
+option hold nothing new). The reason a
 restart reproduces the original run *bit for bit* (rather than merely
 approximately) is that the stochastic diffusion draws are keyed by the **global**
 step index, not by anything that resets on resume: continuing from step `N`

@@ -191,12 +191,9 @@ The tables are cached on the mesh per `(placement, layout)`; a table is
 rebuilt whenever `mesh.sigma`, its bed array (`mesh.depth` for nodes,
 `mesh.metadata["elem_bed"]` for elements) or its declaration
 (`mesh.metadata["uv_data_last"]` / `["uv_data_last_elem"]`) is replaced (a
-`max_levels` cut included; an in-place write is not seen — the engine
-therefore builds the table from its own read-only snapshot of the
-declaration, which replaces the reader's array in `mesh.metadata`: writing
-into the reader's array afterwards changes nothing, writing into the snapshot
-raises, and a new array declares another prefix; a copied or unpickled mesh,
-whose snapshot numpy returns writeable, gets a new snapshot on first use).
+`max_levels` cut included). The table is built from their values and keeps
+its own arrays; a write into one of them in place after the first use is not
+seen — assign a new array to declare another prefix.
 
 The rule at one column `c` (a vertex or an element) and particle depth `z`:
 
@@ -212,7 +209,9 @@ The rule at one column `c` (a vertex or an element) and particle depth `z`:
   dry or fill values there are harmless. Points `<= last_c` must be finite: the
   record check (`check_depth_linear_record`) refuses a record with a
   non-finite `u` or `v` there, naming the component, node or element, point
-  and record, once per field and mesh table.
+  and record. A run checks every record once, where it stores the record it
+  read (`tracking._mark_depth_linear`); the interpolators and the step
+  functions trust the fields they receive.
 
 **Walls at depth.** A column is *wet* at the particle depth when
 `z <= bed_c`, its physical bed (nodes: `mesh.depth`, the bed the end-of-step

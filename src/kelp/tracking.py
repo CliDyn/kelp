@@ -33,7 +33,7 @@ from .core.mesh import Mesh, find_containing_elements, find_nearest_nodes
 from .core.particles import ParticleState, make_state, ParticleStatus, count_by_status
 from .core.release import (activate_released, mask_dormant_for_record,
                            mask_inactive_velocity)
-from .numerics.vertical_uv import (check_depth_linear_record, is_checked,
+from .numerics.vertical_uv import (check_depth_linear_record,
                                    refuse_elem_cavities)
 from .readers import (get_reader, extract_time_info, time_axis_epoch,
                       NO_EPOCH_NOTE, RESOLVED_BY_READER, _READER_RESOLVES_TIME,
@@ -484,7 +484,9 @@ def _mark_depth_linear(vel, option: str, mesh, *, record: str = ""):
     """Apply ``mode.uv_vertical`` to a field read for a run.
 
     Every store site of the velocity cache passes its fields through here,
-    so the cached object is the marked and checked one.
+    so the cached object is the marked and checked one, and every record a
+    run reads is checked once (the interpolators and the step functions
+    do not check again).
 
     - option ``"layer"``, field ``"layer"``: returned untouched (no copy,
       no check — the default path stays bit-identical);
@@ -503,7 +505,7 @@ def _mark_depth_linear(vel, option: str, mesh, *, record: str = ""):
 
     A depth-linear result passes
     :func:`~kelp.numerics.vertical_uv.check_depth_linear_record` (named by
-    ``record``) unless it is already checked for this mesh's table.
+    ``record``).
 
     Parameters
     ----------
@@ -559,8 +561,7 @@ def _mark_depth_linear(vel, option: str, mesh, *, record: str = ""):
         raise ValueError(
             f"mode.uv_vertical must be one of {_UV_VERTICAL_OPTIONS}, got "
             f"{option!r}")
-    if not is_checked(vel, mesh):
-        check_depth_linear_record(vel, mesh, record=record)
+    check_depth_linear_record(vel, mesh, record=record)
     return vel
 
 
@@ -797,8 +798,8 @@ def _flatten_vel(vel: VelocityField):
         a = getattr(vel, f)
         if a is not None:
             arrays[f] = a
-    # uv_vertical rides in the meta; the record-check token (_dl_token)
-    # never does — an attached field is checked again in its own process
+    # uv_vertical rides in the meta; an attached field is checked in its
+    # own process (the store site in _VelCache.get)
     meta = {"uv_layout": vel.uv_layout, "kh_layout": vel.kh_layout,
             "uv_vertical": vel.uv_vertical,
             "scalar_names": sorted(vel.scalars) if vel.scalars else []}
@@ -1313,54 +1314,6 @@ def _validate_restart_uv_vertical(restart_value, mode) -> None:
             f"this run has {current!r}; resume with mode.uv_vertical: "
             f"{stored} (a rule change mixes two vertical u/v rules in one "
             "trajectory — start a new run from the seeds to change it)")
-
-
-def _check_writer_uv_vertical(writer, option: str) -> None:
-    """Keep one ``mode.uv_vertical`` rule per output file.
-
-    The rule a writer already carries is, in this order: the rule an
-    earlier ``run_single_realization`` segment bound to it
-    (``TrajectoryWriter.bound_rule``; bound before that segment's first
-    write, so also when it wrote only a checkpoint or attributes), else its
-    ``uv_vertical`` attribute (``run_tracking``'s metadata), else
-    ``"layer"`` when it holds records written by other code.  A fresh
-    writer — new, or reopened (``open()`` creates a new file and forgets
-    both) — takes any rule.  Writers without ``global_attr`` are not
-    checked.  Nothing is changed here; :func:`_bind_writer_uv_vertical`
-    binds.
-
-    Raises
-    ------
-    ValueError
-        The writer carries the other rule (the message names both).
-    """
-    get = getattr(writer, "global_attr", None)
-    if get is None:
-        return
-    bound = getattr(writer, "bound_rule", None)
-    carried = bound("uv_vertical") if bound is not None else None
-    if carried is None:
-        stated = get("uv_vertical")
-        if stated is not None:
-            carried = str(stated)
-        elif int(getattr(writer, "n_obs", 0) or 0) > 0:
-            carried = "layer"
-    if carried is None or carried == option:
-        return
-    raise ValueError(
-        f"output {getattr(writer, 'path', '')!r} is already used by a "
-        f"segment written with mode.uv_vertical {carried!r}, this segment "
-        f"has {option!r}; write it to a new output, or keep "
-        f"mode.uv_vertical: {carried}")
-
-
-def _bind_writer_uv_vertical(writer, option: str) -> None:
-    """Bind this segment's ``mode.uv_vertical`` to the writer (memory
-    only; a writer bound already keeps its rule).  Called right before the
-    segment's first write of any kind."""
-    bind = getattr(writer, "bind_rule", None)
-    if bind is not None:
-        bind("uv_vertical", option)
 
 
 def _resolve_composition(diff_cfg, integrator_name: str) -> str:
@@ -1926,10 +1879,6 @@ def run_single_realization(
     _check_uv_vertical_option(
         uv_vertical_option, fdrift3d=bool(getattr(mode, "Fdrift3D", False)),
         mesh=mesh, uv_interp=uv_interp_resolved, reader=reader)
-    if writer is not None:
-        # one rule per output file: a writer that already carries the other
-        # rule (an earlier segment) is refused before anything is written
-        _check_writer_uv_vertical(writer, uv_vertical_option)
     if (uv_vertical_option == "linear"
             or getattr(reader, "native_uv_vertical", "layer") == "level"
             or "sigma_full" in (getattr(mesh, "metadata", None) or {})):
@@ -2141,11 +2090,6 @@ def run_single_realization(
                 "resumed run without release positions (a restart written "
                 "before output format 2): release_lon/lat/z are NaN in this "
                 "output", RuntimeWarning, stacklevel=2)
-
-    # one rule per output: bind this segment's mode.uv_vertical to the writer
-    # before its first write of any kind (checked at the entry)
-    if writer is not None:
-        _bind_writer_uv_vertical(writer, uv_vertical_option)
 
     # Rotated-frame provenance, even for caller-supplied writers: run_tracking
     # also sets this via construction metadata, so a doubled set is harmless

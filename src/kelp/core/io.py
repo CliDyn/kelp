@@ -7,7 +7,7 @@ trajectory writer lives in ``kelp.writers``.
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 import numpy as np
@@ -176,15 +176,6 @@ def _require_same_uv_vertical(site: str, *placements: str) -> str:
     return first
 
 
-def _shared_token(*fields):
-    """The parents' ``_dl_token`` when all hold the SAME object, else None."""
-    tok = fields[0]._dl_token
-    for f in fields[1:]:
-        if f._dl_token is not tok:
-            return None
-    return tok
-
-
 @dataclass
 class VelocityField:
     """Velocity data for one timestep.
@@ -241,13 +232,6 @@ class VelocityField:
         (``u`` 1-D) is always ``"layer"``.  ``lerp``, ``LazyLerpField``,
         the PCHIP reconstruction and the shared cache keep it and refuse
         mixed placements.
-
-    Notes
-    -----
-    ``_dl_token`` (not an ``__init__`` argument) is the record-check
-    token of the depth-linear path; any rebuild through the constructor
-    (``dataclasses.replace``, the shared cache) resets it to ``None``, and
-    the blends keep it only when every parent holds the SAME object.
     """
     u: np.ndarray
     v: np.ndarray
@@ -261,10 +245,6 @@ class VelocityField:
     scalars: Optional[Dict[str, np.ndarray]] = None  # {varname: (N,) | (K-1, N) | (K, N)} node fields
     az: Optional[np.ndarray] = None  # vertical diffusivity (K, N) at interfaces
     uv_vertical: str = "layer"  # "layer" | "level" | "layer_linear"
-    # record-check token of the depth-linear path; init=False, so every
-    # rebuild through the constructor (dataclasses.replace) drops it
-    _dl_token: object = field(default=None, init=False, repr=False,
-                              compare=False)
 
     def __post_init__(self) -> None:
         # All-or-nothing: kh_zonal/kh_meridional/kh_layout must be
@@ -387,7 +367,7 @@ class VelocityField:
                     f"{self.az.shape} vs {other.az.shape}"
                 )
             az_interp = _blend(self.az, other.az, alpha)
-        out = VelocityField(
+        return VelocityField(
             u=_blend(self.u, other.u, alpha),
             v=_blend(self.v, other.v, alpha),
             eta=_blend(self.eta, other.eta, alpha),
@@ -401,8 +381,6 @@ class VelocityField:
             az=az_interp,
             uv_vertical=uv_vertical,
         )
-        out._dl_token = _shared_token(self, other)
-        return out
 
 
 class LazyLerpField:
@@ -486,11 +464,9 @@ class LazyLerpField:
         # Plain (non-lazy) metadata — identical rules to VelocityField.lerp:
         # kh_layout survives only when BOTH sides carry Kh.
         self.uv_layout = vel_a.uv_layout
-        # Plain attributes, never lazy (__getattr__ raises for unknown
-        # names): the placement, and the record-check token — kept only
-        # when both parents hold the SAME token object.
+        # the placement: a plain attribute, never lazy (__getattr__ raises
+        # for unknown names)
         self.uv_vertical = uv_vertical
-        self._dl_token = _shared_token(vel_a, vel_b)
         self.kh_layout = vel_a.kh_layout if both_kh else None
         self.t = (None if vel_a.t is None or vel_b.t is None
                   else (1.0 - self.alpha) * vel_a.t + self.alpha * vel_b.t)
@@ -547,14 +523,12 @@ class LazyLerpField:
 
     def materialize(self) -> VelocityField:
         """Return the full eager ``VelocityField`` for this blend."""
-        out = VelocityField(
+        return VelocityField(
             u=self.u, v=self.v, eta=self.eta, w=self.w, t=self.t,
             kh_zonal=self.kh_zonal, kh_meridional=self.kh_meridional,
             kh_layout=self.kh_layout, uv_layout=self.uv_layout,
             scalars=self.scalars, az=self.az, uv_vertical=self.uv_vertical,
         )
-        out._dl_token = self._dl_token
-        return out
 
 
 __all__ = ["VelocityField", "LazyLerpField"]

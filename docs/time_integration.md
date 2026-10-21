@@ -440,9 +440,11 @@ depth-linear field is refused for `rk45`, a mesh neither z-level nor sigma, a
 field without `w`, and a layout and `uv_interp` outside the table of the
 interpolators that evaluate it (node layout: `barycentric`; element layout: `leastsq`, `edge_leastsq`,
 `barycentric`); the fields of one
-step (`vel`, `vel_next`, each PCHIP snapshot) must share one placement, and each
-passes the record check once. For a layer field it reads only the placement
-attributes, so layer runs keep their cost and their bits.
+step (`vel`, `vel_next`, each PCHIP snapshot) must share one placement, and the
+mesh must hold the depth-point table of that placement and layout. The values
+are not checked in the step: a run checks every record once, where it stores
+it. For a layer field it reads only the placement attributes, so layer runs
+keep their cost and their bits.
 
 After the deterministic step returns, the stochastic diffusion kick (if enabled)
 is applied as a separate stage; the schemes, composition modes, and the

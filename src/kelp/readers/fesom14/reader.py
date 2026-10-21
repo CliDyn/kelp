@@ -219,8 +219,7 @@ class Fesom14Reader:
                 [-180, 180)), whatever the tracking frame.
             ``uv_data_last``
                 int32 ``(N,)``, the index of each column's last wet level
-                (a new array the reader never writes into or replaces; the
-                engine puts a read-only copy in its place at its first use).
+                (a new array the reader never writes into or replaces).
             ``fesom14_idx``
                 ASCII only: the ``(N, K)`` 3-D node index table, -1 = dry.
             ``fesom14_polygon_report``
@@ -443,8 +442,7 @@ class Fesom14Reader:
         harmless; each reads one record per variable. The static wet mask
         of the mesh is never re-declared from the data, only compared with
         it; the declaration ``uv_data_last`` stays the one :meth:`load_mesh`
-        made (the engine puts a read-only copy with the same values in its
-        place at its first use).
+        made.
 
         Parameters
         ----------

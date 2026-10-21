@@ -54,7 +54,6 @@ from kelp.core.geometry import (DEG2RAD, METERS_PER_DEG_LAT,  # noqa: E402
                                 wrap_lon)
 from kelp.core.mesh import find_nearest_nodes  # noqa: E402
 from kelp.core.particles import ParticleStatus, make_state  # noqa: E402
-from kelp.numerics.vertical_uv import is_checked  # noqa: E402
 from kelp.readers import extract_time_info, get_reader  # noqa: E402
 from kelp.writers import (TrajectoryWriter, load_restart,  # noqa: E402
                           load_trajectories)
@@ -389,10 +388,10 @@ def test_missing_element_bottoms_refused_before_writer(tmp_path):
                                w_interp="barycentric"),
                 start_time_idx=0, n_steps=2, writer=w)
         assert reader.reads == 0 and w.n_obs == 0
-        assert w.global_attr("kelp_version") is None
     finally:
         w.close()
         ds.close()
+    assert "kelp_version" not in _global_attrs(tmp_path / "direct.nc")
     off = _cfg(env, uv_vertical="layer", out="off.nc")
     _run(off)
     assert Path(off.data.output_path).exists()
@@ -460,7 +459,7 @@ def test_prefetch_and_shared_cache(tmp_path, monkeypatch, uv_interp):
     """Prefetch windows of 3 and the shared snapshot cache each give the
     plain run bit for bit; a second shared cache attaches the published
     element record without reading it, marked ``"layer_linear"`` and
-    checked, bit for bit the local read."""
+    checked (once per stored record), bit for bit the local read."""
     from kelp.core.shared_fields import SharedFieldCache
     env = _env(tmp_path)
     base = _cfg(env, integrator="rk2", uv_interp=uv_interp, out="base.nc")
@@ -498,6 +497,13 @@ def test_prefetch_and_shared_cache(tmp_path, monkeypatch, uv_interp):
     # the attached record
     reader, mesh, ds = _open(env)
     r2 = _CountingReader()
+    checks = []
+    real_check = tracking.check_depth_linear_record
+
+    def counting_check(vel, mesh_, *, record=""):
+        checks.append(record)
+        return real_check(vel, mesh_, record=record)
+    monkeypatch.setattr(tracking, "check_depth_linear_record", counting_check)
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
         c1 = tracking._VelCache(shared=SharedFieldCache(shm / "c", "tagE"))
@@ -509,7 +515,7 @@ def test_prefetch_and_shared_cache(tmp_path, monkeypatch, uv_interp):
     local = tracking._VelCache().get(3, reader, ds, mesh, _mode())
     for v in (v2, local):
         assert v.uv_layout == "element" and v.uv_vertical == "layer_linear"
-        assert is_checked(v, mesh)
+    assert checks == ["time index 3"] * 3
     for f in ("u", "v", "w", "eta"):
         assert_bitwise(getattr(v2, f), getattr(local, f), f)
     ds.close()
@@ -696,12 +702,13 @@ def test_field_without_uv_layout_is_element_layout(tmp_path):
     n_el, n_nd = mesh.n_elements, mesh.n_nodes
     elem = SimpleNamespace(u=np.zeros((K - 1, n_el)),
                            v=np.zeros((K - 1, n_el)),
-                           uv_vertical="layer_linear", _dl_token=None)
+                           uv_vertical="layer_linear")
     check_depth_linear_record(elem, mesh)
-    assert elem._dl_token is depth_points(mesh, "layer_linear", "element")
+    assert ("layer_linear", "element") in mesh._uv_depth_points
+    assert depth_points(mesh, "layer_linear", "element").last.size == n_el
     node = SimpleNamespace(u=np.zeros((K - 1, n_nd)),
                            v=np.zeros((K - 1, n_nd)),
-                           uv_vertical="layer_linear", _dl_token=None)
+                           uv_vertical="layer_linear")
     with pytest.raises(ValueError,
                        match=rf"u has {n_nd} elements, the mesh has {n_el}"):
         check_depth_linear_record(node, mesh)

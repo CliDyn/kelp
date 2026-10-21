@@ -641,23 +641,6 @@ def test_dispatch_reads_state_z_ignores_layer():
         assert_bitwise(a, b, f"{name} lazy")
 
 
-def test_record_checked_before_any_read():
-    """A non-finite value at a usable point is refused, naming the
-    element; a passing field is stamped as checked for the table."""
-    mesh = _mesh()
-    vel = _linear_field(mesh)
-    vel.u[2, 13] = np.nan
-    st = _state(CENTRE_PTS, 50.0)
-    nn = find_nearest_nodes(mesh, st.lon, st.lat)
-    with pytest.raises(ValueError, match=r"u = nan is non-finite at element "
-                                         r"13, point 2"):
-        ip.interp_leastsq(st, mesh, vel, nn, 1.0, 0)
-    good = _linear_field(mesh)
-    assert not vu.is_checked(good, mesh)
-    ip.interp_leastsq(st, mesh, good, nn, 1.0, 0)
-    assert vu.is_checked(good, mesh)
-
-
 @pytest.mark.parametrize("placement", ["level", "layer_linear"])
 def test_node_field_refused(placement):
     """A depth-linear NODE field: refused before any slicing (``layer=7``
@@ -1499,23 +1482,6 @@ def test_new_cores_dispatch(kind):
     U2 = _run_kind(kind, deep, _linear_field(deep),
                    _state([CENTRE_PTS[0]] * 2, [45.0, 52.5]))[0]
     assert abs(U2[1] - U2[0]) > 1e-4
-
-
-@pytest.mark.parametrize("kind", KINDS)
-def test_new_cores_record_checked(kind):
-    """A non-finite value at a usable point is refused, naming the
-    element; a passing field is stamped as checked for the table."""
-    mesh = _mesh()
-    vel = _linear_field(mesh)
-    vel.u[2, 13] = np.nan
-    st = _state(CENTRE_PTS, 50.0)
-    with pytest.raises(ValueError, match=r"u = nan is non-finite at element "
-                                         r"13, point 2"):
-        _run_kind(kind, mesh, vel, st)
-    good = _linear_field(mesh)
-    assert not vu.is_checked(good, mesh)
-    _run_kind(kind, mesh, good, st)
-    assert vu.is_checked(good, mesh)
 
 
 @pytest.mark.parametrize("kind", KINDS)

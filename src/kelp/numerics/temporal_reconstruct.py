@@ -34,7 +34,7 @@ except Exception:  # pragma: no cover - broad on purpose: a numpy/numba
             return func
         return decorator
 
-from ..core.io import VelocityField, _require_same_uv_vertical, _shared_token
+from ..core.io import VelocityField, _require_same_uv_vertical
 
 
 def _fc_slope(d_prev, d_next, h_prev, h_next):
@@ -226,8 +226,7 @@ def reconstruct_pchip(snaps: Sequence[VelocityField],
     per-element via :func:`_pchip_blend4`.  Kh is not reconstructed.
 
     The four snapshots must share one ``uv_vertical`` placement (checked
-    before the field shapes); the result carries it, and carries the
-    snapshots' ``_dl_token`` only when all four hold the SAME object.
+    before the field shapes); the result carries it.
     """
     if len(snaps) != 4 or len(times) != 4:
         raise ValueError("reconstruct_pchip needs exactly 4 snapshots/times")
@@ -291,11 +290,9 @@ def reconstruct_pchip(snaps: Sequence[VelocityField],
                 "reconstruction snapshots")
         scalars = {k: blend_scalar(k) for k in ref}
 
-    out = VelocityField(u=u, v=v, eta=eta, w=w,
-                        uv_layout=b.uv_layout, scalars=scalars,
-                        uv_vertical=uv_vertical)
-    out._dl_token = _shared_token(*snaps)
-    return out
+    return VelocityField(u=u, v=v, eta=eta, w=w,
+                         uv_layout=b.uv_layout, scalars=scalars,
+                         uv_vertical=uv_vertical)
 
 
 def make_stage_vels_recon(snaps, times, sim_time, dt, time_dir, c_coeffs):

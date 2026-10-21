@@ -306,10 +306,10 @@ the bed, a stencil member dry at the particle depth as a wall — is in
 `vertical.md` §2.1, with the note that for FESOM 1.4 this
 barycentric-times-linear-in-depth reading is a prism-wise approximation of the
 model's own interpolation on tetrahedra. Every route below reads each particle
-at its own depth `state.z` (the `layer` argument is ignored) and runs the
-record check (`check_depth_linear_record`) once per field and mesh table
-before the first read — a lazy blend is checked through its two parents,
-before anything is blended. On a sigma mesh (FESOM-C) the routes are the same
+at its own depth `state.z` (the `layer` argument is ignored) and trusts the
+values it receives: a run checks every record once
+(`check_depth_linear_record`), where it stores it. On a sigma mesh (FESOM-C)
+the routes are the same
 and `state.z` holds the stage's sigma fraction `s = clip(z / H_p, 0, 1)`,
 which the integrators put there; the table's points are the sigma layer
 centres in `s` and every column is wet to the bed (`bed = +inf`), so no member

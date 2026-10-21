@@ -184,17 +184,20 @@ the particle is a wall, left out of the sum), so it must know where each
 column's data end and must never blend a zero the reader wrote into a
 profile. Two mechanisms see to that:
 
-- *The declaration.* A 3-D load on the dual geometry (`load_mesh` with a
-  `mode_cfg` that has `Fdrift3D`) reads the leading finite count of `u` down
-  every store column at t=0 and declares it per node:
+- *The declaration.* A 3-D load of a depth-linear run on the dual geometry
+  (`load_mesh` with a `mode_cfg` that has `Fdrift3D` and `uv_vertical:
+  linear`) reads the leading finite count of `u` down every store column at
+  t=0 and declares it per node:
   `mesh.metadata["uv_data_last"]` (int32, mesh-node order through the store
   index the data compaction uses, `_healpix_data_idx`; the count minus one,
   so `-1` = no u in the column — never a mesh node, the wet mask drops it).
   It caps each node's last usable point, so a bathymetry (`deptho`) deeper
   than the u data never points the table at a zeroed slot (u- and w-family
-  bottoms disagree per cell on ng5). A 2-D load, or one without `mode_cfg`,
-  skips this extra pass over the first record; a layer run on a 3-D mesh
-  carries the declaration unused. The declaration comes from the first record
+  bottoms disagree per cell on ng5). A 2-D or a layer load, or one without
+  `mode_cfg`, skips this extra pass over the first record and declares
+  nothing; a run with the option on such a mesh is refused at its first
+  record ("load the mesh with the run's mode config": `run_tracking` and the
+  CLI do). The declaration comes from the first record
   of the MESH store (`mesh.meshpath`), not of `data.ncinput`: a data store
   whose u prefix is shorter is refused by the raw-record check below, one
   whose prefix is longer is capped to the mesh store's prefix — point

@@ -110,16 +110,15 @@ Paths are below `src/kelp/`.
   on a sigma mesh the layer centres in the sigma fraction, every column wet to the
   bed; cached on the mesh by object identity), the bracket, read and wet test
   (`uv_bracket`, `uv_at`, `uv_wet`, njit) and the record check
-  (`check_depth_linear_record`, `is_checked`: u/v finite down to each column's last
-  usable point; the field is stamped with the table object). Trap: the cache and
-  the stamp compare by IDENTITY — replace `mesh.sigma`/`mesh.depth`/the
-  declarations/`mesh.metadata["elem_bed"]`, never write them in place (the engine
-  snapshots a declaration at first use: writing into the reader's array afterwards
-  changes nothing). Notes: [numerics.md](numerics.md) (its own section and the interpolate.py
+  (`check_depth_linear_record`: u/v finite down to each column's last usable point;
+  a run calls it once per record it stores, the interpolators and steps never).
+  Trap: the cache compares by IDENTITY — replace `mesh.sigma`/`mesh.depth`/the
+  declarations/`mesh.metadata["elem_bed"]`, never write them in place (an in-place
+  write after the first use is not seen). Notes: [numerics.md](numerics.md) (its own section and the interpolate.py
   bullet); the entry gate and the fused twins in [integrators.md](integrators.md);
   the option and the cache marking in [tracking.md](tracking.md); the HEALPix
-  declaration and the FESOM2 element bottoms in [readers.md](readers.md); `VelocityField.uv_vertical` and
-  `_dl_token` in [core.md](core.md); topic doc [../vertical.md](../vertical.md) §2.1.
+  declaration and the FESOM2 element bottoms in [readers.md](readers.md); `VelocityField.uv_vertical`
+  in [core.md](core.md); topic doc [../vertical.md](../vertical.md) §2.1.
 - **`numerics/vertical.py`** — z-level layers, depth clamping and W interpolation
   (vertical first, then `nearest`, `leastsq`, `barycentric` or `idw` across the
   neighbours, bottom-aware). Notes: [numerics.md](numerics.md); the `w_interp`

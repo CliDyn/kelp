@@ -59,8 +59,7 @@ read two ways, `"layer"` and `"layer_linear"`. Three legs:
 - The thread count is fixed before Numba loads (`--threads`, else
   `NUMBA_NUM_THREADS`, else the CPU count). Pass `--threads` equal to the
   physical core count: the default `os.cpu_count()` counts SMT threads. One warm-up step per placement
-  (compilation; the record check, which runs once per record and mesh; a check
-  that the expected kernel or step path ran). Then `--steps` timed steps per
+  (compilation; a check that the expected kernel or step path ran). Then `--steps` timed steps per
   placement, interleaved (layer, linear, layer, …), each from the same state,
   each with a new lazy blend over the cached records, as the tracking layer
   builds it every step. Reported: the median per placement and the ratio

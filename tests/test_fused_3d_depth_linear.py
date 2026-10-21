@@ -724,58 +724,6 @@ def test_tinterp_placement_mixed_raises(mesh, monkeypatch, case):
     assert all(c == 0 for c in calls.values())
 
 
-@pytest.mark.parametrize("where", ["vel", "vel_next", "lazy_vel_b",
-                                   "snapshot_0", "snapshot_3"])
-def test_runner_record_check(mesh, monkeypatch, where):
-    """A direct runner call checks every field its kernel reads (a NaN at a
-    usable point is refused, naming the field); a field already checked
-    for the mesh's table is not scanned again."""
-    placement = "level"
-    nan_at = (1, 5)                                   # point 1, node 5
-    assert depth_points(mesh, placement).last[5] >= 1
-    st = _seeds(mesh, n=50)
-    if where.startswith("snapshot"):
-        j = int(where[-1])
-        snaps = [_dl_field(mesh, placement, s) for s in (21, 22, 23, 24)]
-        snaps[j].u[nan_at] = np.nan
-        recon = (snaps, list(_TIMES), 100000.0, 1.0)
-        with pytest.raises(ValueError, match=(
-                rf"non-finite at node 5, point 1 .*recon snapshot {j} "
-                r"\(_run_fused_rk2_3d_bary_pchip\)")):
-            I._run_fused_rk2_3d_bary_pchip(st, recon, mesh, DT, 1.0,
-                                           I.W_BARYCENTRIC)
-        snaps[j].u[nan_at] = 0.25
-        run = lambda: I._run_fused_rk2_3d_bary_pchip(  # noqa: E731
-            st, recon, mesh, DT, 1.0, I.W_BARYCENTRIC)
-    else:
-        a = _dl_field(mesh, placement, 21)
-        b = _dl_field(mesh, placement, 22)
-        nxt = _dl_field(mesh, placement, 23)
-        vel = LazyLerpField(a, b, 0.4) if where == "lazy_vel_b" else a
-        bad = {"vel": a, "vel_next": nxt, "lazy_vel_b": b}[where]
-        bad.u[nan_at] = np.nan
-        label = {"vel": "vel", "vel_next": "vel_next",
-                 "lazy_vel_b": r"vel\.vel_b"}[where]
-        with pytest.raises(ValueError, match=(
-                rf"non-finite at node 5, point 1 .*in record {label} "
-                r"\(_run_fused_rk2_3d_bary_tinterp\)")):
-            I._run_fused_rk2_3d_bary_tinterp(st, vel, nxt, 21600.0, mesh,
-                                             DT, 1.0, I.W_BARYCENTRIC)
-        bad.u[nan_at] = 0.25
-        run = lambda: I._run_fused_rk2_3d_bary_tinterp(  # noqa: E731
-            st, vel, nxt, 21600.0, mesh, DT, 1.0, I.W_BARYCENTRIC)
-    run()                                             # checks and stamps
-    real = I.check_depth_linear_record
-    scans = []
-
-    def spy(vel_, mesh_, *, record=""):
-        scans.append(record)
-        return real(vel_, mesh_, record=record)
-    monkeypatch.setattr(I, "check_depth_linear_record", spy)
-    run()
-    assert scans == []
-
-
 def test_field_checks_by_placement():
     """``_fused_3d_bary_field_checks`` wants u/v ``(K, N)`` for ``"level"``
     and ``(K-1, N)`` otherwise; w is ``(K, N)`` always.  The ``"layer"``

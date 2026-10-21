@@ -45,7 +45,7 @@ except ImportError:
         return range(*args)
 
 from ..core.geometry import METERS_PER_DEG_LAT, DEG2RAD, wrap_lon, clamp_lat
-from ..core.io import LazyLerpField, _require_same_uv_vertical
+from ..core.io import _require_same_uv_vertical
 from .interpolate import (
     interp_leastsq, interp_leastsq_single, VelocityField,
     _interp_leastsq_core, _interp_leastsq_core_tinterp,
@@ -56,7 +56,7 @@ from .interpolate import (
     _interp_leastsq_core_dl,
     get_interpolator, UV_INTERP_USES_ELEMS, _reject_depth_linear, _DL_LAYOUT,
 )
-from .vertical_uv import check_depth_linear_record, depth_points, is_checked
+from .vertical_uv import depth_points
 from ..core.mesh import (
     Mesh, find_nearest_nodes, find_containing_elements,
     find_containing_elements_walk, grid_hash_dense_for_elements,
@@ -1089,16 +1089,15 @@ def _check_depth_linear_entry(vel, mesh, uv_interp: str, integrator: str, *,
     the interpolators that evaluate it: node layout with ``"barycentric"``
     only, element layout with ``"leastsq"``, ``"edge_leastsq"`` or
     ``"barycentric"`` (any other layout is refused).  Then the placements
-    must agree, and each field passes the record check
-    (``check_depth_linear_record``, which also holds an element-layout
-    field to the element table: ``"layer_linear"`` data and, on a z-level
-    mesh, the reader's element bottoms; a sigma mesh serves
+    must agree, and the depth-point table of ``vel``'s placement and
+    layout must exist (``depth_points``: on element layout
+    ``"layer_linear"`` data and, on a z-level mesh, the reader's element
+    bottoms and no ice-shelf cavities; a sigma mesh serves
     ``"layer_linear"`` data only, read in the sigma fraction
     ``s = z / H_p`` that the unfused steps hand the interpolators,
-    :func:`_sigma_frac_for_uv`) unless already checked for this mesh's
-    table: ``vel``, ``vel_next``, each ``recon`` snapshot, and the raw
-    parents ``vel_a`` / ``vel_b`` of any ``LazyLerpField`` among them
-    (checked first, so a bad parent is named).
+    :func:`_sigma_frac_for_uv`).  The values are not checked here: a run
+    checks every record once where it stores it
+    (``tracking._mark_depth_linear``).
 
     Parameters
     ----------
@@ -1119,8 +1118,8 @@ def _check_depth_linear_entry(vel, mesh, uv_interp: str, integrator: str, *,
     Raises
     ------
     ValueError
-        An unsupported combination, mixed placements, or a non-finite u/v
-        value at a usable point of any field (the message names the field).
+        An unsupported combination, mixed placements (the message names
+        each field), or a mesh without the table (``depth_points``).
     """
     placement = getattr(vel, "uv_vertical", "layer")
     if placement == "layer":
@@ -1176,20 +1175,7 @@ def _check_depth_linear_entry(vel, mesh, uv_interp: str, integrator: str, *,
     if any(getattr(f, "uv_vertical", "layer") != placement
            for _, f in named):
         _raise_step_mixture(where, named)
-
-    seen = set()
-    for name, f in named:
-        group = []
-        if isinstance(f, LazyLerpField):
-            group = [(f"{name}.vel_a", f.vel_a), (f"{name}.vel_b", f.vel_b)]
-        group.append((name, f))
-        for label, g in group:
-            if id(g) in seen:
-                continue
-            seen.add(id(g))
-            if not is_checked(g, mesh):
-                check_depth_linear_record(g, mesh,
-                                          record=f"{label} ({where})")
+    depth_points(mesh, placement, layout)
 
 
 def _make_stage_vels(vel: VelocityField, vel_next: Optional[VelocityField],
@@ -3559,19 +3545,13 @@ def _fused_euler_3d_dl_table(vel, mesh, placement):
     twin :func:`_fused_euler_step_3d_dl` reads.
 
     The field must be element layout (``leastsq`` evaluates no other
-    depth-linear field); it passes the record check unless already checked
-    for the mesh's table (a lazy field through its parents first, so a bad
-    parent is named), and its u/v must have the table's shape ``(M, E)``
+    depth-linear field), and its u/v must have the table's shape ``(M, E)``
     (no bounds checks inside the kernel).
     """
     site = "_run_fused_euler_3d"
     if getattr(vel, "uv_layout", "element") != "element":
         _reject_depth_linear(vel, site, _DL_LAYOUT)
-    named = []
-    if hasattr(vel, "vel_a"):
-        named += [("vel.vel_a", vel.vel_a), ("vel.vel_b", vel.vel_b)]
-    named.append(("vel", vel))
-    dp = _fused_3d_dl_table(site, named, mesh, placement, layout="element")
+    dp = _fused_3d_dl_table(mesh, placement, layout="element")
     u, v = vel.u, vel.v
     want = (dp.p.size, mesh.n_elements)
     if (getattr(u, "shape", None) != want
@@ -4566,27 +4546,15 @@ def _fused_3d_uv_placement(site, named):
     return placement
 
 
-def _fused_3d_dl_table(site, named, mesh, placement, layout="node"):
+def _fused_3d_dl_table(mesh, placement, layout="node"):
     """The depth-point table a fused depth-linear kernel reads (``None`` for
     ``"layer"``: nothing is read or built): ``depth_points(mesh,
     placement, layout)`` — the node table for the barycentric RK2 runners,
     the element table for the Euler runner — whose ``p``, ``last`` and
     ``bed`` the runners pass after ``z_levels``.
-
-    Every field of ``named`` (see :func:`_fused_3d_uv_placement`) passes the
-    record check first (``check_depth_linear_record``, skipped when
-    ``is_checked``; each object once), so a direct runner call cannot feed
-    the kernel a non-finite value at a usable point.
     """
     if placement == "layer":
         return None
-    seen = set()
-    for label, f in named:
-        if id(f) in seen:
-            continue
-        seen.add(id(f))
-        if not is_checked(f, mesh):
-            check_depth_linear_record(f, mesh, record=f"{label} ({site})")
     return depth_points(mesh, placement, layout)
 
 
@@ -4732,9 +4700,8 @@ def _run_fused_rk2_3d_bary_tinterp(state, vel, vel_next, dt_to_next, mesh,
             "kernel — use the unfused path")
 
     # one placement for every field the kernel reads (a lazy vel's raw
-    # parents first, so a bad parent is named; the target), before any
-    # other check reads a field: it picks the kernel; the shape guard and,
-    # depth-linear, the record check follow below
+    # parents, the target), before any other check reads a field: it picks
+    # the kernel; the shape guard follows below
     site = "_run_fused_rk2_3d_bary_tinterp"
     named = []
     if hasattr(vel, "vel_a"):
@@ -4780,7 +4747,7 @@ def _run_fused_rk2_3d_bary_tinterp(state, vel, vel_next, dt_to_next, mesh,
         [("w_a", w_a), ("w_b", w_b), ("w_t", w_t)],
         uv_vertical=placement,
     )
-    dp = _fused_3d_dl_table(site, named, mesh, placement)
+    dp = _fused_3d_dl_table(mesh, placement)
     if dp is None:
         fused_kernel = _fused_rk2_step_3d_bary_tinterp
         table = ()
@@ -4903,8 +4870,7 @@ def _run_fused_rk2_3d_bary_pchip(state, recon, mesh, dt, time_dir, w_code,
 
     # one placement for the step's field and the four snapshots
     # (reconstruct_pchip's order: times, bracket, placement); it picks the
-    # kernel.  The kernel reads the snapshots only, so only they are
-    # record-checked below.
+    # kernel
     site = "_run_fused_rk2_3d_bary_pchip"
     named = [(f"recon snapshot {i}", s_) for i, s_ in enumerate(snaps4)]
     placement = _fused_3d_uv_placement(
@@ -4946,7 +4912,7 @@ def _run_fused_rk2_3d_bary_pchip(state, recon, mesh, dt, time_dir, w_code,
         [("w0", a.w), ("w1", b.w), ("w2", c_.w), ("w3", d.w)],
         uv_vertical=placement,
     )
-    dp = _fused_3d_dl_table(site, named, mesh, placement)
+    dp = _fused_3d_dl_table(mesh, placement)
     if dp is None:
         fused_kernel = _fused_rk2_step_3d_bary_pchip
         table = ()

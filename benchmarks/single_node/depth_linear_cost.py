@@ -31,14 +31,15 @@ bathymetry (so the last usable point varies from column to column), random
 u/v/w, particles at random positions.
 
 Method: the thread count is fixed before Numba loads; one warm-up step per
-placement (compilation, the once-per-field record check, a check that the
-expected kernel or step path ran); then ``--steps`` timed steps per
+placement (compilation, a check that the expected kernel or step path
+ran); then ``--steps`` timed steps per
 placement, interleaved (layer, linear, layer, ...) so slow drifts of the
 machine hit both; the median of each placement and their ratio are
 reported with the machine, the commit and the thread count.  Each timed
 step starts from the same state (the same work every time) and builds a
-new lazy blend from the cached, already-checked records, as the tracking
-layer does every step.
+new lazy blend from the cached records, as the tracking layer does every
+step (the records are not record-checked here: a run checks each one
+once when it reads it, outside the step).
 
 Usage (an otherwise idle node)::
 
@@ -376,7 +377,7 @@ def main(argv=None) -> int:
             return I.rk2_step(st, vel, mesh, DT, 1.0, uv_interp="leastsq",
                               w_interp="leastsq", **kw)
 
-    # warm-up: compile, check each record once, and prove the route
+    # warm-up: compile and prove the route
     alive = {}
     for name, recs in (("layer", lay), ("layer_linear", lin)):
         hits = {}

@@ -179,11 +179,7 @@ velocities in one path. A checkpoint therefore records its rule: the embedded ch
 \code{uv\_vertical} attribute, a standalone restart file through its attribute \code{restart\_uv\_vertical},
 written only for \conf{linear}. \fn{load\_restart} returns the rule as \code{uv\_vertical}, with \code{None}
 meaning \conf{layer} (a layer run, or a file written before the option existed), and the resume recipe checks
-it next to the frame: a resume with the other value is refused, and the message names both rules. A
-writer keeps one rule as well. A segment run into a writer refuses to start when the writer already holds
-the other rule --- the rule an earlier segment bound to it in memory before its first write of any kind, else
-its \code{uv\_vertical} attribute, else \conf{layer} when it already holds records written by other code. A
-writer opened anew creates a new file and takes any rule.
+it next to the frame: a resume with the other value is refused, and the message names both rules.
 
 \paragraph{Resumable chains.} A run longer than one allocation of a batch system is split into a chain of
 jobs. Each job resumes from the newest standalone restart file --- written with \fn{write\_restart\_file}, which
@@ -251,7 +247,6 @@ cadence and checkpoint scheduling are in the time loop of \srcfile{tracking.py},
 variables in \fn{\_record\_clock\_origin} and \fn{\_release\_arrays} there; the epoch and calendar of the time
 come from \fn{time\_axis\_epoch} (\srcfile{readers/\_\_init\_\_.py}); the velocity mask is
 \fn{mask\_inactive\_velocity} (\srcfile{core/release.py}); the frame check on resume is
-\fn{\_validate\_restart\_frame} and the rule check \fn{\_validate\_restart\_uv\_vertical}, the writer's rule
-\fn{\_check\_writer\_uv\_vertical} with \fn{\_bind\_writer\_uv\_vertical} (\srcfile{tracking.py}), using
-\fn{TrajectoryWriter.global\_attr}, \fn{bound\_rule} and \fn{bind\_rule} (\srcfile{writers.py}); sharding and merging are
+\fn{\_validate\_restart\_frame} and the rule check \fn{\_validate\_restart\_uv\_vertical}
+(\srcfile{tracking.py}); sharding and merging are
 \code{utils/sort\_seeds.py}, \code{utils/split\_seeds.py} and \code{utils/concat\_trajectories.py}.}

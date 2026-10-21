@@ -2,10 +2,11 @@
 
 The option (``"layer"``, the default, or ``"linear"``) reaches every read of
 a run: the velocity cache marks each layer field ``"layer_linear"`` and
-validates the record (prefetch windows and the shared snapshot cache
-included); the HEALPix reader declares its u/v data prefix
-(``mesh.metadata["uv_data_last"]``) and checks its raw records before it
-zeroes them; ``max_levels`` cuts the mesh on every entry point of a
+validates the record, once per record it stores (prefetch windows and the
+shared snapshot cache included); the HEALPix reader declares its u/v data
+prefix (``mesh.metadata["uv_data_last"]``) for a depth-linear mode config
+and checks its raw records before it zeroes them; ``max_levels`` cuts the
+mesh on every entry point of a
 depth-linear run; the reader hook ``prepare(mesh, ds)`` runs at every entry
 (``run_tracking`` right after ``open_dataset``, then each realization), with
 no memory of the dataset, mesh, levels, bed or reader it ran for before; the
@@ -40,7 +41,7 @@ from kelp.core.config import (AppConfig, DataConfig, MeshConfig,  # noqa: E402
 from kelp.core.geometry import DEG2RAD, METERS_PER_DEG_LAT  # noqa: E402
 from kelp.core.io import VelocityField  # noqa: E402
 from kelp.core.particles import ParticleStatus, make_state  # noqa: E402
-from kelp.numerics.vertical_uv import depth_points, is_checked  # noqa: E402
+from kelp.numerics.vertical_uv import depth_points  # noqa: E402
 from kelp.readers import extract_time_info, get_reader  # noqa: E402
 from kelp.writers import (TrajectoryWriter, load_restart,  # noqa: E402
                           load_trajectories)
@@ -280,6 +281,19 @@ def _hp_hand(seeds, n_steps, u_of):
                       for j in range(n_steps)] for lo, la, z in seeds])
 
 
+def _count_checks(monkeypatch):
+    """Count the record checks of the tracking layer: the list of the
+    ``record`` names, one entry per call."""
+    calls = []
+    real = tracking.check_depth_linear_record
+
+    def counting(vel, mesh, *, record=""):
+        calls.append(record)
+        return real(vel, mesh, record=record)
+    monkeypatch.setattr(tracking, "check_depth_linear_record", counting)
+    return calls
+
+
 def _store_cell_of_nodes(mesh, nside, order):
     """The store cell of every mesh node, from the node's coordinates."""
     import healpy
@@ -431,10 +445,11 @@ def test_option_survives_prefetch_window_and_year(tmp_path, monkeypatch):
                                atol=1e-11)
 
 
-def test_option_survives_shared_cache(tmp_path):
+def test_option_survives_shared_cache(tmp_path, monkeypatch):
     """Shared snapshot cache, prefetch 1: the second cache attaches without
-    calling its reader, its field is ``"layer_linear"`` and checked, bit for
-    bit the field of a local read; no fallback warning."""
+    calling its reader, its field is ``"layer_linear"`` and checked (once
+    per stored record: the attached one in its own cache too), bit for bit
+    the field of a local read; no fallback warning."""
     from kelp.core.shared_fields import SharedFieldCache
     cfg = _fesom2_cfg(tmp_path)
     reader, mesh, ds = _fesom2_env(cfg)
@@ -448,6 +463,7 @@ def test_option_survives_shared_cache(tmp_path):
             return reader.read_velocities(*a, **k)
     shm = tmp_path / "shm"
     shm.mkdir()
+    checks = _count_checks(monkeypatch)
     r1, r2 = Counting(), Counting()
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter("always")
@@ -460,10 +476,11 @@ def test_option_survives_shared_cache(tmp_path):
     local = tracking._VelCache().get(3, reader, ds, mesh, cfg.mode)
     for v in (v1, v2, local):
         assert v.uv_vertical == "layer_linear"
-        assert is_checked(v, mesh)
+    assert checks == ["time index 3"] * 3
     for f in ("u", "v", "w", "eta"):
         assert_bitwise(getattr(v2, f), getattr(local, f), f)
     assert c2.get(3, r2, ds, mesh, cfg.mode) is v2       # the stored object
+    assert len(checks) == 3                              # not checked again
     ds.close()
 
 
@@ -634,82 +651,14 @@ def test_zarr_checkpoint_carries_the_rule(tmp_path, option):
     ds.close()
 
 
-@pytest.mark.parametrize("first,second", [("linear", "layer"),
-                                          ("layer", "linear")])
-def test_one_writer_keeps_one_rule(tmp_path, first, second):
-    """Two segments written through ONE writer must share the rule: the
-    second segment with the other rule is refused before it writes a
-    record (the file stays one rule); with the same rule both segments
-    go into the file."""
-    mesh, ds, run = _restart_env(tmp_path)
-    init = _state(mesh, SEEDS)
-    # the state after the first segment, from a separate output (the chain
-    # file stays open while it is written)
-    r = load_restart(run("a", _fesom2_mode(uv_vertical=first), init, 0, 2,
-                         0))
-    path = str(tmp_path / "chain.nc")
-    w = TrajectoryWriter(path, init.n_particles).open()
-    try:
-        run("seg1", _fesom2_mode(uv_vertical=first), init, 0, 2, 0, writer=w)
-        n_before = w.n_obs
-        assert n_before == 2
-        with pytest.raises(ValueError,
-                           match=rf"mode.uv_vertical '{first}', this "
-                                 rf"segment has '{second}'"):
-            run("seg2", _fesom2_mode(uv_vertical=second), r["state"],
-                r["file_idx"] + 1, 2, r["step_i"] + 1, writer=w)
-        assert w.n_obs == n_before
-        run("seg2", _fesom2_mode(uv_vertical=first), r["state"],
-            r["file_idx"] + 1, 2, r["step_i"] + 1, writer=w)
-        assert w.n_obs == 4
-    finally:
-        w.close()
-    attrs = _global_attrs(path)
-    assert attrs.get("uv_vertical") == (
-        "linear" if first == "linear" else None)
-    ds.close()
-
-
-@pytest.mark.parametrize("kind", sorted(WRITER_KINDS))
-@pytest.mark.parametrize("first,second", [("layer", "linear"),
-                                          ("linear", "layer")])
-def test_writer_bound_by_a_segment_without_records(tmp_path, kind, first,
-                                                   second):
-    """A segment that wrote a checkpoint but no record (output every 3
-    steps, checkpoint every 2, two steps) binds the writer to its rule all
-    the same: the next segment with the other rule is refused before it
-    writes anything, on every writer kind."""
-    mesh, ds, run = _restart_env(tmp_path, output_freq=3)
-    init = _state(mesh, SEEDS)
-    r = load_restart(run("a", _fesom2_mode(uv_vertical=first), init, 0, 2,
-                         0))
-    w = _writer(tmp_path, "chain", kind, init.n_particles).open()
-    try:
-        run("seg1", _fesom2_mode(uv_vertical=first), init, 0, 2, 0, writer=w)
-        assert w.n_obs == 0
-        with pytest.raises(ValueError,
-                           match=rf"mode.uv_vertical '{first}', this "
-                                 rf"segment has '{second}'"):
-            run("seg2", _fesom2_mode(uv_vertical=second), r["state"],
-                r["file_idx"] + 1, 2, r["step_i"] + 1, writer=w)
-        assert w.n_obs == 0
-        # the same rule continues
-        run("seg2", _fesom2_mode(uv_vertical=first), r["state"],
-            r["file_idx"] + 1, 2, r["step_i"] + 1, writer=w)
-    finally:
-        w.close()
-    assert ("uv_vertical" in _global_attrs(w.path)) == (first == "linear")
-    ds.close()
-
-
 @pytest.mark.parametrize("kind", sorted(WRITER_KINDS))
 @pytest.mark.parametrize("first,second", [("linear", "layer"),
                                           ("layer", "linear")])
 def test_reopened_writer_starts_a_new_file(tmp_path, kind, first, second):
     """``open()`` creates a new file: a writer object reused after
-    ``close()`` forgets the rule (and the attributes) of the run before, so
-    a run with the other rule is accepted, and the new file carries the
-    ``uv_vertical`` attribute only when that run has the option."""
+    ``close()`` writes the attributes of the run that uses it, so the new
+    file carries the ``uv_vertical`` attribute only when that run has the
+    option."""
     mesh, ds, run = _restart_env(tmp_path)
     init = _state(mesh, SEEDS)
     w = _writer(tmp_path, "reused", kind, init.n_particles)
@@ -942,7 +891,6 @@ class TestRefusalsAtEachSite:
                              w=rng.random((k, n)))
         mark = tracking._mark_depth_linear
         assert mark(layer, "layer", None, record="r") is layer
-        assert layer._dl_token is None
         with pytest.raises(ValueError, match="level"):
             mark(level, "linear", None, record="r")
         with pytest.raises(ValueError, match="3-D"):
@@ -958,12 +906,14 @@ class TestRefusalsAtEachSite:
             mark(ll, "layer", None, record="r")
 
 
-def test_mark_depth_linear_semantics():
+def test_mark_depth_linear_semantics(monkeypatch):
     """layer → a shallow copy marked "layer_linear" (same arrays) and
-    checked; a marked field comes back as itself; a level field comes back
-    as itself, checked, with the option off (the option on refuses it:
-    ``TestRefusalsAtEachSite``); NaN in a usable point is refused with the
-    record named."""
+    checked; a marked field comes back as itself, checked again (each call
+    is one store); a level field comes back as itself, checked, with the
+    option off (the option on refuses it: ``TestRefusalsAtEachSite``); a
+    layer field with the option off is not checked; NaN in a usable point
+    is refused with the record named."""
+    checks = _count_checks(monkeypatch)
     mesh = _zmesh()
     n = mesh.n_nodes
     u = np.tile(np.array([[1.0], [2.0], [3.0]]), (1, n))
@@ -973,21 +923,24 @@ def test_mark_depth_linear_semantics():
     out = mark(layer, "linear", mesh, record="time index 7")
     assert out is not layer and out.uv_vertical == "layer_linear"
     assert out.u is layer.u and out.v is layer.v and out.w is layer.w
-    assert layer.uv_vertical == "layer" and layer._dl_token is None
-    assert is_checked(out, mesh)
+    assert layer.uv_vertical == "layer"
+    assert checks == ["time index 7"]
     assert mark(out, "linear", mesh, record="x") is out
+    assert checks == ["time index 7", "x"]
     level = VelocityField(u=np.zeros((4, n)), v=np.zeros((4, n)),
                           eta=np.zeros(n), w=np.zeros((4, n)),
                           uv_layout="node", uv_vertical="level")
     got = mark(level, "layer", mesh, record="r")
-    assert got is level and is_checked(level, mesh)
+    assert got is level and checks[-1] == "r"
+    assert mark(layer, "layer", mesh, record="off") is layer
+    assert "off" not in checks
     bad_u = u.copy()
     bad_u[0, 2] = np.nan
     bad = VelocityField(u=bad_u, v=u, eta=np.zeros(n), w=np.zeros((4, n)),
                         uv_layout="node")
     with pytest.raises(ValueError, match=r"node 2, point 0 .*time index 7"):
         mark(bad, "linear", mesh, record="time index 7")
-    # a lazy blend: both parents marked and checked, nothing blended
+    # a lazy blend: both parents marked (the same arrays)
     from kelp.core.io import LazyLerpField
     other = dataclasses.replace(layer, u=u + 1.0)
     lazy = mark(LazyLerpField(layer, other, 0.25), "linear", mesh,
@@ -995,7 +948,6 @@ def test_mark_depth_linear_semantics():
     assert isinstance(lazy, LazyLerpField)
     assert lazy.uv_vertical == "layer_linear"
     assert lazy.vel_a.u is layer.u and lazy.vel_b.u is other.u
-    assert is_checked(lazy, mesh) and "u" not in lazy.__dict__
 
 
 def _zmesh():
@@ -1072,11 +1024,16 @@ def test_healpix_u_w_prefix_mismatch_option_on(tmp_path):
     np.testing.assert_allclose(
         traj["lon"], _hp_hand(seeds, 2, lambda z: _hp_u(z, (5.0, 20.0))),
         rtol=0, atol=1e-9)
-    # without the declaration the reader refuses the raw NaN slot before
-    # it zeroes it — the zero never becomes data
-    del mesh.metadata["uv_data_last"]
+    # a declaration deeper than the u prefix: the reader refuses the raw
+    # NaN slot before it zeroes it — the zero never becomes data
+    mesh.metadata["uv_data_last"] = np.full(mesh.n_nodes, 2, dtype=np.int32)
     ds = HealpixReader.open_dataset(str(store), mode_cfg=mode)
     with pytest.raises(ValueError, match=r"point 2"):
+        HealpixReader.read_velocities(ds, 0, mesh, mode_cfg=mode)
+    # no declaration at all: refused, naming the cause
+    del mesh.metadata["uv_data_last"]
+    with pytest.raises(ValueError, match=r"load the mesh with the run's "
+                                         r"mode config"):
         HealpixReader.read_velocities(ds, 0, mesh, mode_cfg=mode)
     ds.close()
 
@@ -1170,7 +1127,8 @@ def test_healpix_later_record_nan_option_on_and_off(tmp_path):
 
 def test_healpix_prefix_read_only_for_3d_loads(tmp_path, monkeypatch):
     """The u prefix (one extra pass over the first record) is read and
-    declared only for a 3-D load (a mode_cfg with Fdrift3D); a 2-D load
+    declared only for a 3-D load of a depth-linear run (a mode_cfg with
+    Fdrift3D and ``uv_vertical: linear``); a 3-D layer load, a 2-D load
     and a load without mode_cfg neither read it nor declare it."""
     from kelp.readers import healpix as hp_mod
     from kelp.readers.healpix import HealpixReader
@@ -1183,7 +1141,7 @@ def test_healpix_prefix_read_only_for_3d_loads(tmp_path, monkeypatch):
         return real(*a, **k)
     monkeypatch.setattr(hp_mod, "_finite_prefix_per_cell", spy)
     two_d = ModeConfig(Fdrift2D=True, Fdrift3D=False)
-    for mode in (two_d, None):
+    for mode in (two_d, None, _hp_mode(uv_vertical="layer")):
         mesh = HealpixReader.load_mesh(_hp_mesh_cfg(store), mode_cfg=mode)
         assert "uv_data_last" not in mesh.metadata
     assert calls == []
@@ -1252,11 +1210,13 @@ def _store_cell_of_nodes_geo(mesh, nside):
     return healpy.ang2pix(nside, glon, glat, nest=True, lonlat=True)
 
 
-def test_healpix_reused_mesh_off_on_off(tmp_path):
-    """One mesh loaded with the option off carries the declaration; a
-    depth-linear run on it uses it (layer 1's u at 40 m, no zero-filled
-    slot); option-off runs before and after are bit-identical to each other
-    and to a run on a freshly loaded mesh."""
+def test_healpix_mesh_of_a_layer_load_refused_by_a_linear_run(tmp_path):
+    """A mesh loaded with the option off has no u prefix declared: a
+    depth-linear run on it is refused at its first record, naming the
+    cause (the mesh was not loaded with the run's mode config), before it
+    writes anything; option-off runs before and after are bit-identical to
+    each other and to a run on a freshly loaded mesh, and a mesh loaded
+    with the option runs it (layer 1's u at 40 m, no zero-filled slot)."""
     from kelp.readers.healpix import HealpixReader
     from tests.test_healpix_reader import _pix_lonlat, _wet
     lon, lat = _pix_lonlat(8, "nest")
@@ -1264,18 +1224,29 @@ def test_healpix_reused_mesh_off_on_off(tmp_path):
                       n_fin=np.where(_wet(lat), 2, 0), deptho=True)
     off, on = _hp_mode(uv_vertical="layer"), _hp_mode()
     mesh = HealpixReader.load_mesh(_hp_mesh_cfg(store), mode_cfg=off)
-    assert "uv_data_last" in mesh.metadata
+    assert "uv_data_last" not in mesh.metadata
     ds = HealpixReader.open_dataset(str(store), mode_cfg=off)
     seeds = [(10.0, 5.0, 40.0), (-40.0, -20.0, 12.5)]
     kw = dict(n_steps=2, n_time_total=3)
     r1 = _rsr(mesh, ds, HealpixReader, off, seeds, **kw)
-    r2 = _rsr(mesh, ds, HealpixReader, on, seeds, **kw)
+    w = TrajectoryWriter(str(tmp_path / "refused.nc"), len(seeds)).open()
+    try:
+        with pytest.raises(ValueError,
+                           match=r"uv_data_last.*this mesh was loaded "
+                                 r"without it .*load the mesh with the "
+                                 r"run's mode config"):
+            _rsr(mesh, ds, HealpixReader, on, seeds, writer=w, **kw)
+        assert w.n_obs == 0
+    finally:
+        w.close()
     r3 = _rsr(mesh, ds, HealpixReader, off, seeds, **kw)
     fresh = HealpixReader.load_mesh(_hp_mesh_cfg(store), mode_cfg=off)
     r4 = _rsr(fresh, ds, HealpixReader, off, seeds, **kw)
     for k in ("lon", "lat", "z", "vel_u"):
         assert_bitwise(r3[k], r1[k], k)
         assert_bitwise(r4[k], r1[k], k)
+    linear = HealpixReader.load_mesh(_hp_mesh_cfg(store), mode_cfg=on)
+    r2 = _rsr(linear, ds, HealpixReader, on, seeds, **kw)
     np.testing.assert_allclose(
         r2["lon"].T, _hp_hand(seeds, 2, lambda z: _hp_u(z, (5.0, 20.0))),
         rtol=0, atol=1e-9)
@@ -1603,23 +1574,6 @@ def test_failed_prepare_then_a_succeeding_one(tmp_path, placement):
     assert [c[0] for c in calls] == ["A", "B", "A"]
     assert {k: dict(ds.attrs) for k, ds in dss.items()} == attrs
     assert _engine_keys(mesh.metadata) == []
-    for ds in dss.values():
-        ds.close()
-
-
-@pytest.mark.parametrize("placement", sorted(_SWITCH))
-def test_declaration_written_in_place_is_refused(tmp_path, placement):
-    """The depth-point table holds the declaration by identity, so a
-    ``prepare`` that writes INTO the declaration array would not be seen:
-    the declaration in effect is the engine's read-only snapshot (taken by
-    the first table), and the in-place write raises at the reader's own
-    line."""
-    mesh, dss, run, calls, u = _switch_env(tmp_path, placement)
-    run("A")
-    assert not mesh.metadata["uv_data_last"].flags.writeable
-    dss["B"].attrs["in_place"] = True
-    with pytest.raises(ValueError, match="read-only"):
-        run("B")
     for ds in dss.values():
         ds.close()
 

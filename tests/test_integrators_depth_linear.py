@@ -4,9 +4,9 @@ Every u/v evaluation of a step reads the depth of its own stage: Euler the
 step-entry depth, RK2 the entry depth and then ``z_mid``, RK4 the entry
 depth and then ``z2``, ``z3``, ``z4`` (``_interp_uv_at(..., zs=...)``).  The
 step functions refuse a depth-linear field they cannot serve at entry
-(``_check_depth_linear_entry``) and run the record check on every field
-they receive (``vel``, ``vel_next``, each PCHIP snapshot, the raw parents
-of a ``LazyLerpField``).  Fused RK2 on node-layout barycentric data runs the
+(``_check_depth_linear_entry``) and trust the values they receive (a run
+checks every record once, where it stores it).  Fused RK2 on node-layout
+barycentric data runs the
 depth-linear twins (``tests/test_fused_3d_depth_linear.py``); the fused
 Euler kernel runs element ``leastsq`` fields through its depth-linear twin
 (``tests/test_integrators_depth_linear_elements.py``).
@@ -30,7 +30,6 @@ from kelp.core.mesh import find_containing_elements, find_nearest_nodes
 from kelp.core.particles import ParticleStatus, make_state
 from kelp.numerics import integrators as I
 from kelp.numerics import interpolate as ip
-from kelp.numerics.vertical_uv import is_checked
 
 from tests._bitwise import assert_bitwise
 from tests.test_interp_depth_linear import (
@@ -526,65 +525,27 @@ def test_check_depth_linear_entry_refusals():
     assert chk(lay, sigma, "leastsq", "rk2", vel_next=_layer_field(0.004),
                recon=(lay_snaps[:3] + [_layer_field(0.004)],
                       [0.0, 1.0, 2.0, 3.0], 1.0, 1)) is None
-    # accepted: stamps the field
-    assert not is_checked(level, mesh)
+    # accepted
     assert chk(level, mesh, "barycentric", "rk2") is None
-    assert is_checked(level, mesh)
 
 
-@pytest.mark.parametrize("where", ["vel", "vel_next", "recon0", "recon3",
-                                   "lazy_vel_b"])
-@pytest.mark.parametrize("name", ["euler", "rk2", "rk4"])
-def test_direct_step_refuses_nan_in_prefix(name, where):
-    """A NaN at a usable point (node 3, point 1) of ANY field the step
-    receives is refused at entry, naming the field — also when it sits only
-    in ``vel_next``, in one PCHIP snapshot, or in a lazy field's parent."""
+def test_steps_do_not_scan_records(monkeypatch):
+    """The step functions trust their fields: no record scan runs in a
+    step (a run checks every record once, where it stores it)."""
+    from kelp.numerics import vertical_uv as vu
     mesh = _deep_mesh()
-    w0 = 0.004
-    kw = {}
-    if where in ("recon0", "recon3"):
-        snaps, recon = _recon("level", w0, (0.0, 3600.0, 7200.0, 10800.0),
-                              3600.0, 1, nan_in=int(where[-1]))
-        vel = snaps[1]
-        kw = dict(vel_next=snaps[2], dt_to_next=3600.0, recon=recon)
-        label = f"recon snapshot {where[-1]}"
-    elif where == "lazy_vel_b":
-        bad = _deep_field("level", w0, t=3600.0)
-        bad.u[1, 3] = np.nan
-        vel = LazyLerpField(_deep_field("level", w0), bad, 0.25)
-        label = r"vel\.vel_b"
-    else:
-        vel = _deep_field("level", w0)
-        nxt = _deep_field("level", w0, t=3600.0)
-        (vel if where == "vel" else nxt).u[1, 3] = np.nan
-        kw = dict(vel_next=nxt, dt_to_next=3600.0)
-        label = where
-    with pytest.raises(ValueError, match=(
-            rf"non-finite at node 3, point 1 .*in record {label} "
-            rf"\({name}_step\)")):
-        STEPS[name](_state(), vel, mesh, 1800.0, 1.0,
-                    uv_interp="barycentric", w_interp="barycentric", **kw)
 
-
-def test_entry_record_check_once(monkeypatch):
-    """The record check runs once per field and mesh table: a second step
-    with the same fields scans nothing."""
-    mesh = _deep_mesh()
-    calls = []
-    real = I.check_depth_linear_record
-
-    def spy(vel, mesh_, *, record=""):
-        calls.append(record)
-        return real(vel, mesh_, record=record)
-    monkeypatch.setattr(I, "check_depth_linear_record", spy)
+    def no_scan(*a, **k):
+        raise AssertionError("a step scanned a record")
+    monkeypatch.setattr(vu, "_check_components", no_scan)
     vel = _deep_field("level", 0.004)
     nxt = _deep_field("level", 0.004, t=3600.0)
     kw = dict(uv_interp="barycentric", w_interp="nearest", vel_next=nxt,
               dt_to_next=3600.0)
-    I.rk4_step(_state(), vel, mesh, 1800.0, 1.0, **kw)
-    assert calls == ["vel (rk4_step)", "vel_next (rk4_step)"]
-    I.rk4_step(_state(), vel, mesh, 1800.0, 1.0, **kw)
-    assert len(calls) == 2
+    for name in ("euler", "rk2", "rk4"):
+        STEPS[name](_state(), vel, mesh, 1800.0, 1.0, **kw)
+    STEPS["rk2"](_state(), LazyLerpField(vel, nxt, 0.25), mesh, 1800.0, 1.0,
+                 uv_interp="barycentric", w_interp="barycentric")
 
 
 # ---------------------------------------------------------------------------

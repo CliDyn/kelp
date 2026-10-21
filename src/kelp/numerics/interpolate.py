@@ -36,9 +36,7 @@ from ..core.mesh import (
 from ..core.particles import ParticleState
 from .temporal_reconstruct import _pchip_value_scalar  # njit scalar PCHIP
 from .vertical_uv import (
-    check_depth_linear_record,
     depth_points,
-    is_checked,
     uv_at,
     uv_bracket,
     uv_wet,
@@ -680,7 +678,8 @@ def interp_leastsq(
     ------
     ValueError
         A depth-linear field on node layout (``uv_interp='barycentric'``
-        evaluates it), or a depth-linear record that fails the check.
+        evaluates it), or one the depth-linear route refuses
+        (:func:`_interp_leastsq_dl`).
     """
     if getattr(vel, "uv_vertical", "layer") != "layer":
         return _interp_leastsq_dl(state, mesh, vel, nn_nodes, time_dir)
@@ -1121,9 +1120,9 @@ def _interp_leastsq_dl(
         sigma mesh (no bottoms: every element is wet at every ``s``); the
         table is ``depth_points(mesh, vel.uv_vertical, "element")``.
     vel : VelocityField or LazyLerpField
-        Element-layout u/v of shape ``(M, E)``.  Checked once per mesh
-        table with :func:`kelp.numerics.vertical_uv.check_depth_linear_record`
-        (skipped when :func:`~kelp.numerics.vertical_uv.is_checked`).
+        Element-layout u/v of shape ``(M, E)``, finite at every usable
+        point (the run checks each record once,
+        :func:`kelp.numerics.vertical_uv.check_depth_linear_record`).
     nn_nodes : np.ndarray, shape ``(P,)``
         Nearest-node index per particle.
     time_dir : float
@@ -1140,20 +1139,13 @@ def _interp_leastsq_dl(
     ------
     ValueError
         Node layout (``uv_interp='barycentric'`` evaluates it), u/v not
-        2-D, a mesh neither z-level nor sigma, a z-level mesh without the
-        element bottoms, or a record that fails the check (shape,
-        non-finite value at a usable point).
+        2-D, a mesh neither z-level nor sigma, or a z-level mesh without
+        the element bottoms.
     """
     placement = getattr(vel, "uv_vertical", "layer")
     if getattr(vel, "uv_layout", "element") != "element":
         _reject_depth_linear(vel, "interp_leastsq", _DL_LAYOUT)
-    # the record check first: a LazyLerpField is checked through its
-    # parents (shape and finite prefix) before anything below blends it
-    if not is_checked(vel, mesh):
-        check_depth_linear_record(vel, mesh)
-    # unreachable for a field checked as it stands (the check refuses
-    # non-2-D u/v); kept because the token survives an attribute replaced
-    # after the check (``vel.u = ...``), which would reach the kernel
+    # the kernels index (point, column)
     if getattr(vel.u, "ndim", None) != 2 or getattr(vel.v, "ndim", None) != 2:
         raise ValueError(
             f"interp_leastsq: depth-linear u/v (uv_vertical="
@@ -2291,9 +2283,9 @@ def _interp_barycentric_dl(
         mesh needs none, every column is wet at every ``s``).
     vel : VelocityField or LazyLerpField
         Node-layout u/v of shape ``(M, N)`` or element-layout u/v of shape
-        ``(M, E)``.  Checked once per mesh table with
-        :func:`kelp.numerics.vertical_uv.check_depth_linear_record`
-        (skipped when :func:`~kelp.numerics.vertical_uv.is_checked`).
+        ``(M, E)``, finite at every usable point (the run checks each
+        record once,
+        :func:`kelp.numerics.vertical_uv.check_depth_linear_record`).
     nn_nodes : np.ndarray, shape ``(P,)``
         Nearest-node index per particle.
     time_dir : float
@@ -2313,10 +2305,8 @@ def _interp_barycentric_dl(
     ------
     ValueError
         A layout other than node or element, u/v not 2-D, a mesh neither
-        z-level nor sigma, ``"level"`` data on a sigma mesh, an
-        element-layout z-level mesh without the element bottoms, or a
-        record that fails the check (shape, non-finite value at a usable
-        point).
+        z-level nor sigma, ``"level"`` data on a sigma mesh, or an
+        element-layout z-level mesh without the element bottoms.
     """
     placement = getattr(vel, "uv_vertical", "layer")
     layout = vel.uv_layout
@@ -2325,13 +2315,7 @@ def _interp_barycentric_dl(
             f"interp_barycentric: depth-linear u/v (uv_vertical="
             f"{placement!r}) needs uv_layout 'node' or 'element', got "
             f"{layout!r}")
-    # the record check first: a LazyLerpField is checked through its
-    # parents (shape and finite prefix) before anything below blends it
-    if not is_checked(vel, mesh):
-        check_depth_linear_record(vel, mesh)
-    # unreachable for a field checked as it stands (the check refuses
-    # non-2-D u/v); kept because the token survives an attribute replaced
-    # after the check (``vel.u = ...``), which would reach the kernel
+    # the kernels index (point, column)
     if getattr(vel.u, "ndim", None) != 2 or getattr(vel.v, "ndim", None) != 2:
         raise ValueError(
             f"interp_barycentric: depth-linear u/v (uv_vertical="
@@ -3094,9 +3078,9 @@ def _interp_edge_leastsq_dl(
         sigma mesh (no bottoms: every element is wet at every ``s``); the
         table is ``depth_points(mesh, vel.uv_vertical, "element")``.
     vel : VelocityField or LazyLerpField
-        Element-layout u/v of shape ``(M, E)``.  Checked once per mesh
-        table with :func:`kelp.numerics.vertical_uv.check_depth_linear_record`
-        (skipped when :func:`~kelp.numerics.vertical_uv.is_checked`).
+        Element-layout u/v of shape ``(M, E)``, finite at every usable
+        point (the run checks each record once,
+        :func:`kelp.numerics.vertical_uv.check_depth_linear_record`).
     nn_nodes : np.ndarray, shape ``(P,)``
         Nearest-node index per particle (containment search anchor).
     time_dir : float
@@ -3119,21 +3103,14 @@ def _interp_edge_leastsq_dl(
     ------
     ValueError
         Node layout (``uv_interp='barycentric'`` evaluates it), an unknown
-        ``bc``, u/v not 2-D, a mesh neither z-level nor sigma, a z-level
-        mesh without the element bottoms, or a record that fails the check
-        (shape, non-finite value at a usable point).
+        ``bc``, u/v not 2-D, a mesh neither z-level nor sigma, or a z-level
+        mesh without the element bottoms.
     """
     placement = getattr(vel, "uv_vertical", "layer")
     if getattr(vel, "uv_layout", "element") != "element":
         _reject_depth_linear(vel, "interp_edge_leastsq", _DL_LAYOUT)
     bc_code = _bc_to_int(bc)
-    # the record check first: a LazyLerpField is checked through its
-    # parents (shape and finite prefix) before anything below blends it
-    if not is_checked(vel, mesh):
-        check_depth_linear_record(vel, mesh)
-    # unreachable for a field checked as it stands (the check refuses
-    # non-2-D u/v); kept because the token survives an attribute replaced
-    # after the check (``vel.u = ...``), which would reach the kernel
+    # the kernels index (point, column)
     if getattr(vel.u, "ndim", None) != 2 or getattr(vel.v, "ndim", None) != 2:
         raise ValueError(
             f"interp_edge_leastsq: depth-linear u/v (uv_vertical="
@@ -3286,8 +3263,8 @@ def interp_edge_leastsq(
     ------
     ValueError
         Node layout (a depth-linear node field: ``uv_interp='barycentric'``
-        evaluates it), an unknown ``bc``, or a depth-linear record that
-        fails the check.
+        evaluates it), an unknown ``bc``, or a depth-linear field the
+        depth-linear route refuses (:func:`_interp_edge_leastsq_dl`).
     """
     if getattr(vel, "uv_vertical", "layer") != "layer":
         return _interp_edge_leastsq_dl(state, mesh, vel, nn_nodes, time_dir,

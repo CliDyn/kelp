@@ -1152,17 +1152,19 @@ class HealpixReader:
             # BEFORE the bathymetry choice below — a deptho deeper than the
             # u prefix would otherwise point the depth-linear table at a
             # slot the reader zeroes.  Mapped to mesh-node order once the
-            # mesh exists; declared for 3-D dual-geometry meshes only (a
-            # mode_cfg with Fdrift3D: a 2-D load, or one without mode_cfg,
-            # never pays this extra read of the first record; layer runs
-            # never read the declaration).
+            # mesh exists; declared for 3-D dual-geometry meshes of
+            # depth-linear runs only (a mode_cfg with Fdrift3D and
+            # uv_vertical "linear": a 2-D or a layer load, or one without
+            # mode_cfg, never pays this extra read of the first record, and
+            # read_velocities refuses a depth-linear run on such a mesh).
             nfin_u = None
             lev_dim_u = next((d for d in u0.dims
                               if str(d).lower() in _LEVEL_DIMS), None)
             if (lev_dim_u is not None
                     and (getattr(mesh_cfg, "healpix_geometry", "dual")
                          or "dual") == "dual"
-                    and cfg is not None and getattr(cfg, "Fdrift3D", False)):
+                    and cfg is not None and getattr(cfg, "Fdrift3D", False)
+                    and getattr(cfg, "uv_vertical", "layer") == "linear"):
                 nfin_u = _finite_prefix_per_cell(u0, lev_dim_u)
 
             # bathymetry: a depth variable if the product carries one, else
@@ -1662,12 +1664,22 @@ class HealpixReader:
             # prefix) before the zeroing below turns a missing value into
             # data — and before the rotation mix, which makes a NaN in one
             # component NaN in both, so the refusal names the component
-            # that carries it; refused naming node, point and record
+            # that carries it; refused naming node, point and record.  The
+            # table needs the u prefix that load_mesh declares for a
+            # depth-linear mode config only
+            if (mesh.metadata or {}).get("uv_data_last") is None:
+                raise ValueError(
+                    "healpix reader: mode.uv_vertical: linear needs the u "
+                    "data prefix (mesh.metadata['uv_data_last']) that "
+                    "load_mesh declares for a 3-D mode config with "
+                    "uv_vertical: linear; this mesh was loaded without it "
+                    "(another mode config, or none) — load the mesh with "
+                    "the run's mode config")
             from types import SimpleNamespace
             from ..numerics.vertical_uv import check_depth_linear_record
             check_depth_linear_record(
                 SimpleNamespace(u=u, v=v, uv_vertical="layer_linear",
-                                uv_layout="node", _dl_token=None),
+                                uv_layout="node"),
                 mesh, record=_record_label(ds, timestep))
 
         if getattr(mesh, "rotation_angles", None) is not None:

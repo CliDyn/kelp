@@ -679,62 +679,6 @@ def test_python_fallback_bitwise(placement, monkeypatch):
 # Refusals
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("placement", ["level", "layer_linear"])
-def test_direct_call_refuses_nan_in_prefix(placement):
-    mesh = _mesh()
-    vel = _field(placement)
-    vel.u[1, 0] = np.nan                # node 0 is 200 m deep: point 1 is wet
-    st = _state(DEEP_PTS, 5.0)
-    nn = find_nearest_nodes(mesh, st.lon, st.lat)
-    with pytest.raises(ValueError, match=r"u = nan is non-finite at node 0, "
-                                         r"point 1"):
-        ip._interp_barycentric_dl(st, mesh, vel, nn, 1.0)
-    with pytest.raises(ValueError, match=r"non-finite at node 0, point 1"):
-        ip.interp_barycentric(st, mesh, vel, nn, 1.0)
-
-
-@pytest.mark.parametrize("placement", ["level", "layer_linear"])
-def test_lazy_field_checked_through_parents_before_any_blend(placement):
-    """A lazy blend with a NaN in one parent's prefix is refused through
-    that parent before the wrapper reads ``u`` (no blend is cached); a good
-    pair passes and is then blended once for the kernel."""
-    from kelp.core.io import LazyLerpField
-    from kelp.numerics import vertical_uv as vu
-    mesh = _mesh()
-    st = _state(DEEP_PTS, 12.5)
-    nn = find_nearest_nodes(mesh, st.lon, st.lat)
-    bad = _field(placement)
-    bad.v[1, 4] = np.nan                # node 4 is 200 m deep: point 1 wet
-    lazy = LazyLerpField(_field(placement), bad, 0.25)
-    with pytest.raises(ValueError, match=r"v = nan is non-finite at node 4, "
-                                         r"point 1"):
-        ip.interp_barycentric(st, mesh, lazy, nn, 1.0)
-    assert "u" not in lazy.__dict__ and "v" not in lazy.__dict__
-    good = LazyLerpField(_field(placement), _field(placement), 0.25)
-    U, V, ok = ip.interp_barycentric(st, mesh, good, nn, 1.0)
-    assert ok.all() and vu.is_checked(good, mesh)
-    assert vu.is_checked(good.vel_a, mesh) and vu.is_checked(good.vel_b, mesh)
-    np.testing.assert_allclose(U, A_U + B_U * 12.5, rtol=1e-14)
-
-
-def test_direct_call_checks_once_and_rechecks_on_new_mesh():
-    """A checked field is not scanned again; a new table (another mesh)
-    re-runs the check."""
-    from kelp.numerics import vertical_uv as vu
-    mesh = _mesh()
-    vel = _field("level")
-    st = _state(DEEP_PTS, 5.0)
-    nn = find_nearest_nodes(mesh, st.lon, st.lat)
-    assert not vu.is_checked(vel, mesh)
-    ip._interp_barycentric_dl(st, mesh, vel, nn, 1.0)
-    assert vu.is_checked(vel, mesh)
-    vel.u[1, 0] = np.nan                # in place: no new check on this mesh
-    ip._interp_barycentric_dl(st, mesh, vel, nn, 1.0)
-    mesh2 = _mesh()
-    with pytest.raises(ValueError, match=r"non-finite at node 0, point 1"):
-        ip._interp_barycentric_dl(st, mesh2, vel, nn, 1.0)
-
-
 #: sigma interfaces of the sigma-mesh test (1 at the surface, 0 at the bed)
 SIGMA = np.array([1.0, 0.75, 0.5, 0.25, 0.0])
 
@@ -744,15 +688,10 @@ def test_direct_sigma_mesh_reads_the_sigma_table():
     coordinate is the sigma fraction s (``state.z`` holds it; the
     integrators hand it over), the points are the layer centres in s and
     every vertex is wet at every s, so ``u = a + b*s`` comes out exactly,
-    clipped to the outer centres.  A field checked on the z-level mesh is
-    checked again against the sigma table, where every layer is a usable
-    point: its ``+inf`` below node 2's z-level last point is refused.
-    ``"level"`` data are refused on sigma."""
+    clipped to the outer centres.  ``"level"`` data are refused on sigma."""
     mesh = _mesh()
-    vel = _field("layer_linear")
     st = _state(DEEP_PTS, 5.0)
     nn = find_nearest_nodes(mesh, st.lon, st.lat)
-    ip._interp_barycentric_dl(st, mesh, vel, nn, 1.0)   # checked on z-level
     sig = _mesh()
     sig.sigma = SIGMA.copy()
     sig.vertical_coord = "sigma"
@@ -771,11 +710,7 @@ def test_direct_sigma_mesh_reads_the_sigma_table():
             assert ok.all()
             np.testing.assert_allclose(U, A_U + B_U * sc, rtol=1e-14)
             np.testing.assert_allclose(V, A_V + B_V * sc, rtol=1e-14)
-    assert vu.is_checked(good, sig)
     for fn in (ip._interp_barycentric_dl, ip.interp_barycentric):
-        with pytest.raises(ValueError, match=r"u = inf is non-finite at "
-                                             r"node 2, point 1 \(s = 0.375\)"):
-            fn(st, sig, vel, nn, 1.0)
         with pytest.raises(ValueError, match=r"on a sigma mesh .* is "
                                              r"'layer_linear' only"):
             fn(st, sig, _field("level"), nn, 1.0)

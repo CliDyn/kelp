@@ -162,8 +162,8 @@ where $l_k=p_k$ for level data and $l_k=z_{k+1}$, the layer's \emph{lower} level
 $d_i$ is the node's bed \code{mesh.depth}, and $D_i$ an optional declaration by the reader of the last
 finite point of its own data column (\code{mesh.metadata["uv\_data\_last"]}). For layer data this is the
 rule of the layer search (\cref{sec:vert-layer}): a \emph{partial bottom layer}, one whose lower level lies
-below the bed, is never read. The HEALPix reader declares where each column's $u$ data end, and the
-FESOM~1.4 reader declares each column's last wet level; $D_i=-1$ means ``the surface only'', and the
+below the bed, is never read. The HEALPix reader declares where each column's $u$ data end when the mesh
+is loaded for a run with the option, and the FESOM~1.4 reader declares each column's last wet level; $D_i=-1$ means ``the surface only'', and the
 surface value must then be finite. A NaN bed matches no level, which gives $\ell_i=0$; an infinite bed
 follows the formula as written ($+\infty$ keeps every point, $-\infty$ the surface point only). For an
 element $e$ the node depths cannot tell where its water ends --- FESOM2 fixes the number of levels of each
@@ -177,8 +177,8 @@ multiplied by zero, so dry or fill values stored there are harmless.
 \codeanchor{The table is \fn{depth\_points} with the frozen dataclass \fn{DepthPoints} (fields \code{p},
 \code{last}, \code{bed}) and the builder \fn{\_build\_depth\_points}, in \srcfile{numerics/vertical\_uv.py}.
 It is cached on the mesh per placement and layout and rebuilt whenever \code{mesh.sigma}, the bed array or
-the declaration is replaced; the engine builds it from its own read-only snapshot of the declaration
-(\fn{\_snapshot\_declaration}), which replaces the reader's array in \code{mesh.metadata}.}
+the declaration is replaced; it is built from their values and keeps its own arrays, so a write into one of
+them in place after the first use is not seen (assign a new array).}
 
 \paragraph{Bracket and blend.} At a column $c$ and particle depth $z$ the depth is first clipped into the
 column's usable range, the bracketing points $p_k\le z_c<p_{k+1}$ (with $k+1\le\ell_c$) are found, and
@@ -389,11 +389,11 @@ therefore call it a \emph{prism-wise approximation} of FESOM~1.4's own interpola
 velocity of FESOM~1.4 is also stored on the levels, which serve as the interfaces of
 \cref{sec:vert-wprofile}.
 
-\paragraph{The record check.} Every record a run reads with a depth-linear field is checked once per field
-and mesh table, before the first read: a non-finite $u$ or $v$ at a point $k\le\ell_c$ of any column stops
-the run, and the message names the component, the node or element, the point and the record. A lazy time
-blend (\cref{ch:temporal}) is checked through its two parents, before anything is blended. Points below
-$\ell_c$ may hold anything. With the option the HEALPix reader checks the raw record before it zeroes
+\paragraph{The record check.} Every record a run reads with a depth-linear field is checked once, when the
+run stores it: a non-finite $u$ or $v$ at a point $k\le\ell_c$ of any column stops the run, and the message
+names the component, the node or element, the point and the record. The time blends of
+\cref{ch:temporal}, the interpolators and the step functions use the checked records and do not check
+again. Points below $\ell_c$ may hold anything. With the option the HEALPix reader checks the raw record before it zeroes
 missing values, so a surface mask that drifts between records is refused rather than zeroed.
 
 \paragraph{Refusals.} The option \conf{linear} is refused for two-dimensional tracking
@@ -410,7 +410,9 @@ the key and the two-dimensional case when the configuration is loaded; the mesh 
 the reader right after the mesh is loaded; the layout and the element bottoms at the metadata-only probe
 that precedes the writer (\cref{sec:hvel-leastsq}).
 A bad record is refused when it is read. A field already marked depth-linear that reaches a run with the
-option off is refused too, and so are the fields of one step whose placements differ.
+option off is refused too, and so are the fields of one step whose placements differ. A run with the option
+on a HEALPix mesh loaded without it (no declaration) is refused at its first record: the mesh must be loaded
+with the run's mode configuration, as \fn{run\_tracking} and the command line do.
 
 \codeanchor{\raggedright The key is validated in \srcfile{core/config.py}; \fn{\_check\_uv\_vertical\_option} (after the mesh load), \fn{\_validate\_uv\_compat} and
 \fn{\_check\_linear\_element\_mesh} (the pre-writer probe), and \fn{\_mark\_depth\_linear}, which marks

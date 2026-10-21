@@ -456,38 +456,6 @@ def test_fused_euler_equals_unfused(monkeypatch, case, td, mode, w_interp,
 # ---------------------------------------------------------------------------
 
 @needs_numba
-@pytest.mark.parametrize("where", ["vel", "lazy_vel_b"])
-def test_fused_euler_runner_record_check(monkeypatch, where):
-    """A direct ``_run_fused_euler_3d`` call checks the field its twin
-    reads (a lazy field through its parents): a NaN at a usable point is
-    refused, naming the field; a field already checked for the mesh's
-    table is not scanned again."""
-    mesh = _mesh()
-    a, b = _rule_field(mesh), _rule_field(mesh, t=3600.0)
-    vel = LazyLerpField(a, b, 0.4) if where == "lazy_vel_b" else a
-    bad = b if where == "lazy_vel_b" else a
-    label = r"vel\.vel_b" if where == "lazy_vel_b" else "vel"
-    keep = bad.u[2, 7]
-    bad.u[2, 7] = np.nan
-    with pytest.raises(ValueError, match=(
-            rf"non-finite at element 7, point 2 .*in record {label} "
-            r"\(_run_fused_euler_3d\)")):
-        I._run_fused_euler_3d(_state(), vel, mesh, DT, 1.0,
-                              w_interp="nearest")
-    bad.u[2, 7] = keep
-    I._run_fused_euler_3d(_state(), vel, mesh, DT, 1.0, w_interp="nearest")
-    scans = []
-    real = I.check_depth_linear_record
-
-    def spy(vel_, mesh_, *, record=""):
-        scans.append(record)
-        return real(vel_, mesh_, record=record)
-    monkeypatch.setattr(I, "check_depth_linear_record", spy)
-    I._run_fused_euler_3d(_state(), vel, mesh, DT, 1.0, w_interp="nearest")
-    assert scans == []
-
-
-@needs_numba
 @pytest.mark.parametrize("uv_interp", INTERPS)
 @pytest.mark.parametrize("method", list(STEPS))
 def test_cavities_refused_at_direct_entry(method, uv_interp):
@@ -508,8 +476,8 @@ def test_cavities_refused_at_direct_entry(method, uv_interp):
 def test_fused_euler_runner_refusals():
     """The runner serves element-layout ``"layer_linear"`` fields only: a
     node-layout depth-linear field is refused (``leastsq`` does not
-    evaluate it), and u/v replaced after the check by arrays of another
-    shape never reach the kernel."""
+    evaluate it), and u/v of another shape than the table never reach the
+    kernel (no bounds checks inside it)."""
     mesh = _mesh()
     n = mesh.n_nodes
     node = VelocityField(u=np.full((K - 1, n), 0.2),
@@ -521,7 +489,7 @@ def test_fused_euler_runner_refusals():
             r"\(uv_vertical='layer_linear'\) on node layout")):
         I._run_fused_euler_3d(_state(), node, mesh, DT, 1.0)
     vel = _rule_field(mesh)
-    I._run_fused_euler_3d(_state(), vel, mesh, DT, 1.0)       # stamps
+    I._run_fused_euler_3d(_state(), vel, mesh, DT, 1.0)
     vel.u = vel.u[:3]
     with pytest.raises(ValueError, match=(
             r"^_run_fused_euler_3d: depth-linear u/v must be \(M, E\) = "
@@ -541,9 +509,8 @@ _DL_FUNCS = ((I, "_fused_euler_step_3d_dl"),
              (ip, "_loop_interp_edge_lsq_3d_dl"),
              (ip, "_loop_interp_bary_elem_dl"),
              (I, "depth_points"), (ip, "depth_points"),
-             (vu, "depth_points"), (I, "check_depth_linear_record"),
-             (ip, "check_depth_linear_record"), (I, "is_checked"),
-             (ip, "is_checked"))
+             (vu, "depth_points"), (vu, "check_depth_linear_record"),
+             (vu, "_check_components"))
 
 #: the layer kernel each element interpolator runs (unfused); Euler's
 #: fused route runs ``_fused_euler_step_3d``
@@ -624,12 +591,12 @@ def _node_field(mesh):
 def test_entry_table():
     """``_check_depth_linear_entry`` on a z-level mesh: node layout with
     ``barycentric`` only; element layout with ``leastsq``, ``edge_leastsq``
-    and ``barycentric`` (each accepted and record-checked) and nothing
-    else; an unknown layout refused; rk45, a 2-D field and a mesh neither
-    z-level nor sigma refused for element fields with every interpolator
-    (the rk45 message advises euler, rk2 or rk4; for a node field with
+    and ``barycentric`` (each accepted) and nothing else; an unknown
+    layout refused; rk45, a 2-D field and a mesh neither z-level nor sigma
+    refused for element fields with every interpolator (the rk45 message
+    advises euler, rk2 or rk4; for a node field with
     ``uv_interp='barycentric'``); element fields on a mesh without the
-    element bottoms refused by the record check."""
+    element bottoms refused by the element table."""
     chk = I._check_depth_linear_entry
     mesh = _mesh()
     # node layout: barycentric only
@@ -640,7 +607,6 @@ def test_entry_table():
                 rf"uv_interp='barycentric', got uv_interp='{other}'$")):
             chk(node, mesh, other, "rk2")
     assert chk(node, mesh, "barycentric", "rk2") is None
-    assert vu.is_checked(node, mesh)
     with pytest.raises(ValueError, match=_PRE.format("rk45") + (
             r"is not supported by the rk45 integrator \(2-D only in this "
             r"version\); use euler, rk2 or rk4 with "
@@ -650,9 +616,7 @@ def test_entry_table():
     for interp in INTERPS:
         for name in ("euler", "rk2", "rk4"):
             el = _rule_field(mesh)
-            assert not vu.is_checked(el, mesh)
             assert chk(el, mesh, interp, name) is None
-            assert vu.is_checked(el, mesh)
     el = _rule_field(mesh)
     with pytest.raises(ValueError, match=_PRE.format("euler") + (
             r"on element layout \(uv_layout='element'\) needs uv_interp "

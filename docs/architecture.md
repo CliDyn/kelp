@@ -260,9 +260,9 @@ element areas, coastal-element flags, the depth-linear data-point tables
 (`_uv_depth_points`, one per placement and layout — node or element —, valid
 while `sigma`, the bed (`depth`; `metadata["elem_bed"]`) and the declaration
 (`metadata["uv_data_last"]`; `["uv_data_last_elem"]`) are the objects they
-were built from — the declaration as the engine's own read-only snapshot,
-installed there at the build; replaced, never mutated, so a shallow copy never
-sees another's rebuild) — are computed lazily and cached on the
+were built from — assign a new array to change one, a write in place is not
+seen; replaced, never mutated, so a shallow copy never sees another's
+rebuild) — are computed lazily and cached on the
 mesh the first time a subsystem needs them.
 
 ### `VelocityField` — one time snapshot of the flow
@@ -289,13 +289,10 @@ The constructor checks the placement against the shapes: a 2-D field (`u`
 and `"layer_linear"` takes node or element layout; with `w` present,
 `"layer"`/`"layer_linear"` need `K-1` rows of `u` and `"level"` needs `K`
 (so FESOM2 u/v delivered on the
-levels raise instead of running on their first `K-1` rows). The private
-`_dl_token` is the depth-linear record check's stamp (the mesh table the field
-passed); every rebuild through the constructor drops it, and a blend keeps it
-only when all its parents hold the SAME token (`_shared_token`). Every blend
+levels raise instead of running on their first `K-1` rows). Every blend
 (`lerp`, `LazyLerpField`, the PCHIP reconstruction) carries `uv_vertical` and
 refuses parents of mixed placement (`_require_same_uv_vertical`); the shared
-snapshot cache carries it in its metadata (never the token).
+snapshot cache carries it in its metadata.
 
 `VelocityField.lerp` produces the time-interpolated blend of two snapshots.
 `LazyLerpField` (`src/kelp/core/io.py:LazyLerpField`) is its lazy

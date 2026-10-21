@@ -60,7 +60,7 @@ from kelp.core.particles import ParticleStatus, make_state
 from kelp.numerics import integrators as I
 from kelp.numerics import temporal_reconstruct as TR
 from kelp.numerics.diffusion import DiffusionStepArgs
-from kelp.numerics.vertical_uv import depth_points, is_checked
+from kelp.numerics.vertical_uv import depth_points
 
 from tests._bitwise import assert_bitwise
 from tests._gen_golden_3d import _payload
@@ -954,10 +954,11 @@ def test_sample_record_fields_ignores_uv_placement(sample_interp):
 def test_prefetch_and_shared_cache_rule(tmp_path, monkeypatch, prefetch,
                                         shared):
     """RK2 with the next record, option on: every step function call
-    receives ``"layer_linear"`` fields checked for the run's mesh (the
-    read, the prefetch window and the shared cache keep the placement),
-    and the positions are the hand sums of ``dt (u(r) + u(r + 1)) / 2``.
-    With the shared cache a prefetch of 3 is forced to 1 (warned)."""
+    receives ``"layer_linear"`` fields (the read, the prefetch window and
+    the shared cache keep the placement), every record the run reads is
+    checked exactly once, and the positions are the hand sums of
+    ``dt (u(r) + u(r + 1)) / 2``.  With the shared cache a prefetch of 3 is
+    forced to 1 (warned)."""
     o = _option()
     from kelp import tracking
     cfg = o._fesom2_cfg(tmp_path, integrator="rk2", prefetch=prefetch,
@@ -968,11 +969,17 @@ def test_prefetch_and_shared_cache_rule(tmp_path, monkeypatch, prefetch,
         cfg.numerics.shared_fields_dir = str(shm)
         cfg.numerics.shared_fields_generation = f"matrix-{prefetch}"
     seen = []
+    checks = []
+    real_check = tracking.check_depth_linear_record
+
+    def counting_check(vel, mesh, *, record=""):
+        checks.append(record)
+        return real_check(vel, mesh, record=record)
+    monkeypatch.setattr(tracking, "check_depth_linear_record", counting_check)
 
     def spy(state, vel, mesh, dt, time_dir, **kw):
         vn = kw.get("vel_next")
-        seen.append((vel.uv_vertical, vn.uv_vertical, is_checked(vel, mesh),
-                     is_checked(vn, mesh)))
+        seen.append((vel.uv_vertical, vn.uv_vertical))
         return I.rk2_step(state, vel, mesh, dt, time_dir, **kw)
     monkeypatch.setattr(tracking, "get_integrator", lambda name: spy)
     with warnings.catch_warnings(record=True) as rec:
@@ -982,7 +989,8 @@ def test_prefetch_and_shared_cache_rule(tmp_path, monkeypatch, prefetch,
     assert not any("shared_fields disabled" in m for m in msgs), msgs
     forced = any("prefetch_size is forced to 1" in m for m in msgs)
     assert forced == (shared and prefetch > 1), msgs
-    assert seen == [("layer_linear", "layer_linear", True, True)] * 4
+    assert seen == [("layer_linear", "layer_linear")] * 4
+    assert sorted(checks) == [f"time index {r}" for r in range(1, 6)]
     from kelp.writers import load_trajectories
     traj = load_trajectories(cfg.data.output_path)
     hand = []

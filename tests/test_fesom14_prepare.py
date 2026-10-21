@@ -938,15 +938,14 @@ def test_idempotent(tmp_path):
 
 
 def test_declaration_through_runs(tmp_path, monkeypatch):
-    """The declaration in effect is the engine's snapshot with the reader's
-    values.  ``load_mesh`` declares each column's last wet level in a new
-    int32 array; the first run builds its depth table from a read-only
-    copy that takes the array's place in ``mesh.metadata`` (the reader's
-    array itself is left as it was).  The next runs, on another dataset and
-    on the first one again, prepare again (one call each) and keep that
-    snapshot: ``prepare`` never assigns a declaration.  No other entry of
-    ``mesh.metadata`` changes or appears, and the runs give the same step
-    on both datasets."""
+    """The declaration in effect is the reader's array.  ``load_mesh``
+    declares each column's last wet level in a new int32 array; the first
+    run builds its depth table from its values and leaves the array in
+    place, unchanged.  The next runs, on another dataset and on the first
+    one again, prepare again (one call each) and keep that very array:
+    ``prepare`` never assigns a declaration.  No entry of ``mesh.metadata``
+    changes or appears, and the runs give the same step on both
+    datasets."""
     mesh = _hand_mesh(tmp_path)
     own = mesh.metadata["uv_data_last"]
     assert own.dtype == np.int32 and own.flags.writeable
@@ -957,17 +956,14 @@ def test_declaration_through_runs(tmp_path, monkeypatch):
     calls = _spy_prepare(monkeypatch)
 
     first = _rsr(mesh, _open(a))
-    snap = mesh.metadata["uv_data_last"]
-    assert snap is not own and not snap.flags.writeable
-    assert snap.dtype == np.int32 and snap.tolist() == [3, 2, 1, 2, 0]
+    assert mesh.metadata["uv_data_last"] is own
     assert own.flags.writeable and own.tolist() == [3, 2, 1, 2, 0]
     for d in (b, a):
         again = _rsr(mesh, _open(d))
-        assert mesh.metadata["uv_data_last"] is snap
+        assert mesh.metadata["uv_data_last"] is own
         for name in ("lon", "lat", "z"):
             np.testing.assert_array_equal(again.to_arrays()[name],
                                           first.to_arrays()[name])
     assert len(calls) == 3
     assert mesh.metadata.keys() == before.keys()
-    assert all(mesh.metadata[k] is v for k, v in before.items()
-               if k != "uv_data_last")
+    assert all(mesh.metadata[k] is v for k, v in before.items())

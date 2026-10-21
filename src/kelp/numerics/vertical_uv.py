@@ -75,27 +75,20 @@ is valid while ``mesh.sigma``, the bed array (``mesh.depth`` for nodes,
 ``mesh.metadata["elem_bed"]`` for elements) and the declaration
 (``mesh.metadata["uv_data_last"]`` / ``["uv_data_last_elem"]``) are the
 very objects it was built from (identity, never ``id()``), so a
-``max_levels`` cut or a new bed or declaration rebuilds it.  Replace
-those arrays to change them; an in-place write is not detected.  The
-engine therefore takes a SNAPSHOT of the declaration at first use: the
-table is built from an owned, read-only copy, which replaces the reader's
-array in the metadata — the declaration in effect is exactly what the
-table was built from, and no array or view the reader still holds can
-change it (writing into the snapshot raises; assign a new array to
-declare another prefix).  A copied or unpickled mesh (whose snapshot
-numpy returns writeable) gets a new snapshot, validated again, on first
-use.  The table keeps its own read-only copy of the bed.
+``max_levels`` cut or a new bed or declaration rebuilds it.  The table is
+built from their values and keeps its own read-only arrays.  Replace
+those arrays to change them: a write into one of them in place after the
+first use is not detected (assign a new array to declare another prefix).
 
 The record check (:func:`check_depth_linear_record`) refuses a field whose
 u or v is non-finite at a point ``<= last`` of a column (a node or an
-element, by the field's ``uv_layout``) and stamps a passing field with the
-table object (``vel._dl_token``); :func:`is_checked` compares by identity,
-so a field checked on another mesh or before a rebuild counts as
-unchecked.
+element, by the field's ``uv_layout``).  A run checks every record once,
+where the tracking layer stores it (``tracking._mark_depth_linear``), and
+the HEALPix reader checks the raw record before it zeroes missing values;
+the interpolators and the step functions trust their input.
 """
 from __future__ import annotations
 
-import weakref
 from dataclasses import dataclass
 
 import numpy as np
@@ -114,7 +107,6 @@ except ImportError:  # pragma: no cover — local dev fallback
     def prange(*args, **kwargs):
         return range(*args)
 
-from ..core.io import LazyLerpField
 from ..core.mesh import Mesh
 
 #: placements this module serves ("layer" is the piecewise-constant path)
@@ -160,8 +152,8 @@ class DepthPoints:
 
     Notes
     -----
-    ``eq=False``: a ``DepthPoints`` object is a token (record checks
-    compare it by identity), so equality and hashing are by identity.
+    ``eq=False``: equality and hashing are by identity (the arrays are
+    never compared).
     """
     p: np.ndarray
     last: np.ndarray
@@ -186,36 +178,6 @@ class _DepthPointsEntry:
 # The table
 # ---------------------------------------------------------------------------
 
-# every declaration snapshot this process made, by id; a freed snapshot
-# drops out, so a reused id never matches.  Reuse then does not depend on
-# whose cache holds the snapshot: two shallow copies of a mesh (one shared
-# metadata dict) reuse each other's instead of replacing it on every lookup
-_SNAPSHOTS: "weakref.WeakValueDictionary[int, np.ndarray]" = (
-    weakref.WeakValueDictionary())
-
-
-def _snapshot_declaration(decl):
-    """The declaration a table is built from: an owned, read-only copy.
-
-    ``decl`` itself when it already is an engine snapshot that is still
-    read-only (the other placement's, this placement's before a
-    ``max_levels`` cut, or a shallow copy's of the same mesh); otherwise
-    ``np.array(decl, copy=True)`` (dtype kept, validated by the caller),
-    frozen before anyone else holds it, so no earlier view or base array
-    of the reader's can write into it.  ``None`` (no declaration) stays
-    ``None``.
-    """
-    if decl is None:
-        return None
-    if (isinstance(decl, np.ndarray) and not decl.flags.writeable
-            and _SNAPSHOTS.get(id(decl)) is decl):
-        return decl
-    snap = np.array(decl, copy=True)
-    snap.setflags(write=False)
-    _SNAPSHOTS[id(snap)] = snap
-    return snap
-
-
 def _build_depth_points(sigma, depth, decl, placement: str, n_cols: int,
                         layout: str = "node",
                         vertical_coord: str = "zlevel") -> DepthPoints:
@@ -223,8 +185,7 @@ def _build_depth_points(sigma, depth, decl, placement: str, n_cols: int,
 
     ``depth`` is the bed array of the columns (``mesh.depth`` for nodes,
     ``mesh.metadata["elem_bed"]`` for elements), ``n_cols`` their number.
-    ``decl`` is the engine's snapshot of the declaration
-    (:func:`_snapshot_declaration`) or ``None`` (nodes only); it is
+    ``decl`` is the reader's declaration or ``None`` (nodes only); it is
     validated here and nothing of it is kept but its values in ``last``.
     On a sigma mesh (``vertical_coord == "sigma"``, ``"layer_linear"``
     only) ``depth`` and ``decl`` are not read: the points are the layer
@@ -408,19 +369,11 @@ def depth_points(mesh: Mesh, placement: str,
 
     Notes
     -----
-    A build takes the declaration's snapshot (an owned, read-only copy;
-    one that already is an engine snapshot, still read-only, is reused —
-    the other placement's, an earlier build's before a ``max_levels`` cut,
-    or a shallow copy's of the mesh), validates it, builds from it, and
-    installs it in ``mesh.metadata["uv_data_last"]`` (element layout:
-    ``["uv_data_last_elem"]``) in place of the reader's array: the
-    declaration in effect is exactly what the table was built from, and a
-    write into the reader's array, its base or any view of it after that
-    changes nothing (assign a new array to declare another prefix).  A
-    cache entry counts only while that snapshot is still read-only, so a
-    deep-copied or unpickled mesh (numpy returns the copy writeable) gets
-    a new snapshot, validated again, on first use.  The bed is copied into
-    the table (``DepthPoints.bed``), never snapshotted in the metadata.
+    A build validates the declaration and reads its values into ``last``;
+    the bed is copied into the table (``DepthPoints.bed``).  The cache
+    compares the inputs by identity only, so a write into
+    ``mesh.depth``, ``elem_bed`` or a declaration in place after the
+    first use is not seen: assign a new array to change one.
 
     Raises
     ------
@@ -482,30 +435,17 @@ def depth_points(mesh: Mesh, placement: str,
     cache = mesh._uv_depth_points
     if cache:
         entry = cache.get(key)
-        # a WRITEABLE declaration is not the frozen snapshot the entry was
-        # built from, even when identical: a deep copy or an unpickled mesh
-        # gets a new, writeable array (numpy drops the flag) that still
-        # matches its cache entry by identity — rebuild from its values
         if (entry is not None and entry.sigma is sigma
-                and entry.depth is depth and entry.decl is decl
-                and not (isinstance(decl, np.ndarray)
-                         and decl.flags.writeable)):
+                and entry.depth is depth and entry.decl is decl):
             return entry.points
     if layout == "element" and coord == "zlevel":
         refuse_elem_cavities(mesh)
-    snap = _snapshot_declaration(decl)
-    points = _build_depth_points(sigma, depth, snap, placement, n_cols,
+    points = _build_depth_points(sigma, depth, decl, placement, n_cols,
                                  layout, coord)
-    if snap is not decl:
-        # the declaration in effect is what the table was built from.  A
-        # shallow copy of the mesh shares this dict and then sees the
-        # snapshot too: equal values, so its next lookup rebuilds its own
-        # table (its entry names the replaced object) with the same prefix
-        mesh.metadata[decl_key] = snap
     # copy-on-write: a shallow copy of the mesh (dataclasses.replace,
     # copy.copy) shares the dict object; never mutate it in place
     new_cache = dict(cache or {})
-    new_cache[key] = _DepthPointsEntry(sigma, depth, snap, points)
+    new_cache[key] = _DepthPointsEntry(sigma, depth, decl, points)
     mesh._uv_depth_points = new_cache
     return points
 
@@ -698,7 +638,7 @@ def _layout_of(vel) -> str:
 
 
 def check_depth_linear_record(vel, mesh: Mesh, *, record: str = "") -> None:
-    """Validate a depth-linear field for ``mesh`` and stamp it as checked.
+    """Validate one record of a depth-linear field for ``mesh``.
 
     Refuses (``ValueError`` naming node or element, point, component and
     ``record``) a u or v value that is non-finite at a point ``<= last``
@@ -706,19 +646,15 @@ def check_depth_linear_record(vel, mesh: Mesh, *, record: str = "") -> None:
     values; on a sigma mesh ``last`` is the bottom layer of every column,
     so every layer must be finite).  ``w`` is never checked, and a finite
     fill value inside the prefix is the reader's business (readers mask
-    their fill values).  On
-    success sets ``vel._dl_token = depth_points(mesh, vel.uv_vertical,
-    vel.uv_layout)``: a node-layout field is checked against the node
-    table, an element-layout field against the element table.
-
-    A :class:`~kelp.core.io.LazyLerpField` is checked through its parents
-    ``vel_a`` / ``vel_b`` (each skipped when already checked) without
-    blending anything; its own token is set only when both parents then
-    hold the identical token object.
+    their fill values).  A node-layout field is checked against the node
+    table ``depth_points(mesh, vel.uv_vertical, "node")``, an
+    element-layout field against the element table.  The tracking layer
+    calls it once for every record it stores
+    (``tracking._mark_depth_linear``); nothing is stored on the field.
 
     Parameters
     ----------
-    vel : VelocityField or LazyLerpField
+    vel : VelocityField
         A ``"level"`` or ``"layer_linear"`` field with u/v of shape
         ``(M, C)`` (``M`` = the table's points, ``C`` = mesh nodes for
         ``uv_layout="node"``, mesh elements for ``"element"``).  A
@@ -738,29 +674,8 @@ def check_depth_linear_record(vel, mesh: Mesh, *, record: str = "") -> None:
     """
     layout = _layout_of(vel)
     dp = depth_points(mesh, vel.uv_vertical, layout)
-    if isinstance(vel, LazyLerpField):
-        for parent in (vel.vel_a, vel.vel_b):
-            if not is_checked(parent, mesh):
-                check_depth_linear_record(parent, mesh, record=record)
-        if vel.vel_a._dl_token is dp and vel.vel_b._dl_token is dp:
-            vel._dl_token = dp
-        return
     _check_components(vel, dp, vel.uv_vertical, record, layout,
                       mesh.vertical_coord == "sigma")
-    vel._dl_token = dp
-
-
-def is_checked(vel, mesh: Mesh) -> bool:
-    """True when ``vel`` passed the record check for ``mesh``'s current table.
-
-    ``vel._dl_token is depth_points(mesh, vel.uv_vertical, vel.uv_layout)``;
-    a field that was never stamped (every ``"layer"`` field) answers
-    ``False`` without building a table.  Never blends a lazy field.
-    """
-    tok = getattr(vel, "_dl_token", None)
-    if tok is None:
-        return False
-    return tok is depth_points(mesh, vel.uv_vertical, _layout_of(vel))
 
 
 __all__ = [
@@ -770,5 +685,4 @@ __all__ = [
     "uv_at",
     "uv_wet",
     "check_depth_linear_record",
-    "is_checked",
 ]

@@ -21,11 +21,14 @@ the tracker was developed privately from 2026-06.
   (each stored value is blended in time first, then read in depth). Refused before
   the output file is written: 2-D runs, other u/v interpolators, `rk45` (FESOM2
   element-layout u/v and FESOM-C sigma meshes: the next sections).
-- Each record a run reads with the option is checked: a non-finite `u` or `v`
-  above a column's last usable layer centre stops the run with the node, the
-  layer and the record named. The HEALPix reader checks the raw record before it
-  zeroes missing values (so a drifting surface mask is refused, not zeroed) and
-  declares where each column's u data end (`mesh.metadata["uv_data_last"]`).
+- Each record a run reads with the option is checked once, when the run stores
+  it: a non-finite `u` or `v` above a column's last usable layer centre stops the
+  run with the node, the layer and the record named; the interpolators and the
+  step functions do not check again. The HEALPix reader checks the raw record
+  before it zeroes missing values (so a drifting surface mask is refused, not
+  zeroed); a mesh loaded with the option declares where each column's u data end
+  (`mesh.metadata["uv_data_last"]`, one extra pass over u's first record), and a
+  run with the option on a mesh loaded without it is refused at its first record.
 - Output files of runs with the option carry the global attribute
   `uv_vertical = "linear"` — the proof the option was on (a misspelled key is
   ignored silently, like every unknown key). Runs without it are bit for bit
@@ -34,12 +37,7 @@ the tracker was developed privately from 2026-06.
   a checkpoint was written with (`uv_vertical`, `None` = `layer`;
   `write_restart_file` takes `uv_vertical=`), `tracking._validate_restart_uv_vertical`
   refuses a resume under the other rule (the resume recipe calls it next to the
-  frame check), and `run_single_realization` refuses a segment whose rule
-  differs from the one its writer already carries — the first segment binds its
-  rule to the writer before any write, in memory only, so a segment that wrote
-  only a checkpoint counts too; `open()` creates a new file and starts unbound.
-  `TrajectoryWriter.global_attr` returns a global attribute written through the
-  writer, `bound_rule`/`bind_rule` the rules bound to it.
+  frame check).
 - Engine: `VelocityField.uv_vertical` (`"layer"`, `"layer_linear"`, `"level"`)
   records where u/v sit in the vertical and travels through every time blend and
   the shared snapshot cache; the new module `numerics/vertical_uv.py` holds the
@@ -52,11 +50,10 @@ the tracker was developed privately from 2026-06.
   `max_levels` cut — 1 + R calls for R realizations, one per direct
   `run_single_realization` — so mesh facts a dataset declares (`uv_data_last`)
   are always those of the dataset, mesh, levels and reader in use; the engine
-  keeps no record of earlier calls. The engine takes a snapshot of the
-  declaration at first use (an owned, read-only copy that replaces the
-  reader's array in `mesh.metadata`): assign a new array to change it —
-  writing into the reader's old array changes nothing, writing into the
-  snapshot raises.
+  keeps no record of earlier calls. The depth-point table is built from the
+  declaration's values at first use and kept while the levels, the bed and the
+  declaration are the same arrays: assign a new array to change one (a write
+  into an array in place is not seen).
 - The cost of the option is measured by
   `benchmarks/single_node/depth_linear_cost.py` (128 threads, 1e5 particles,
   with the walls at depth of the next section): +10 % per fused 3-D node RK2

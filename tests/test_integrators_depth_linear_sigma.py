@@ -505,15 +505,11 @@ def test_stage_s_not_entry_s(monkeypatch, tmp_path, integrator, layout,
 
 @pytest.mark.parametrize("mode", ["lerp", "supplied", "pchip"])
 @pytest.mark.parametrize("integrator", list(STEPS))
-def test_record_check_once(monkeypatch, tmp_path, integrator, mode):
-    """The stage fields on a sigma mesh (a blend of the records, the field
-    seen with another surface, a PCHIP reconstruction at the stage time)
-    hold the token of the fields the entry checked: the record check runs
-    at the entry of the first step only — once per field it receives (a
-    lazy blend: its two records, then the blend; PCHIP: ``vel``,
-    ``vel_next`` and the two outer records of the bundle, the inner two
-    being ``vel`` and ``vel_next``) — and never inside a stage or in a
-    second step."""
+def test_steps_do_not_scan_records(monkeypatch, tmp_path, integrator, mode):
+    """The steps on a sigma mesh trust their fields: neither the entry nor
+    a stage field (a blend of the records, the field seen with another
+    surface, a PCHIP reconstruction at the stage time) runs a record scan
+    (a run checks every record once, where it stores it)."""
     geo = GEO_MOVING
     if mode == "pchip":
         mesh, recs = _fesomc(tmp_path, geo=geo, times=RECORDS)
@@ -525,28 +521,13 @@ def test_record_check_once(monkeypatch, tmp_path, integrator, mode):
         mesh, recs = _fesomc(tmp_path, geo=geo)
         vel, kw, _tu, te, _t_end = _payload(mesh, recs, geo, "element",
                                             mode, 1.0)
-    calls = []
-    for mod in (I, ip):
-        real = mod.check_depth_linear_record
-
-        def spy(v, m, *, record="", _real=real, _mod=mod.__name__):
-            calls.append((_mod.rsplit(".", 1)[-1], record))
-            return _real(v, m, record=record)
-        monkeypatch.setattr(mod, "check_depth_linear_record", spy)
+    def no_scan(*a, **k):
+        raise AssertionError("a step scanned a record")
+    monkeypatch.setattr(vu, "_check_components", no_scan)
     st = _state(geo, te[0])
-    STEPS[integrator](st, vel, mesh, DT, 1.0, uv_interp="leastsq",
-                      w_interp="barycentric", **kw)
-    first = [f"vel ({integrator}_step)"]
-    if mode == "lerp":
-        first = [f"vel.vel_a ({integrator}_step)",
-                 f"vel.vel_b ({integrator}_step)"] + first
-    elif mode == "pchip":
-        first += [f"{name} ({integrator}_step)" for name in (
-            "vel_next", "recon snapshot 0", "recon snapshot 3")]
-    assert calls == [("integrators", r) for r in first]
-    STEPS[integrator](st, vel, mesh, DT, 1.0, uv_interp="leastsq",
-                      w_interp="barycentric", **kw)
-    assert len(calls) == len(first)
+    out = STEPS[integrator](st, vel, mesh, DT, 1.0, uv_interp="leastsq",
+                            w_interp="barycentric", **kw)
+    assert np.all(out.status == ParticleStatus.ALIVE)
 
 
 # ---------------------------------------------------------------------------
@@ -768,9 +749,8 @@ _DL_FUNCS = ((I, "_sigma_frac_for_uv"), (I, "_fused_euler_step_3d_dl"),
              (ip, "_loop_interp_edge_lsq_3d_dl"),
              (ip, "_loop_interp_bary_elem_dl"), (ip, "_loop_interp_bary_dl"),
              (I, "depth_points"), (ip, "depth_points"),
-             (vu, "depth_points"), (I, "check_depth_linear_record"),
-             (ip, "check_depth_linear_record"), (I, "is_checked"),
-             (ip, "is_checked"))
+             (vu, "depth_points"), (vu, "check_depth_linear_record"),
+             (vu, "_check_components"))
 
 #: the layer kernel each interpolator runs (unfused)
 _LAYER_KERNEL = {"leastsq": (ip, "_loop_interp_leastsq_3d"),
