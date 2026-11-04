@@ -1967,7 +1967,7 @@ def run_single_realization(
             # a later realization's start (start + k·run_interval) wraps by
             # whole forcing periods, as the discrete reads do
             sim_time = _index_to_sim_time(start_time_idx, file_times,
-                                          n_time_total, on_exhausted)
+                                          n_time_total, on_exhausted, dt=dt)
         else:
             # past the end was an IndexError; a negative index silently
             # read the end of the axis
@@ -2614,12 +2614,15 @@ def _index_to_sim_time(
     file_times: np.ndarray,
     n_time_total: int,
     on_exhausted: str,
+    dt: Optional[float] = None,
 ) -> float:
     """Return the sim-time corresponding to file index ``idx``.
 
     For ``on_exhausted == "cycle"`` indices outside ``[0, n_time_total)``
     wrap with full-period offset, where the period equals
-    ``file_times[-1] - file_times[0] + trailing_interval``.  For ``"stop"``
+    ``file_times[-1] - file_times[0] + trailing_interval``; a single record
+    repeats with the period ``dt`` (the run's step, the output's
+    ``forcing_cycle_period``) when given, else 1 s.  For ``"stop"``
     out-of-range indices are clamped to the valid range (``run_tracking``
     refuses such a start before it gets here; direct discrete calls still
     reach the clamp through ``_record_clock_origin``).
@@ -2630,7 +2633,7 @@ def _index_to_sim_time(
         # Synthetic 1s period for single-snapshot cycling, matching
         # _resolve_time_bracket's treatment of the same degenerate case.
         if n_time_total == 1:
-            period = 1.0
+            period = float(dt) if dt is not None else 1.0
         else:
             period = (file_times[-1] - file_times[0]
                       + (file_times[-1] - file_times[-2]))
@@ -3248,9 +3251,9 @@ def run_tracking(
                     t_run += (
                         _index_to_sim_time(idx + config.time.run_interval,
                                            file_times, n_time_total,
-                                           on_exhausted)
+                                           on_exhausted, dt=dt)
                         - _index_to_sim_time(idx, file_times, n_time_total,
-                                             on_exhausted))
+                                             on_exhausted, dt=dt))
                     idx += config.time.run_interval
                 if not (file_times[0] - 1e-6 <= t_run
                         <= file_times[-1] + 1e-6):
@@ -3765,9 +3768,9 @@ def run_tracking(
         ):
             sim_time_start += (
                 _index_to_sim_time(start_idx, file_times, n_time_total,
-                                   on_exhausted)
+                                   on_exhausted, dt=dt)
                 - _index_to_sim_time(prev_idx, file_times, n_time_total,
-                                     on_exhausted)
+                                     on_exhausted, dt=dt)
             )
 
     ds.close()

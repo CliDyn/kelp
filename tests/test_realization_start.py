@@ -174,3 +174,72 @@ def test_direct_interpolated_call_refuses_a_start_off_the_records(tmp_path,
         ds.close()
     msg = str(exc.value)
     assert f"start_time_idx {start}" in msg and f"[0, {N_TIME})" in msg, msg
+
+
+def _single_record_cfg(tmp_path, *, temporal, time_dir):
+    nc = _make_fesomc_timed(tmp_path, n_time=1, dt_seconds=FILE_DT,
+                            u_val=0.1)
+    seeds = tmp_path / "s.dat"
+    seeds.write_text("5.0 5.0\n")
+    return AppConfig(
+        mode=ModeConfig(Fdrift2D=True, Fdrift3D=False, time_dir=time_dir),
+        numerics=NumericsConfig(dt=FILE_DT, file_dt=FILE_DT,
+                                integrator="euler", output_freq=1,
+                                temporal_interp=temporal),
+        mesh=MeshConfig(type="fesomc", meshpath=str(nc)),
+        data=DataConfig(ncinput=str(nc), inicloud=str(seeds),
+                        output_path="", time_averaging="instant"),
+        time=TimeConfig(start_time_idx=0, n_steps=1, num_runs=2,
+                        run_interval=1, on_exhausted="cycle"))
+
+
+@pytest.mark.parametrize("time_dir", [1.0, -1.0])
+def test_cycle_single_record_realization_starts_one_period_later(tmp_path,
+                                                                 time_dir):
+    """One record cycled repeats with the period dt (the output's
+    ``forcing_cycle_period``): realization 1 of run_interval 1 starts dt
+    after realization 0 in interpolated mode as in discrete mode (old
+    interpolated: 1 s, a synthetic period of the time bracket)."""
+    out = {}
+    for temporal in (True, False):
+        sub = tmp_path / ("t" if temporal else "d")
+        sub.mkdir()
+        recs = run_tracking(_single_record_cfg(sub, temporal=temporal,
+                                               time_dir=time_dir))
+        out[temporal] = (recs[1].release_time[0], recs[1].times[0])
+    assert out[True][0] == FILE_DT, out
+    assert out[True] == out[False], out
+
+
+def test_stop_start_date_check_follows_an_irregular_axis(tmp_path):
+    """The check advances its record index with the loop: on records at
+    0, 3, 4 and 5 h (the shape of monthly means) with start_date 00:30 and
+    run_interval 1 the starts are 00:30, 03:30 and 04:30 — all on the
+    records, so the run goes ahead (a check that kept adding the first
+    interval would reach 06:30 and refuse)."""
+    import pandas as pd
+    import xarray as xr
+
+    nc0 = _make_fesomc_timed(tmp_path, n_time=4, dt_seconds=FILE_DT,
+                             u_val=0.1)
+    with xr.open_dataset(nc0) as raw:
+        ds = raw.load()
+    ds = ds.assign_coords(time=pd.to_datetime(
+        ["2020-01-01T00:00", "2020-01-01T03:00", "2020-01-01T04:00",
+         "2020-01-01T05:00"]))
+    nc = tmp_path / "irregular.nc"
+    ds.to_netcdf(nc)
+    seeds = tmp_path / "s.dat"
+    seeds.write_text("5.0 5.0\n")
+    cfg = AppConfig(
+        mode=ModeConfig(Fdrift2D=True, Fdrift3D=False, time_dir=1.0),
+        numerics=NumericsConfig(dt=1200.0, integrator="euler", output_freq=1,
+                                temporal_interp=True),
+        mesh=MeshConfig(type="fesomc", meshpath=str(nc)),
+        data=DataConfig(ncinput=str(nc), inicloud=str(seeds), output_path="",
+                        time_averaging="instant"),
+        time=TimeConfig(start_time_idx=0, n_steps=1, num_runs=3,
+                        run_interval=1, on_exhausted="stop",
+                        start_date="2020-01-01T00:30"))
+    records = run_tracking(cfg)
+    assert [r.release_time[0] for r in records] == [1800.0, 12600.0, 16200.0]
