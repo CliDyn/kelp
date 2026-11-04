@@ -78,10 +78,14 @@ print("BEACHED:", ratios[2])
   dateline-straddling faces masked; rotated meshes drawn geographic).
 - `plot_mesh_nodes(...)` — the mesh nodes as points.
 - `plot_trajectories(ds, color_by=..., cmap=..., projection=...)` — 2-D paths coloured
-  by absolute depth or time with a linear norm (no pre-projection of the data).
+  by absolute depth or time with a linear norm (no pre-projection of the data); the
+  start marker sits at the release position (`release_lon`/`release_lat` of the data,
+  else the first recorded position), the end marker at the last recorded position.
 - `plot_trajectories_3d(ds, plotter)` — 3-D paths in one fixed colour (PyVista when
   available, else a Matplotlib 3-D axes).
-- `plot_diagnostics(ds, dt=...)` — per-particle panels of lon(t), lat(t), speed(t).
+- `plot_diagnostics(ds, dt=...)` — per-particle panels of lon(t), lat(t), speed(t);
+  the time axis and the speed come from the record times when the data has them
+  (`dt` otherwise), and a step across the dateline counts as the short way round.
 - `compute_presence_density_mesh(ds, mesh, normalize='probability')` — particle
   presence per mesh ELEMENT (`count`, `probability` or `per_area`), the unstructured
   twin of `compute_presence_probability`.

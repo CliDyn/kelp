@@ -287,3 +287,108 @@ def test_trajectory_animator(mock_trajectory_dataset):
     assert animator.anim is not None
     # Cannot easily mock the ffmpeg save output without file writing,
     # so we just test the generation of the internal FuncAnimation object.
+
+
+# --- start/end markers and the diagnostics speed on real output shapes: a
+# delayed release (NaN positions before it, release_lon/lat in format 2), a
+# step across the dateline, records further apart than ``dt``.
+
+def _marker(ax, label):
+    line = next(ln for ln in ax.get_lines() if ln.get_label() == label)
+    return np.asarray(line.get_xdata(), float), np.asarray(line.get_ydata(), float)
+
+
+def _delayed_release_data():
+    nan = np.nan
+    return {
+        "lon": np.array([[1.0, 1.2, 1.4, 1.6, 1.8],
+                         [nan, nan, 0.5, 0.7, 0.9]]),
+        "lat": np.array([[1.0, 1.1, 1.2, 1.3, 1.4],
+                         [nan, nan, 1.5, 1.6, nan]]),
+        "time": np.arange(5) * 3600.0,
+    }
+
+
+def test_start_marker_at_the_release_position(mock_mesh):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    data = _delayed_release_data()
+    data["lon"][1, 4] = np.nan                       # last record of P1 empty
+    data["release_lon"] = np.array([1.0, 0.45])      # released between records 1 and 2
+    data["release_lat"] = np.array([1.0, 1.45])
+    ds = TrajectoryDataset(mock_mesh, data)
+    fig, ax = plt.subplots()
+    plot_trajectories(ds, ax=ax, projection=None)
+    np.testing.assert_array_equal(_marker(ax, "start")[0], [1.0, 0.45])
+    np.testing.assert_array_equal(_marker(ax, "start")[1], [1.0, 1.45])
+    np.testing.assert_array_equal(_marker(ax, "end")[0], [1.8, 0.7])
+    np.testing.assert_array_equal(_marker(ax, "end")[1], [1.4, 1.6])
+    # the release position follows the particles through filter_status
+    kept = TrajectoryDataset(mock_mesh, dict(data, status=np.array(
+        [[1, 1, 1, 1, 2], [4, 4, 1, 1, 1]]))).filter_status(1)
+    np.testing.assert_array_equal(kept.release_lon, [0.45])
+    plt.close("all")
+
+
+def test_start_marker_without_release_variables(mock_mesh):
+    """Format 1 or a hand-built dataset: the first finite record."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    ds = TrajectoryDataset(mock_mesh, _delayed_release_data())
+    fig, ax = plt.subplots()
+    plot_trajectories(ds, ax=ax, projection=None)
+    np.testing.assert_array_equal(_marker(ax, "start")[0], [1.0, 0.5])
+    np.testing.assert_array_equal(_marker(ax, "start")[1], [1.0, 1.5])
+    np.testing.assert_array_equal(_marker(ax, "end")[0], [1.8, 0.7])
+    plt.close("all")
+
+
+def _speed_and_hours(fig, p=0):
+    ax_lon, ax_speed = fig.axes[3 * p], fig.axes[3 * p + 2]
+    return (np.asarray(ax_speed.get_lines()[0].get_ydata(), float),
+            np.asarray(ax_lon.get_lines()[0].get_xdata(), float))
+
+
+def test_diagnostics_speed_across_the_dateline(mock_mesh):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from kelp.visualization.plot_2d import plot_diagnostics
+    from kelp.core.geometry import METERS_PER_DEG_LAT
+    ds = TrajectoryDataset(mock_mesh, {
+        "lon": np.array([[179.8, 179.9, -179.9, -179.8]]),
+        "lat": np.zeros((1, 4)),
+        "time": np.arange(4) * 3600.0,
+    })
+    speed, _ = _speed_and_hours(plot_diagnostics(ds, dt=3600.0))
+    expected = np.array([0.1, 0.2, 0.1]) * METERS_PER_DEG_LAT / 3600.0
+    np.testing.assert_allclose(speed, expected, rtol=1e-9)
+    plt.close("all")
+
+
+def test_diagnostics_use_the_record_times(mock_mesh):
+    """Daily records with the default dt of one hour: the speed divides by
+    the record interval and the time axis shows the records' hours."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from kelp.visualization.plot_2d import plot_diagnostics
+    from kelp.core.geometry import METERS_PER_DEG_LAT
+    ds = TrajectoryDataset(mock_mesh, {
+        "lon": np.zeros((1, 3)),
+        "lat": np.array([[0.0, 0.5, 1.5]]),
+        "time": 1.0e8 + np.arange(3) * 86400.0,
+    })
+    speed, hours = _speed_and_hours(plot_diagnostics(ds))
+    np.testing.assert_allclose(speed, np.array([0.5, 1.0]) * METERS_PER_DEG_LAT / 86400.0,
+                               rtol=1e-12)
+    np.testing.assert_array_equal(hours, [0.0, 24.0, 48.0])
+    # without record times the step dt still sets both
+    ds_notime = TrajectoryDataset(mock_mesh, {"lon": ds.lon, "lat": ds.lat})
+    speed, hours = _speed_and_hours(plot_diagnostics(ds_notime, dt=7200.0))
+    np.testing.assert_allclose(speed, np.array([0.5, 1.0]) * METERS_PER_DEG_LAT / 7200.0,
+                               rtol=1e-12)
+    np.testing.assert_array_equal(hours, [0.0, 2.0, 4.0])
+    plt.close("all")

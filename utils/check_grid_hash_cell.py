@@ -65,37 +65,57 @@ MIN_MEDIAN = 8          # fewer nodes per window than this = too small a cell
 TARGET_MEDIAN = 30      # more than this in the AUTO cell = worth pinning a cell
 
 
+def _query_cells(mesh, lon: np.ndarray, lat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(ci, cj)`` of each query on the mesh's current hash, by the kernel's own
+    rule (``core.mesh._gh_cell_of``: the longitude fold into the grid's branch,
+    then the clamp) — a raw ``(lon - lon_min) / cell`` misplaces every query on
+    the other side of the branch cut (all negative longitudes on a cyclic grid)."""
+    from kelp.core.mesh import _gh_cell_of
+    args = (float(mesh._gh_cell_size), float(mesh._gh_lon_min), float(mesh._gh_lat_min),
+            int(mesh._gh_nx), int(mesh._gh_ny), bool(mesh._gh_wrap_lon))
+    cells = np.array([_gh_cell_of(x, y, *args) for x, y in
+                      zip(np.asarray(lon, dtype=np.float64).tolist(),
+                          np.asarray(lat, dtype=np.float64).tolist())],
+                     dtype=np.int64).reshape(-1, 2)
+    return cells[:, 0], cells[:, 1]
+
+
 def window_counts(mesh, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
-    """Nodes in the 3x3 grid-hash window around each query (mesh frame)."""
-    cs, lmn, ltm = mesh._gh_cell_size, mesh._gh_lon_min, mesh._gh_lat_min
+    """Nodes in the 3x3 grid-hash window around each query (mesh frame), the
+    cells the kernel scans: wrapped in longitude on a cyclic grid, skipped
+    past the edge of a regional one (never counted twice)."""
     nx, ny, wrap = mesh._gh_nx, mesh._gh_ny, mesh._gh_wrap_lon
     counts = np.diff(mesh._gh_offsets)
-    if wrap:
-        ci = ((lon - lmn) / cs).astype(np.int64) % nx
-    else:
-        ci = np.clip(((lon - lmn) / cs).astype(np.int64), 0, nx - 1)
-    cj = np.clip(((lat - ltm) / cs).astype(np.int64), 0, ny - 1)
-    tot = np.zeros(lon.size, dtype=np.int64)
+    ci, cj = _query_cells(mesh, lon, lat)
+    tot = np.zeros(ci.size, dtype=np.int64)
     for di in (-1, 0, 1):
         for dj in (-1, 0, 1):
-            cjj = np.clip(cj + dj, 0, ny - 1)
-            cii = (ci + di) % nx if wrap else np.clip(ci + di, 0, nx - 1)
-            tot += counts[cjj * nx + cii]
+            cjj = cj + dj
+            cii = (ci + di) % nx if wrap else ci + di
+            ok = (cjj >= 0) & (cjj < ny) & (cii >= 0) & (cii < nx)
+            tot[ok] += counts[cjj[ok] * nx + cii[ok]]
     return tot
 
 
 def approx_anchor_count(mesh, lon: np.ndarray, lat: np.ndarray, nearest: np.ndarray,
                         cell: float) -> int:
     """How many queries have their TRUE nearest node (``nearest``, exact) outside the
-    3x3 window of a hash with this cell (mesh-frame degrees, lon wrap-aware)."""
-    lmn, ltm, wrap = mesh._gh_lon_min, mesh._gh_lat_min, mesh._gh_wrap_lon
-    nlon, nlat = mesh.nodes_lon[nearest], mesh.nodes_lat[nearest]
-    ci_p = np.floor((lon - lmn) / cell); ci_n = np.floor((nlon - lmn) / cell)
-    cj_p = np.floor((lat - ltm) / cell); cj_n = np.floor((nlat - ltm) / cell)
-    di = np.abs(ci_n - ci_p)
+    3x3 window the kernel scans on the mesh's current hash, which must be built with
+    this cell: the query's cell by the kernel's rule, the node's cell from the hash
+    itself, neighbours as the scan visits them (wrapped on a cyclic grid)."""
+    if float(cell) != float(mesh._gh_cell_size):
+        raise ValueError(f"approx_anchor_count: the mesh's hash is built with cell "
+                         f"{mesh._gh_cell_size:g} deg, not {cell:g}; rebuild it first")
+    nx, wrap = mesh._gh_nx, mesh._gh_wrap_lon
+    counts = np.diff(mesh._gh_offsets)
+    node_cell = np.empty(mesh.nodes_lon.size, dtype=np.int64)
+    node_cell[mesh._gh_node_ids] = np.repeat(np.arange(counts.size, dtype=np.int64), counts)
+    ci_p, cj_p = _query_cells(mesh, lon, lat)
+    cell_n = node_cell[np.asarray(nearest, dtype=np.int64)]
+    di = np.abs(cell_n % nx - ci_p)
     if wrap:
-        nx = np.ceil(360.0 / cell); di = np.minimum(di, nx - di)
-    dj = np.abs(cj_n - cj_p)
+        di = np.minimum(di, nx - di)
+    dj = np.abs(cell_n // nx - cj_p)
     return int(((di > 1) | (dj > 1)).sum())
 
 
