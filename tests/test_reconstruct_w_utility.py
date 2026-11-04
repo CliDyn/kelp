@@ -158,10 +158,11 @@ class TestBottomResidual:
 
     def test_printed_residual_survives_the_level_mask(self, tmp_path, capsys):
         cli = _load_cli()
-        # bottom at 10 m = level 2 of every node: nlevels_nod2D masks the
-        # interfaces at 30 and 60 m
-        mesh = _mesh(tmp_path, zbar_n_bottom=[-10.0] * N_NODE,
-                     nlevels_nod2D=[2] * N_NODE)
+        # bottom at 45 m, between the interfaces at 30 and 60 m: the
+        # residual reads both, and nlevels_nod2D = 3 masks the one at 60 m,
+        # so the masked integral would give half of it (5e-7)
+        mesh = _mesh(tmp_path, zbar_n_bottom=[-45.0] * N_NODE,
+                     nlevels_nod2D=[3] * N_NODE)
         # u = v = 0 and ssh rising 0.0864 m a day: w_raw = -1e-6 m/s in
         # every column, so the residual at the bottom is 1e-6
         ds = xr.Dataset(

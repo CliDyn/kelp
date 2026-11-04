@@ -3235,6 +3235,36 @@ def run_tracking(
                     f"outside the records [0, {n_time_total}) of the forcing "
                     f"(on_exhausted: stop); lower num_runs or run_interval, "
                     f"move the start, or set on_exhausted: cycle")
+        # A start_date between records shifts every realization's start by
+        # the record times between the start indices (the shift at the end
+        # of the realization loop, repeated operation for operation): an
+        # index on the records can still start past them, and that
+        # realization would write no record.  Bound as _resolve_time_bracket's.
+        if temporal_interp and sim_time_start is not None and n_time_total > 0:
+            t_run = sim_time_start
+            idx = start_idx
+            for ire in range(config.time.num_runs):
+                if ire > 0:
+                    t_run += (
+                        _index_to_sim_time(idx + config.time.run_interval,
+                                           file_times, n_time_total,
+                                           on_exhausted)
+                        - _index_to_sim_time(idx, file_times, n_time_total,
+                                             on_exhausted))
+                    idx += config.time.run_interval
+                if not (file_times[0] - 1e-6 <= t_run
+                        <= file_times[-1] + 1e-6):
+                    raise ValueError(
+                        f"realization {ire} of time.num_runs = "
+                        f"{config.time.num_runs} (time.run_interval = "
+                        f"{config.time.run_interval}) starts {t_run:g} s "
+                        f"after the first time stamp (time.start_date "
+                        f"{config.time.start_date!r} plus {ire} x "
+                        f"run_interval records), outside the record times "
+                        f"[{file_times[0]:g}, {file_times[-1]:g}] s of the "
+                        f"forcing (on_exhausted: stop); lower num_runs or "
+                        f"run_interval, move time.start_date, or set "
+                        f"on_exhausted: cycle")
 
     direction_str = "forward" if config.mode.time_dir >= 0 else "backward"
     print(f"  Tracking steps:    {n_steps} ({direction_str}), start_idx={start_idx}")

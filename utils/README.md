@@ -37,9 +37,12 @@ Config sections (full annotated example: `extract_fesom_region.example.yaml`):
   element-based). Common name aliases (`temp`/`thetao`, `salt`/`so`) are applied.
 - **`region`** — `mode: bbox` with a nested `bbox: {min_lon, max_lon, min_lat,
   max_lat}`; or `center_radius` with `center: {lon, lat}` + `radius_km`; or
-  `polygon` with `polygon_path`. An element is kept when a vertex or its centre
-  lies in the region (`polygon`: also when the polygon reaches into the
-  element), so the cut follows the region's shape, not its bounding box.
+  `polygon` with `polygon_path`. An element is kept when it intersects the
+  closed region (`bbox`/`polygon` in the lon/lat plane, the circle on the
+  sphere: a region inside one element, or crossing an element without
+  holding one of its vertices, keeps that element), so the cut follows the
+  region's shape, not its bounding box. A circle that reaches a pole spans
+  every longitude.
   `halo_layers` adds boundary element rings (1–2 avoids edge artifacts).
 - **`time`** — index-based `start` / `stop` / `step`.
 - **`output`** — `dir`, `format: netcdf|zarr`, `layout: split|combined` (split =

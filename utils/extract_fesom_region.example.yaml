@@ -7,9 +7,9 @@ source:
   ssh_path: null
 
 region:
-  # An element is kept when a vertex or its centre lies in the region (polygon
-  # mode: also when the polygon reaches into it). A region across the dateline
-  # uses continuous longitudes, e.g. min_lon 170, max_lon 190.
+  # An element is kept when it intersects the region (a region inside one
+  # element keeps that element). A region across the dateline uses
+  # continuous longitudes, e.g. min_lon 170, max_lon 190.
   mode: bbox
 
   # bbox mode

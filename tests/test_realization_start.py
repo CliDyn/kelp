@@ -29,7 +29,7 @@ PERIOD = N_TIME * FILE_DT          # regular axis: span + last interval
 
 
 def _cfg(tmp_path, *, start, run_interval, on_exhausted, temporal,
-         num_runs=2, out=""):
+         num_runs=2, out="", start_date=None):
     nc = _make_fesomc_timed(tmp_path, n_time=N_TIME, dt_seconds=FILE_DT,
                             u_val=0.1)
     seeds = tmp_path / "s.dat"
@@ -44,7 +44,7 @@ def _cfg(tmp_path, *, start, run_interval, on_exhausted, temporal,
                         output_path=out, time_averaging="instant"),
         time=TimeConfig(start_time_idx=start, n_steps=1,
                         num_runs=num_runs, run_interval=run_interval,
-                        on_exhausted=on_exhausted))
+                        on_exhausted=on_exhausted, start_date=start_date))
 
 
 @pytest.mark.parametrize("start, run_interval, expected", [
@@ -111,6 +111,45 @@ def test_stop_accepts_every_start_on_the_records(tmp_path):
     records = run_tracking(_cfg(tmp_path, start=0, run_interval=N_TIME - 1,
                                 on_exhausted="stop", temporal=False))
     assert len(records) == 2
+
+
+def test_stop_refuses_a_start_date_realization_past_the_last_record(tmp_path):
+    """With ``time.start_date`` between records (00:30) a realization
+    starts at the date shifted by the record times: realization 1 of
+    run_interval 3 starts at index 3, a record, but at 03:30, past the last
+    record (03:00).  Refused before anything is written (old: realization 0
+    ran and realization 1 wrote no record, without a word)."""
+    out = tmp_path / "traj.nc"
+    cfg = _cfg(tmp_path, start=0, run_interval=3, on_exhausted="stop",
+               temporal=True, out=str(out), start_date="2020-01-01T00:30")
+    with pytest.raises(ValueError) as exc:
+        run_tracking(cfg)
+    msg = str(exc.value)
+    for part in ("time.start_date", "time.num_runs = 2",
+                 "time.run_interval = 3", "12600 s", "[0, 10800] s",
+                 "on_exhausted: cycle"):
+        assert part in msg, (part, msg)
+    assert not (tmp_path / "traj_r0.nc").exists()
+    assert not (tmp_path / "traj_r1.nc").exists()
+
+
+@pytest.mark.parametrize("start_date, run_interval", [
+    ("2020-01-01T00:30", 2),       # realization 1 at 02:30
+    ("2020-01-01T00:00", 3),       # realization 1 on the last record, 03:00
+])
+def test_stop_runs_a_start_date_realization_on_the_records(tmp_path,
+                                                           start_date,
+                                                           run_interval):
+    """A realization start inside the records, the last record included,
+    still runs."""
+    t0 = 1800.0 if start_date.endswith("00:30") else 0.0
+    records = run_tracking(_cfg(tmp_path, start=0, run_interval=run_interval,
+                                on_exhausted="stop", temporal=True,
+                                start_date=start_date))
+    assert len(records) == 2
+    assert records[0].release_time[0] == t0
+    assert records[1].release_time[0] == t0 + run_interval * FILE_DT
+    assert records[1].times[0] == t0 + run_interval * FILE_DT + 1800.0
 
 
 @pytest.mark.parametrize("start", [N_TIME, -1])

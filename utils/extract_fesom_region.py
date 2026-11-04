@@ -774,10 +774,15 @@ def _region_bbox(spec: RegionSpec, polygon_lon: Optional[np.ndarray], polygon_la
     if spec.mode == "center_radius":
         assert spec.center is not None and spec.radius_km is not None
         lon0, lat0 = spec.center
-        dlat = spec.radius_km / 111.0
-        cos_lat = max(math.cos(math.radians(lat0)), 1e-8)
-        dlon = spec.radius_km / (111.0 * cos_lat)
-        return (lon0 - dlon, lon0 + dlon, lat0 - dlat, lat0 + dlat)
+        # The spherical cap of angular radius theta: r / (111 cos lat0) was
+        # too narrow in longitude and missed a cap over a pole.
+        theta = math.degrees(spec.radius_km / EARTH_RADIUS_KM)
+        min_lat, max_lat = max(lat0 - theta, -90.0), min(lat0 + theta, 90.0)
+        if lat0 + theta >= 90.0 or lat0 - theta <= -90.0:
+            return (lon0 - 180.0, lon0 + 180.0, min_lat, max_lat)
+        ratio = math.sin(math.radians(theta)) / math.cos(math.radians(lat0))
+        dlon = math.degrees(math.asin(min(ratio, 1.0)))
+        return (lon0 - dlon, lon0 + dlon, min_lat, max_lat)
     if polygon_lon is None or polygon_lat is None:
         raise ValueError("polygon bbox requested without polygon coordinates.")
     return (
@@ -948,9 +953,11 @@ def _unwrap_near(lon: np.ndarray, ref: np.ndarray) -> np.ndarray:
 def select_region(mesh: MeshSource, spec: RegionSpec) -> np.ndarray:
     """Return the selected element mask on the source mesh.
 
-    An element is selected when one of its vertices or its centre lies in
-    the region; in polygon mode also when a polygon vertex lies in the
-    triangle or an edge of the polygon crosses an edge of the triangle.
+    An element is selected when it intersects the closed region: one of its
+    vertices or its centre lies in the region, or (bbox and polygon, in the
+    lon/lat plane) a region vertex lies in the triangle or a region edge
+    crosses a triangle edge, or (center_radius, on the sphere) the circle
+    centre lies in the triangle or a triangle edge passes within the radius.
     Each triangle's longitudes are unwrapped relative to its first vertex,
     so a triangle across the +-180 seam stays a narrow triangle; it is
     tested at its own longitudes and shifted by one turn either way, so it
@@ -1015,6 +1022,15 @@ def _select_candidates(
             spec.bbox,
         ).reshape(n_candidates, 3).any(axis=1)
         selected = center_in | vertex_in
+        # a box inside one triangle, or cutting a triangle's corner, holds
+        # none of its vertices: test the box as a polygon there
+        min_lon, max_lon, min_lat, max_lat = spec.bbox
+        rest = np.flatnonzero(~selected)
+        selected[rest] = _polygon_reaches_triangles(
+            tri_lon[rest], tri_lat[rest],
+            np.array([min_lon, max_lon, max_lon, min_lon]),
+            np.array([min_lat, min_lat, max_lat, max_lat]),
+        )
     elif spec.mode == "center_radius":
         assert spec.center is not None and spec.radius_km is not None
         center_in = _contains_circle(center_lon, center_lat, spec.center, spec.radius_km)
@@ -1025,6 +1041,9 @@ def _select_candidates(
             spec.radius_km,
         ).reshape(n_candidates, 3).any(axis=1)
         selected = center_in | vertex_in
+        rest = np.flatnonzero(~selected)
+        selected[rest] = _circle_reaches_triangles(
+            tri_lon[rest], tri_lat[rest], spec.center, spec.radius_km)
     else:
         assert polygon_lon is not None and polygon_lat is not None
         center_in = _points_in_polygon(center_lon, center_lat, polygon_lon, polygon_lat)
@@ -1034,36 +1053,89 @@ def _select_candidates(
             polygon_lon,
             polygon_lat,
         ).reshape(n_candidates, 3).any(axis=1)
-
-        poly_vertex_in_tri = np.zeros(n_candidates, dtype=bool)
-        edge_intersects = np.zeros(n_candidates, dtype=bool)
-        poly_points = list(zip(polygon_lon, polygon_lat))
-        poly_edges = list(zip(poly_points, poly_points[1:] + poly_points[:1]))
-        for out_i in range(n_candidates):
-            tri_x = tri_lon[out_i]
-            tri_y = tri_lat[out_i]
-            for px, py in poly_points:
-                if _point_in_triangle(px, py, tri_x, tri_y):
-                    poly_vertex_in_tri[out_i] = True
-                    break
-            if poly_vertex_in_tri[out_i]:
-                continue
-            tri_edges = [
-                ((tri_x[0], tri_y[0]), (tri_x[1], tri_y[1])),
-                ((tri_x[1], tri_y[1]), (tri_x[2], tri_y[2])),
-                ((tri_x[2], tri_y[2]), (tri_x[0], tri_y[0])),
-            ]
-            found = False
-            for (ax, ay), (bx, by) in tri_edges:
-                for (cx, cy), (dx, dy) in poly_edges:
-                    if _segments_intersect(ax, ay, bx, by, cx, cy, dx, dy):
-                        edge_intersects[out_i] = True
-                        found = True
-                        break
-                if found:
-                    break
-        selected = center_in | vertex_in | poly_vertex_in_tri | edge_intersects
+        selected = center_in | vertex_in
+        rest = np.flatnonzero(~selected)
+        selected[rest] = _polygon_reaches_triangles(
+            tri_lon[rest], tri_lat[rest], polygon_lon, polygon_lat)
     return selected
+
+
+def _polygon_reaches_triangles(
+    tri_lon: np.ndarray,
+    tri_lat: np.ndarray,
+    polygon_lon: np.ndarray,
+    polygon_lat: np.ndarray,
+) -> np.ndarray:
+    """Per triangle (vertices ``(n, 3)``): a polygon vertex lies in the
+    triangle, or a polygon edge crosses or touches a triangle edge (the
+    lon/lat plane)."""
+    n_candidates = tri_lon.shape[0]
+    reached = np.zeros(n_candidates, dtype=bool)
+    poly_points = list(zip(polygon_lon, polygon_lat))
+    poly_edges = list(zip(poly_points, poly_points[1:] + poly_points[:1]))
+    for out_i in range(n_candidates):
+        tri_x = tri_lon[out_i]
+        tri_y = tri_lat[out_i]
+        if any(_point_in_triangle(px, py, tri_x, tri_y) for px, py in poly_points):
+            reached[out_i] = True
+            continue
+        tri_edges = [
+            ((tri_x[0], tri_y[0]), (tri_x[1], tri_y[1])),
+            ((tri_x[1], tri_y[1]), (tri_x[2], tri_y[2])),
+            ((tri_x[2], tri_y[2]), (tri_x[0], tri_y[0])),
+        ]
+        reached[out_i] = any(
+            _segments_intersect(ax, ay, bx, by, cx, cy, dx, dy)
+            for (ax, ay), (bx, by) in tri_edges
+            for (cx, cy), (dx, dy) in poly_edges
+        )
+    return reached
+
+
+def _circle_reaches_triangles(
+    tri_lon: np.ndarray,
+    tri_lat: np.ndarray,
+    center: tuple[float, float],
+    radius_km: float,
+) -> np.ndarray:
+    """Per triangle (vertices ``(n, 3)``, great-circle edges): the circle
+    centre lies in the triangle, or an edge passes within ``radius_km``.
+
+    In the gnomonic projection centred on the circle centre great circles
+    are straight lines and a point at angular distance theta lies at radius
+    tan(theta), so comparing the distance from the origin to a projected
+    edge with tan(r / R) is exact on the sphere.  A triangle with a vertex
+    in the far hemisphere (cos theta <= 0) has no projection; for r below
+    90 degrees a mesh triangle that reaches the circle has none there.
+    """
+    theta_r = radius_km / EARTH_RADIUS_KM
+    reached = np.zeros(tri_lon.shape[0], dtype=bool)
+    if theta_r >= 0.5 * math.pi or tri_lon.shape[0] == 0:
+        # the outside of such a circle is a cap below 90 degrees, which
+        # holds every geodesic triangle whose vertices it holds: the vertex
+        # test alone is exact
+        return reached
+    lon0, lat0 = math.radians(center[0]), math.radians(center[1])
+    dlam = np.deg2rad(tri_lon) - lon0
+    phi = np.deg2rad(tri_lat)
+    cos_c = (math.sin(lat0) * np.sin(phi)
+             + math.cos(lat0) * np.cos(phi) * np.cos(dlam))
+    near = (cos_c > 0.0).all(axis=1)
+    cos_c = np.where(cos_c > 0.0, cos_c, 1.0)
+    ax = np.cos(phi) * np.sin(dlam) / cos_c
+    ay = (math.cos(lat0) * np.sin(phi)
+          - math.sin(lat0) * np.cos(phi) * np.cos(dlam)) / cos_c
+    bx, by = np.roll(ax, -1, axis=1), np.roll(ay, -1, axis=1)   # edges a -> b
+    ex, ey = bx - ax, by - ay
+    len2 = ex * ex + ey * ey
+    t = np.clip(-(ax * ex + ay * ey) / np.where(len2 > 0.0, len2, 1.0), 0.0, 1.0)
+    edge_in = (np.hypot(ax + t * ex, ay + t * ey) <= math.tan(theta_r)).any(axis=1)
+    # the origin is inside (or on) the triangle when a x b has one sign on
+    # all three edges
+    cross = ax * by - ay * bx
+    centre_in = (cross >= 0.0).all(axis=1) | (cross <= 0.0).all(axis=1)
+    reached[:] = near & (edge_in | centre_in)
+    return reached
 
 
 def expand_halo(mesh: MeshSource, selected_mask: np.ndarray, halo_layers: int) -> np.ndarray:
