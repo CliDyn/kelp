@@ -120,7 +120,8 @@ dev_tracking:
   - src/kelp/tracking.py:track_particles
   - src/kelp/cli/main.py:main
   - src/kelp/tracking.py:_mark_depth_linear
-  - src/kelp/tracking.py:_apply_max_levels
+  - src/kelp/readers/__init__.py:_apply_max_levels
+  - src/kelp/readers/__init__.py:_open_run_dataset
   - src/kelp/readers/__init__.py:_prepare_dataset
   - src/kelp/tracking.py:_check_linear_element_mesh
   doc: docs/dev/tracking.md
