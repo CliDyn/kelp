@@ -262,7 +262,7 @@ the tracker was developed privately from 2026-06.
 - `utils/extract_fesom_region.py`: the `bbox` and `center_radius` modes took
   every element whose bounding box touched the region's bounding box (a circle
   became a square), and a triangle across the dateline joined every region in
-  its latitude band. Crops now hold exactly the triangles that intersect the
+  its latitude band. Crops now hold the triangles that intersect the
   region (smaller than before for the same config; `halo_layers` adds rings), a
   circle near a pole covers its whole cap, and the subset carries `elem_area`.
 - `utils/check_grid_hash_cell.py`: window counts and anchor counts use the
