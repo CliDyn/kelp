@@ -79,3 +79,103 @@ def test_approximate_anchors_are_counted_and_block_the_recommendation():
     frac = r["approx"] / r["n"]
     cell2, _ = cgh.recommend(rows, allow_approx=frac + 1e-9) if r["empty"] == 0 and r["median"] >= cgh.MIN_MEDIAN else (None, "")
     assert cell2 in (0.3, None)
+
+
+# --- the tool must use the kernel's own cell rule: the longitude fold of
+# core.mesh._gh_cell_of (a query west of the grid's lon_min lands in the
+# grid's own branch) and the scan's neighbours (wrapped on a cyclic grid,
+# skipped past the edge of a regional one).
+
+from scipy.spatial import Delaunay, cKDTree  # noqa: E402
+from kelp.core.mesh import _gh_cell_of, _grid_hash_nearest_3x3, build_grid_hash  # noqa: E402
+
+
+def _cloud_mesh(lon, lat):
+    tri = Delaunay(np.column_stack([lon, lat])).simplices.astype(np.int32)
+    mesh = Mesh(name="cloud", nodes_lon=lon, nodes_lat=lat, depth=np.full(lon.size, 100.0),
+                elem_nodes=tri, elem_center_lon=lon[tri].mean(1), elem_center_lat=lat[tri].mean(1),
+                node_to_elems=None, node_to_elems_count=None, sigma=np.array([]))
+    mesh.node_to_elems, mesh.node_to_elems_count = build_node_to_elems(lon.size, tri)
+    build_search(mesh)
+    return mesh
+
+
+def _kernel_window(mesh, lon, lat):
+    """The flat cells the kernel's 3x3 scan visits for one query."""
+    nx, ny, wrap = mesh._gh_nx, mesh._gh_ny, mesh._gh_wrap_lon
+    ci, cj = _gh_cell_of(float(lon), float(lat), mesh._gh_cell_size, mesh._gh_lon_min,
+                         mesh._gh_lat_min, nx, ny, wrap)
+    cells = []
+    for dj in (-1, 0, 1):
+        if not 0 <= cj + dj < ny:
+            continue
+        for di in (-1, 0, 1):
+            ci2 = ci + di
+            if wrap:
+                ci2 %= nx
+            elif not 0 <= ci2 < nx:
+                continue
+            cells.append((cj + dj) * nx + ci2)
+    return cells
+
+
+def _xyz(lon, lat):
+    lam, phi = np.radians(lon), np.radians(lat)
+    return np.column_stack([np.cos(phi) * np.cos(lam), np.cos(phi) * np.sin(lam), np.sin(phi)])
+
+
+def _clouds():
+    rng = np.random.default_rng(3)
+    glob = (rng.uniform(-180, 180, 4000), rng.uniform(-75, 75, 4000),
+            rng.uniform(-180, 180, 2000), rng.uniform(-70, 70, 2000))
+    # a regional mesh at negative longitudes: both branches have the same span,
+    # so the hash is built in [0, 360) and every query lies west of lon_min;
+    # the queries reach past the outer nodes into the edge cells of the grid
+    atl = (rng.uniform(-40, -10, 3000), rng.uniform(30, 50, 3000),
+           rng.uniform(-41, -9, 2000), rng.uniform(29, 51, 2000))
+    # a regional mesh across the dateline
+    lon = rng.uniform(160, 200, 3000)
+    qlon = rng.uniform(162, 198, 2000)
+    pac = (np.where(lon > 180, lon - 360, lon), rng.uniform(-10, 10, 3000),
+           np.where(qlon > 180, qlon - 360, qlon), rng.uniform(-9, 9, 2000))
+    # a regular 0.5-degree lattice: its span is a whole number of cells, so the
+    # outermost nodes fill the grid's last row and column, where the scan
+    # skips the neighbours past the edge (a clamp would count them twice)
+    ii, jj = np.meshgrid(np.arange(61), np.arange(41))
+    lattice = (-40.0 + 0.5 * ii.ravel(), 30.0 + 0.5 * jj.ravel(),
+               rng.uniform(-41, -9, 2000), rng.uniform(29, 51, 2000))
+    return {"global": glob, "negative_lon": atl, "dateline": pac, "lattice": lattice}
+
+
+@pytest.mark.parametrize("name,cells", [("global", (3.0, 1.0, 2.9)),
+                                        ("negative_lon", (1.0, 0.5)),
+                                        ("dateline", (1.0, 0.3)),
+                                        ("lattice", (1.0, 0.5))])
+def test_window_counts_equal_the_kernel_window(name, cells):
+    lon, lat, qlon, qlat = _clouds()[name]
+    mesh = _cloud_mesh(lon, lat)
+    for cell in cells:
+        build_grid_hash(mesh, cell)
+        counts = np.diff(mesh._gh_offsets)
+        expected = np.array([counts[_kernel_window(mesh, x, y)].sum()
+                             for x, y in zip(qlon, qlat)])
+        got = cgh.window_counts(mesh, qlon, qlat)
+        assert (got != expected).sum() == 0, (name, cell, int((got != expected).sum()))
+
+
+@pytest.mark.parametrize("name,cells", [("global", (3.0, 2.9)),
+                                        ("dateline", (1.0, 0.5))])
+def test_approx_anchor_count_equals_the_kernel_verdict(name, cells):
+    """Approximate anchor = the kernel's 3x3 scan returns another node than
+    the true nearest (ties do not occur in a random cloud)."""
+    lon, lat, qlon, qlat = _clouds()[name]
+    mesh = _cloud_mesh(lon, lat)
+    nearest = cKDTree(_xyz(lon, lat)).query(_xyz(qlon, qlat))[1]
+    for cell in cells:
+        build_grid_hash(mesh, cell)
+        scan = np.array([_grid_hash_nearest_3x3(
+            float(x), float(y), mesh._gh_offsets, mesh._gh_node_ids, mesh._gh_cell_size,
+            mesh._gh_lon_min, mesh._gh_lat_min, mesh._gh_nx, mesh._gh_ny, mesh._gh_wrap_lon,
+            mesh.nodes_lon, mesh.nodes_lat, mesh._node_xyz) for x, y in zip(qlon, qlat)])
+        expected = int((scan != nearest).sum())
+        assert cgh.approx_anchor_count(mesh, qlon, qlat, nearest, cell) == expected, (name, cell)

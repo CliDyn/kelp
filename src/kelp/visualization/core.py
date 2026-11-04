@@ -57,6 +57,8 @@ class TrajectoryDataset:
             - "z": ndarray of shape (P, T), depths (positive-down) in meters
             - "status": ndarray of shape (P, T), integer status codes
             - "time": ndarray of shape (T,), timestamps in seconds or similar
+            - "release_lon", "release_lat" (optional): ndarray of shape (P,),
+              the release positions (output format 2)
         """
         self.mesh = mesh
         
@@ -66,6 +68,8 @@ class TrajectoryDataset:
         self.z = data.get("z", np.zeros_like(self.lon) if self.lon is not None else None)
         self.status = data.get("status")
         self.time = data.get("time")
+        self.release_lon = data.get("release_lon")
+        self.release_lat = data.get("release_lat")
         
         # Validate shapes
         if self.lon is not None and self.lat is not None:
@@ -148,6 +152,9 @@ class TrajectoryDataset:
             "z": self.z[keep_mask, :],
             "status": self.status[keep_mask, :]
         }
+        for name in ("release_lon", "release_lat"):
+            if getattr(self, name) is not None:
+                new_data[name] = getattr(self, name)[keep_mask]
         return TrajectoryDataset(self.mesh, new_data)
         
     @property

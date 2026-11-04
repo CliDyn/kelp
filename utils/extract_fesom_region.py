@@ -936,80 +936,112 @@ def _candidate_mask_from_bbox(
     )
 
 
+def _unwrap_near(lon: np.ndarray, ref: np.ndarray) -> np.ndarray:
+    """``lon`` shifted by whole turns to lie within 180 degrees of ``ref``.
+
+    A longitude already within 180 degrees comes back bit for bit, so a
+    vertex on a region edge keeps its verdict.
+    """
+    return lon + 360.0 * np.round((ref - lon) / 360.0)
+
+
 def select_region(mesh: MeshSource, spec: RegionSpec) -> np.ndarray:
-    """Return selected element mask on the source mesh."""
+    """Return the selected element mask on the source mesh.
+
+    An element is selected when one of its vertices or its centre lies in
+    the region; in polygon mode also when a polygon vertex lies in the
+    triangle or an edge of the polygon crosses an edge of the triangle.
+    Each triangle's longitudes are unwrapped relative to its first vertex,
+    so a triangle across the +-180 seam stays a narrow triangle; it is
+    tested at its own longitudes and shifted by one turn either way, so it
+    meets a region given on either side of the seam.  ``halo_layers``
+    (applied by the caller) adds element rings around the selection.
+    """
     polygon_lon = polygon_lat = None
     if spec.mode == "polygon":
         polygon_lon, polygon_lat = _load_polygon(spec.polygon_path or "", spec.polygon_format)
 
-    tri_lon = mesh.lon[mesh.elem_nodes]
     tri_lat = mesh.lat[mesh.elem_nodes]
+    # Seam-aware: raw longitudes would give a seam triangle a 360-degree box.
+    tri_lon = mesh.lon[mesh.elem_nodes]
+    tri_lon = _unwrap_near(tri_lon, tri_lon[:, :1])
     elem_lon_min = tri_lon.min(axis=1)
     elem_lon_max = tri_lon.max(axis=1)
     elem_lat_min = tri_lat.min(axis=1)
     elem_lat_max = tri_lat.max(axis=1)
     region_bbox = _region_bbox(spec, polygon_lon, polygon_lat)
-    candidate_mask = _candidate_mask_from_bbox(
-        elem_lon_min,
-        elem_lon_max,
-        elem_lat_min,
-        elem_lat_max,
-        region_bbox,
-    )
-    candidates = np.flatnonzero(candidate_mask)
-    if candidates.size == 0:
-        return candidate_mask
+    mask = np.zeros(mesh.n_elements, dtype=bool)
+    for turn in (0.0, -360.0, 360.0):
+        candidate_mask = _candidate_mask_from_bbox(
+            elem_lon_min + turn,
+            elem_lon_max + turn,
+            elem_lat_min,
+            elem_lat_max,
+            region_bbox,
+        ) & ~mask
+        candidates = np.flatnonzero(candidate_mask)
+        if candidates.size == 0:
+            continue
+        cand_lon = tri_lon[candidates] + turn
+        selected = _select_candidates(
+            spec, cand_lon, tri_lat[candidates],
+            # the (seam-aware) centre, in the same turn as its triangle
+            _unwrap_near(mesh.elem_center_lon[candidates], cand_lon[:, 0]),
+            mesh.elem_center_lat[candidates],
+            polygon_lon, polygon_lat,
+        )
+        mask[candidates[selected]] = True
+    return mask
 
+
+def _select_candidates(
+    spec: RegionSpec,
+    tri_lon: np.ndarray,
+    tri_lat: np.ndarray,
+    center_lon: np.ndarray,
+    center_lat: np.ndarray,
+    polygon_lon: Optional[np.ndarray],
+    polygon_lat: Optional[np.ndarray],
+) -> np.ndarray:
+    """Which candidate elements meet the region (see :func:`select_region`);
+    ``tri_lon``/``tri_lat`` hold the candidates' vertices, shape ``(n, 3)``."""
+    n_candidates = tri_lon.shape[0]
     if spec.mode == "bbox":
         assert spec.bbox is not None
-        center_in = _contains_bbox(
-            mesh.elem_center_lon[candidates],
-            mesh.elem_center_lat[candidates],
-            spec.bbox,
-        )
+        center_in = _contains_bbox(center_lon, center_lat, spec.bbox)
         vertex_in = _contains_bbox(
-            tri_lon[candidates].reshape(-1),
-            tri_lat[candidates].reshape(-1),
+            tri_lon.reshape(-1),
+            tri_lat.reshape(-1),
             spec.bbox,
-        ).reshape(candidates.size, 3).any(axis=1)
-        selected = center_in | vertex_in | np.ones(candidates.size, dtype=bool)
+        ).reshape(n_candidates, 3).any(axis=1)
+        selected = center_in | vertex_in
     elif spec.mode == "center_radius":
         assert spec.center is not None and spec.radius_km is not None
-        center_in = _contains_circle(
-            mesh.elem_center_lon[candidates],
-            mesh.elem_center_lat[candidates],
-            spec.center,
-            spec.radius_km,
-        )
+        center_in = _contains_circle(center_lon, center_lat, spec.center, spec.radius_km)
         vertex_in = _contains_circle(
-            tri_lon[candidates].reshape(-1),
-            tri_lat[candidates].reshape(-1),
+            tri_lon.reshape(-1),
+            tri_lat.reshape(-1),
             spec.center,
             spec.radius_km,
-        ).reshape(candidates.size, 3).any(axis=1)
-        selected = center_in | vertex_in | np.ones(candidates.size, dtype=bool)
+        ).reshape(n_candidates, 3).any(axis=1)
+        selected = center_in | vertex_in
     else:
         assert polygon_lon is not None and polygon_lat is not None
-        center_in = _points_in_polygon(
-            mesh.elem_center_lon[candidates],
-            mesh.elem_center_lat[candidates],
-            polygon_lon,
-            polygon_lat,
-        )
+        center_in = _points_in_polygon(center_lon, center_lat, polygon_lon, polygon_lat)
         vertex_in = _points_in_polygon(
-            tri_lon[candidates].reshape(-1),
-            tri_lat[candidates].reshape(-1),
+            tri_lon.reshape(-1),
+            tri_lat.reshape(-1),
             polygon_lon,
             polygon_lat,
-        ).reshape(candidates.size, 3).any(axis=1)
+        ).reshape(n_candidates, 3).any(axis=1)
 
-        poly_vertex_in_tri = np.zeros(candidates.size, dtype=bool)
-        edge_intersects = np.zeros(candidates.size, dtype=bool)
+        poly_vertex_in_tri = np.zeros(n_candidates, dtype=bool)
+        edge_intersects = np.zeros(n_candidates, dtype=bool)
         poly_points = list(zip(polygon_lon, polygon_lat))
         poly_edges = list(zip(poly_points, poly_points[1:] + poly_points[:1]))
-        for out_i, elem_i in enumerate(candidates):
-            tri_x = tri_lon[elem_i]
-            tri_y = tri_lat[elem_i]
+        for out_i in range(n_candidates):
+            tri_x = tri_lon[out_i]
+            tri_y = tri_lat[out_i]
             for px, py in poly_points:
                 if _point_in_triangle(px, py, tri_x, tri_y):
                     poly_vertex_in_tri[out_i] = True
@@ -1031,10 +1063,7 @@ def select_region(mesh: MeshSource, spec: RegionSpec) -> np.ndarray:
                 if found:
                     break
         selected = center_in | vertex_in | poly_vertex_in_tri | edge_intersects
-
-    mask = np.zeros(mesh.n_elements, dtype=bool)
-    mask[candidates[selected]] = True
-    return mask
+    return selected
 
 
 def expand_halo(mesh: MeshSource, selected_mask: np.ndarray, halo_layers: int) -> np.ndarray:
@@ -1197,6 +1226,14 @@ def build_subset_mesh_dataset(
                 f"Mesh {mesh.path}: variable {name!r} has shape "
                 f"{source.shape}, expected ({n_source},).")
         ds[name] = ((dim,), np.asarray(source.values)[ids], dict(source.attrs))
+    # The model's element areas: the FESOM2 reader prefers them to its own
+    # spherical areas, so the subset must carry them to match the source.
+    # Accepted as the reader accepts them (squeezed, one value per element).
+    if "elem_area" in mesh.ds.variables:
+        area = mesh.ds["elem_area"].squeeze()
+        if area.ndim == 1 and area.shape[0] == mesh.n_elements:
+            ds["elem_area"] = (("elem",), np.asarray(area.values)[elem_ids],
+                               dict(area.attrs))
 
     source_attrs = dict(mesh.ds.attrs) if copy_source_attrs else {}
     source_attrs.update(attrs)
