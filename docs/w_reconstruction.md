@@ -77,7 +77,12 @@ w_corr(D) = w_raw(D) − (D/H) · R   for D ≤ H      →   w_corr(H) = 0 ,
 ```
 
 interfaces deeper than `H` are set to zero, and the inactive-level mask
-(`nlevels_nod`) is applied after the correction. Until 2026-09-23 the residual
+(`nlevels_nod`) is applied after the correction. A node deeper than the last
+integrated interface (the CLI's `max_levels` cut) has no bottom in the column and
+is left uncorrected; until 2026-11 its residual was clamped to the cut interface,
+which the correction then pulled to zero as if it were the bed. The CLI prints the
+same residual, `|w_raw(H)|` before the mask, over the nodes it corrects (until
+2026-11 it printed the masked last interface, ~0). Until 2026-09-23 the residual
 came from the global last interface when `nlevels_nod` was absent (so `w(H) ≠ 0`
 on shallow nodes) and the correction re-filled masked below-bottom interfaces.
 The correction adds a uniform divergence `R/H` to the column that the horizontal
@@ -131,11 +136,16 @@ diagnostic file.
 (`mesh_extras=None`); only the `Mesh` is needed. For node n, element e contributes (integration by parts supplies the sign)
 
 ```
-δ_n   = −[ u_e · (y_next − y_prev) + v_e · (x_prev − x_next) ] / 2
+δ_n   = −sign(2A_e) · [ u_e · (y_next − y_prev) + v_e · (x_prev − x_next) ] / 2
 div_n = Σ_e δ_n / A_cluster_n ,        A_cluster_n = Σ_e |A_e| / 3 ,
 ```
 
-with the vertices of e ordered around the element and (x, y) in metres on a local
+with (n, next, prev) the vertices of e in their stored cyclic order, `2A_e` the
+signed double area in that order (positive counter-clockwise; ∇N_n carries
+1/(2A_e), so the sign makes the result independent of the vertex order — FESOM2
+writes its triangles clockwise; until 2026-11 the sign was dropped and the
+divergence came out negated on clockwise elements; a zero-area element is skipped),
+and (x, y) in metres on a local
 flat metric (`lon · cos(lat_ref) · METERS_PER_DEG_LAT`, `lat · METERS_PER_DEG_LAT`).
 Differences from the model: the surface cluster area replaces `area(nz, n)`; the
 z-level thickness Δz replaces the layer thickness `h_k`; the metric is flat, not
@@ -145,7 +155,8 @@ fields it is adequate.
 
 **Tier 2: depth-dependent areas and level masks.** This is what the CLI does by
 default (`use_nod_area: true`): when it reads the mesh diagnostic directly it uses `nod_area(nz, nod2)` as the denominator and
-the per-element active-level range (`ulevels(e)` … `nlevels(e) − 1`) as a mask, so
+the per-element active-level range (`ulevels(e)` … `nlevels(e) − 1`) as a mask, with
+the same signed flux term as Tier 1, so
 an element contributes only on the levels where it is wet; outside that range its
 `u_e`, `v_e` are taken as zero. This gives the correct bottom mask on slopes. The
 numerator is still the shape-function estimate: without the edge cross-vectors the
@@ -165,11 +176,17 @@ one on another record axis; a `time_range` sub-run attaches to its full source
 file, and a run that reaches a record outside the reconstructed range is
 refused at that record (a step also reads the next record, PCHIP the next
 two — reconstruct a margin). The tool refuses separate `v`, `ssh` or ALE-`w` inputs
-that are not on the `u` file's records (it pairs them by record position). (A W
+that are not on the `u` file's records (it pairs them by record position). It
+orients `u`, `v` (`(time, nz1, elem)` or `(time, elem, nz1)`), the ALE `w` and
+`nod_area` by dimension name, vertical axis first (until 2026-11 they were taken as
+stored, and the spatial-first order gave a wrong W without an error). (A W
 carrying the mid-layer dimension `nz1` is rejected by the FESOM2 reader. Files
 written before 2026-10-04 carry relative seconds instead of the source's stamps
 and must be regenerated.) The tests (`tests/test_w_reconstruct.py`)
 pin the sign convention (rising ssh → negative surface w), the bottom closure,
-Tier 1 on synthetic meshes and the Variant A/B comparison diagnostics. Tier 2's
-depth-dependent denominator and active-level mask are so far exercised only with
-unit areas.
+Tier 1 on synthetic meshes, both tiers on clockwise, counter-clockwise and mixed
+meshes, and the Variant A/B comparison diagnostics; `tests/test_reconstruct_w_utility.py`
+pins the tool's dimension orientation and its printed residual. Tier 2's
+denominator is exercised with the cluster areas (analytic linear fields) and, in the
+tool test, with a depth-dependent `nod_area`; its active-level mask is not yet pinned
+by a test.
