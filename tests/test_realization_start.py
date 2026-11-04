@@ -90,6 +90,21 @@ def test_stop_refuses_a_realization_start_off_the_records(
     assert not (tmp_path / "traj_r1.nc").exists()
 
 
+@pytest.mark.parametrize("temporal", [True, False])
+def test_stop_names_the_start_index_of_a_single_run(tmp_path, temporal):
+    """A single run starting off the records names ``time.start_time_idx``,
+    the knob to change, not the realization schedule."""
+    cfg = _cfg(tmp_path, start=N_TIME, run_interval=0, on_exhausted="stop",
+               temporal=temporal, num_runs=1)
+    with pytest.raises(ValueError) as exc:
+        run_tracking(cfg)
+    msg = str(exc.value)
+    for part in ("time.start_time_idx", f"time index {N_TIME}",
+                 f"[0, {N_TIME})"):
+        assert part in msg, (part, msg)
+    assert "num_runs" not in msg, msg
+
+
 def test_stop_accepts_every_start_on_the_records(tmp_path):
     """The last start on the last record still runs (the bound is
     exclusive at ``n_time_total`` only)."""

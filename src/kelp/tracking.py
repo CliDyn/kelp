@@ -2620,7 +2620,9 @@ def _index_to_sim_time(
     For ``on_exhausted == "cycle"`` indices outside ``[0, n_time_total)``
     wrap with full-period offset, where the period equals
     ``file_times[-1] - file_times[0] + trailing_interval``.  For ``"stop"``
-    out-of-range indices are clamped to the valid range.
+    out-of-range indices are clamped to the valid range (``run_tracking``
+    refuses such a start before it gets here; direct discrete calls still
+    reach the clamp through ``_record_clock_origin``).
     """
     if n_time_total <= 0:
         return 0.0
@@ -3219,6 +3221,12 @@ def run_tracking(
     if on_exhausted == "stop":
         for ire in range(config.time.num_runs):
             idx = start_idx + ire * config.time.run_interval
+            if not 0 <= idx < n_time_total and ire == 0:
+                raise ValueError(
+                    f"the run starts at time index {idx} (time.start_time_idx, "
+                    f"or time.end_time_idx for a backward run), outside the "
+                    f"records [0, {n_time_total}) of the forcing "
+                    f"(on_exhausted: stop); move the start onto the records")
             if not 0 <= idx < n_time_total:
                 raise ValueError(
                     f"realization {ire} of time.num_runs = "
