@@ -240,7 +240,8 @@ the tracker was developed privately from 2026-06.
   realization whose start index leaves the records now wraps by whole periods
   under `on_exhausted: cycle` (before: `IndexError`, or for a negative index the
   end of the records without the period offset); under `stop` such a schedule
-  is refused before the first output file is written.
+  is refused before the first output file is written, as is a schedule whose
+  `time.start_date`-shifted start falls after the last record.
 - `time.start_date` with `time.end_time_idx` and neither `time.n_steps` nor
   `time.duration_days` is refused at load (the step count was counted from
   index 0, not from the start date).
@@ -261,8 +262,9 @@ the tracker was developed privately from 2026-06.
 - `utils/extract_fesom_region.py`: the `bbox` and `center_radius` modes took
   every element whose bounding box touched the region's bounding box (a circle
   became a square), and a triangle across the dateline joined every region in
-  its latitude band. Crops are now the region asked for (smaller than before for
-  the same config; `halo_layers` adds rings) and carry `elem_area`.
+  its latitude band. Crops now hold exactly the triangles that intersect the
+  region (smaller than before for the same config; `halo_layers` adds rings), a
+  circle near a pole covers its whole cap, and the subset carries `elem_area`.
 - `utils/check_grid_hash_cell.py`: window counts and anchor counts use the
   kernel's cell rule (queries at negative longitude were one cell off).
 - `plot_2d`: start markers sit at the release position for delayed releases,
