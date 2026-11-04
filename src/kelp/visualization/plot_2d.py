@@ -455,6 +455,34 @@ def plot_mesh_nodes(
             **(dict(transform=transform) if transform else {}))
 
 
+def _endpoints(ds: TrajectoryDataset):
+    """``(start_lon, start_lat, end_lon, end_lat)`` of each particle.
+
+    The start is the release position where the dataset carries one
+    (``release_lon`` / ``release_lat``, output format 2), else the first
+    finite record — a delayed release records NaN before it; the end is the
+    last finite record.  A particle without a finite record gets NaN.
+    """
+    finite = np.isfinite(ds.lon) & np.isfinite(ds.lat)
+    seen = finite.any(axis=1)
+    rows = np.arange(ds.n_particles)
+    first = np.argmax(finite, axis=1)
+    last = ds.n_steps - 1 - np.argmax(finite[:, ::-1], axis=1)
+    start_lon = np.where(seen, ds.lon[rows, first], np.nan)
+    start_lat = np.where(seen, ds.lat[rows, first], np.nan)
+    end_lon = np.where(seen, ds.lon[rows, last], np.nan)
+    end_lat = np.where(seen, ds.lat[rows, last], np.nan)
+    rel_lon = getattr(ds, "release_lon", None)
+    rel_lat = getattr(ds, "release_lat", None)
+    if rel_lon is not None and rel_lat is not None:
+        rel_lon = np.asarray(rel_lon, dtype=np.float64)
+        rel_lat = np.asarray(rel_lat, dtype=np.float64)
+        known = np.isfinite(rel_lon) & np.isfinite(rel_lat)
+        start_lon = np.where(known, rel_lon, start_lon)
+        start_lat = np.where(known, rel_lat, start_lat)
+    return start_lon, start_lat, end_lon, end_lat
+
+
 def plot_trajectories(
     ds: TrajectoryDataset,
     ax: Optional['Axes'] = None,
@@ -492,7 +520,8 @@ def plot_trajectories(
         Colormap name for color_by mode.
     projection : cartopy projection, optional
     show_endpoints : bool
-        Draw start (green circle) and end (red square) markers.
+        Draw start (green circle) and end (red square) markers: the release
+        position (else the first finite record) and the last finite record.
     show_mesh_nodes : bool
         Overlay mesh nodes as grey dots.
     title : str, optional
@@ -603,10 +632,11 @@ def plot_trajectories(
 
     # Start / end markers
     if show_endpoints:
-        ax.plot(ds.lon[:, 0], ds.lat[:, 0], 'o', color='#2ecc71',
+        start_lon, start_lat, end_lon, end_lat = _endpoints(ds)
+        ax.plot(start_lon, start_lat, 'o', color='#2ecc71',
                 markersize=5, markeredgecolor='white', markeredgewidth=0.5,
                 label='start', zorder=5, **plot_kw)
-        ax.plot(ds.lon[:, -1], ds.lat[:, -1], 's', color='#e74c3c',
+        ax.plot(end_lon, end_lat, 's', color='#e74c3c',
                 markersize=5, markeredgecolor='white', markeredgewidth=0.5,
                 label='end', zorder=5, **plot_kw)
         ax.legend(loc='upper left', framealpha=0.9, fontsize=9)
@@ -630,7 +660,8 @@ def plot_diagnostics(
     ds : TrajectoryDataset
         Trajectory data.
     dt : float
-        Time step in seconds (for speed computation and time axis).
+        Interval between records in seconds (for speed computation and time
+        axis), used only when the dataset has no record times.
     max_particles : int
         Maximum number of particles to show.
     figsize_per_row : float
@@ -651,16 +682,25 @@ def plot_diagnostics(
         ax.text(0.5, 0.5, 'No particles', ha='center', va='center')
         return fig
 
-    # Time axis in hours
-    time_hrs = np.arange(ds.n_steps) * dt / 3600.0
+    # Time axis in hours since the first record, and the record intervals:
+    # from the record times when the dataset has them (records need not be
+    # dt apart; a backward run counts down), else from dt.
+    if ds.time is not None:
+        t_rec = np.asarray(ds.time, dtype=np.float64)
+        time_hrs = (t_rec - t_rec[0]) / 3600.0
+        interval = np.abs(np.diff(t_rec))
+    else:
+        time_hrs = np.arange(ds.n_steps) * dt / 3600.0
+        interval = np.full(max(ds.n_steps - 1, 0), float(dt))
+    interval = np.where(interval > 0, interval, np.nan)
 
-    # Compute speed from displacements
-    dlon = np.diff(ds.lon, axis=1)
+    # Compute speed from displacements (a step across the dateline is short)
+    dlon = (np.diff(ds.lon, axis=1) + 180.0) % 360.0 - 180.0
     dlat = np.diff(ds.lat, axis=1)
     cos_lat = np.cos(ds.lat[:, :-1] * DEG2RAD)
     dx = dlon * cos_lat * METERS_PER_DEG_LAT
     dy = dlat * METERS_PER_DEG_LAT
-    speed = np.sqrt(dx**2 + dy**2) / dt
+    speed = np.sqrt(dx**2 + dy**2) / interval
 
     fig, axes = plt.subplots(
         n_show, 3,

@@ -7,6 +7,9 @@ source:
   ssh_path: null
 
 region:
+  # An element is kept when it intersects the region (a region inside one
+  # element keeps that element). A region across the dateline uses
+  # continuous longitudes, e.g. min_lon 170, max_lon 190.
   mode: bbox
 
   # bbox mode

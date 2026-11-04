@@ -837,6 +837,47 @@ class TestCombinedEulerEM:
             euler_step(state, vel, grid_wide, dt=100.0, time_dir=1.0,
                        diffusion=diff)
 
+    @pytest.mark.parametrize("time_dir", [1.0, -1.0])
+    def test_zero_kh_velocity_matches_deterministic_euler(self, grid_wide,
+                                                          time_dir):
+        """The combined step carries u/v like plain Euler, both directions.
+
+        Before 2026-11 it returned the state without u/v, so a run with
+        ``integrator: euler`` + ``em``/``m1`` wrote ``vel_u``/``vel_v`` all
+        NaN.  Plain Euler stores ``time_dir * u`` (the tracking velocity;
+        the tracking layer flips it back for output): the combined step
+        must store the same, bit for bit, on a field that varies in space.
+        """
+        nn = grid_wide.n_nodes
+        ex, ey = grid_wide.elem_center_lon, grid_wide.elem_center_lat
+        u = 0.2 + 0.03 * ex - 0.02 * ey
+        v = -0.1 + 0.01 * ex + 0.04 * ey
+        det_vel = VelocityField(u=u.copy(), v=v.copy(), eta=np.zeros(nn))
+        em_vel = VelocityField(
+            u=u.copy(), v=v.copy(), eta=np.zeros(nn),
+            kh_zonal=np.zeros(nn), kh_meridional=np.zeros(nn),
+            kh_layout="node",
+        )
+        rng = np.random.default_rng(5)
+        state = make_state(lon=rng.uniform(3.2, 6.8, 40),
+                           lat=rng.uniform(3.2, 6.8, 40))
+        diff = DiffusionStepArgs(
+            scheme="em", kh_x=0.0, kh_y=0.0,
+            seed=3, real_id=0, step_i=0,
+            composition="combined", dres_m=1000.0,
+        )
+        a = euler_step(state, det_vel, grid_wide, dt=300.0, time_dir=time_dir)
+        b = euler_step(state, em_vel, grid_wide, dt=300.0, time_dir=time_dir,
+                       diffusion=diff)
+        assert b.u is not None and b.v is not None
+        alive = a.alive_mask & b.alive_mask
+        assert alive.sum() == 40
+        np.testing.assert_array_equal(b.u[alive], a.u[alive])
+        np.testing.assert_array_equal(b.v[alive], a.v[alive])
+        # non-vacuous: a nonzero velocity, signed like the tracking direction
+        # (u > 0.05 everywhere on the seeded box)
+        assert np.all(time_dir * b.u[alive] > 0.05)
+
 
 class TestSplitRkOnRK:
     """split_rk composition with RK2/RK4 on variable Kh."""

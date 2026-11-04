@@ -9,6 +9,7 @@ out — VelocityField assembly stays in the tracking layer.
 """
 import json
 import multiprocessing as mp
+import os
 import sys
 from pathlib import Path
 
@@ -76,6 +77,24 @@ class TestRoundtrip:
 
     def test_attach_absent_returns_none(self, tmp_path):
         assert SharedFieldCache(tmp_path, tag="z").attach("t9") is None
+
+    def test_tilde_root_expands_to_home(self, tmp_path, monkeypatch):
+        # In ``numerics.shared_fields_dir`` a leading tilde means the home
+        # directory, not a folder named "~" in the working directory (before
+        # 2026-11 the path was taken literally).
+        home = tmp_path / "home"
+        home.mkdir()
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(cwd)
+        c = SharedFieldCache(os.path.join("~", "x"), tag="cfgA")
+        try:
+            assert c.root == home / "x" / "cfgA"
+            assert c.root.is_dir()
+            assert not (cwd / "~").exists()
+        finally:
+            c.close()
 
 
 def _race_worker(root, counter_dir, q):

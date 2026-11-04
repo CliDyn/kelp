@@ -37,8 +37,13 @@ Config sections (full annotated example: `extract_fesom_region.example.yaml`):
   element-based). Common name aliases (`temp`/`thetao`, `salt`/`so`) are applied.
 - **`region`** — `mode: bbox` with a nested `bbox: {min_lon, max_lon, min_lat,
   max_lat}`; or `center_radius` with `center: {lon, lat}` + `radius_km`; or
-  `polygon` with `polygon_path`. `halo_layers` adds boundary element rings (1–2
-  avoids edge artifacts).
+  `polygon` with `polygon_path`. An element is kept when it intersects the
+  closed region (`bbox`/`polygon` in the lon/lat plane, the circle on the
+  sphere: a region inside one element, or crossing an element without
+  holding one of its vertices, keeps that element), so the cut follows the
+  region's shape, not its bounding box. A circle that reaches a pole spans
+  every longitude.
+  `halo_layers` adds boundary element rings (1–2 avoids edge artifacts).
 - **`time`** — index-based `start` / `stop` / `step`.
 - **`output`** — `dir`, `format: netcdf|zarr`, `layout: split|combined` (split =
   one file per variable, recommended for KELP), optional `zarr_chunks`.
@@ -53,7 +58,10 @@ data: { ncinput: path/to/output_subset }
 
 The subset mesh keeps the level variables of the source diagnostic when it has
 them: `nlevels`, `ulevels` and `zbar_e_bottom` for the kept elements and
-`nlevels_nod2D` for the kept nodes, values and signs as in the source. The FESOM2
+`nlevels_nod2D` for the kept nodes, values and signs as in the source, and the
+model's element areas `elem_area` for the kept elements (the FESOM2 reader uses them
+in place of its own spherical areas; a subset written before the tool kept them
+falls back to those). The FESOM2
 reader declares each element's bottom from `nlevels` / `zbar_e_bottom`; depth-linear
 u/v on element data (`mode.uv_vertical: linear`) needs them, so a subset written
 before the tool kept them must be extracted again.
@@ -61,8 +69,10 @@ before the tool kept them must be extracted again.
 The individual `source`/`region`/`output` settings can also be given as CLI flags
 (`--mesh`, `--bbox`, `--output-dir`, …); run with `-h` to list them.
 
-**Limitations:** no dateline-crossing regions; polygons are simple (GeoJSON
-`Polygon`); time selection is index-based only.
+**Limitations:** a region is one longitude interval: one that crosses the
+dateline is given in continuous longitudes (e.g. `min_lon: 170`, `max_lon: 190`),
+never as `min_lon > max_lon` (triangles across the ±180 seam are handled either
+way); polygons are simple (GeoJSON `Polygon`); time selection is index-based only.
 
 ---
 

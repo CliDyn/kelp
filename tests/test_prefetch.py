@@ -267,3 +267,60 @@ def test_run_bit_identical_prefetch_3d(tmp_path):
     a, b = run(1), run(4)
     for k in ("lon", "lat", "z"):
         np.testing.assert_array_equal(a[k], b[k], err_msg=f"{k} differs")
+
+
+# --------------------------------------------------------------------------
+# PCHIP stencil and the sampling payload
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("start, time_dir", [(2, 1.0), (0, 1.0), (11, -1.0)])
+def test_pchip_stencil_survives_the_sampling_payload(tmp_path, monkeypatch,
+                                                     start, time_dir):
+    """The record-point sampling payload kept only its own two snapshots and
+    evicted the PCHIP flanks, which the next step read again (bug audit
+    2026-11-04: 9 reads without sampling, 38 with).  It now keeps the
+    stencil of its bracket, which is the next step's bracket: as many reads
+    as without sampling, also when the run starts at the first or last
+    interval (keeping the step's own stencil instead leaves one extra read
+    there), and the same positions."""
+    import xarray as xr
+    from kelp.readers import fesomc as fc
+    nc = _make_timevarying_fesomc(tmp_path, n_time=12)
+    with xr.open_dataset(nc) as raw:
+        ds = raw.load()
+    nt, nn = ds.sizes["time"], ds.sizes["node"]
+    ds["temp"] = (("time", "node"),
+                  10.0 + np.arange(nt)[:, None] + 0.01 * np.arange(nn)[None, :])
+    nc2 = tmp_path / "tv_temp.nc"
+    ds.to_netcdf(nc2)
+    seeds = tmp_path / "s.dat"
+    seeds.write_text("5.0 5.0\n")
+
+    calls = {"n": 0}
+    orig = fc.FesomCReader.read_velocities
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return orig(*a, **k)
+
+    monkeypatch.setattr(fc.FesomCReader, "read_velocities",
+                        staticmethod(counting))
+
+    def run(out, sample):
+        calls["n"] = 0
+        _run(AppConfig(
+            mode=ModeConfig(Fdrift2D=True, Fdrift3D=False, time_dir=time_dir,
+                            sample_vars=(["temp"] if sample else [])),
+            numerics=NumericsConfig(dt=1200.0, integrator="rk4", output_freq=1,
+                                    temporal_interp=True,
+                                    temporal_reconstruction="pchip"),
+            mesh=MeshConfig(type="fesomc", meshpath=str(nc2)),
+            data=DataConfig(ncinput=str(nc2), inicloud=str(seeds),
+                            output_path=str(out), time_averaging="instant"),
+            time=TimeConfig(start_time_idx=start, n_steps=12)))
+        return calls["n"]
+
+    n_plain = run(tmp_path / "plain.nc", False)
+    n_sampled = run(tmp_path / "sampled.nc", True)
+    assert n_sampled == n_plain, (n_plain, n_sampled)
+    _assert_identical(_load(tmp_path / "plain.nc"),
+                      _load(tmp_path / "sampled.nc"))

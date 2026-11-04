@@ -215,6 +215,62 @@ the tracker was developed privately from 2026-06.
   `mode.uv_vertical: linear`) reads the first record of `u` once more, down every
   column, to declare the u data prefix; other loads do not.
 
+### Fixed
+
+- **Offline W reconstruction had the wrong sign on FESOM2 meshes.** The
+  weak-form divergence in `w_reconstruct.py` dropped the sign of each
+  element's signed area, so every clockwise element contributed with the wrong
+  sign. FESOM2 orders its triangles clockwise, so `utils/reconstruct_w.py` and
+  `reconstruct_w()` returned a W whose divergence part was negated on every
+  FESOM2 mesh (in 1.0.0 too): on a global mesh, W reconstructed from monthly
+  u/v correlated with the model's own `w` at −0.68 to −0.86 between 100 and
+  2000 m, and at +0.68 to +0.86 after the fix. Both divergence kernels now
+  multiply the flux term by the sign of the element's area; counter-clockwise
+  meshes give bit-identical results. W files written by the tool from FESOM2
+  output before this fix should be written again.
+- `utils/reconstruct_w.py` orients u, v, the ALE `w` and `nod_area` by
+  dimension name, so files stored `(time, elem, nz1)` no longer give a wrong
+  W or an index error; the printed bottom residual is taken at each node's own
+  bottom; `integrate_continuity` no longer bottom-corrects a node deeper than
+  the last integrated interface (a `max_levels` cut).
+- Euler with `diffusion.scheme: em` or `m1` (2-D, combined step) wrote
+  `vel_u`/`vel_v` as NaN on every record; the step now returns its velocity
+  like plain Euler. Positions were not affected.
+- Multi-realization runs (`num_runs > 1`) with temporal interpolation: a
+  realization whose start index leaves the records now wraps by whole periods
+  under `on_exhausted: cycle` (before: `IndexError`, or for a negative index the
+  end of the records without the period offset); under `stop` such a schedule
+  is refused before the first output file is written, as is a schedule whose
+  `time.start_date`-shifted start falls after the last record.
+- `time.start_date` with `time.end_time_idx` and neither `time.n_steps` nor
+  `time.duration_days` is refused at load (the step count was counted from
+  index 0, not from the start date).
+- `kelp info` opens the dataset through the same helper as a run: the eta path
+  (`data.ncinput_eta`), the Az field family and the `max_levels` cut now reach
+  it.
+- Sampling with `temporal_reconstruction: pchip` no longer evicts the PCHIP
+  flank snapshots on every record step (they were read again; results were
+  unchanged).
+- `read_scalar_fields` (FESOM2, FESOM-C): a variable whose vertical dimension
+  is named `depth` or `level` is classified as layer or interface field by its
+  size before a `max_levels` cut, so a mid-layer field is no longer sampled half
+  a layer shifted; FESOM-C 2-D `sigma_mean` of an interface field no longer
+  raises.
+- NEMO: the time coordinate keeps its attributes, so the output `time:calendar`
+  names the source calendar.
+- `numerics.shared_fields_dir` expands a leading `~`.
+- `utils/extract_fesom_region.py`: the `bbox` and `center_radius` modes took
+  every element whose bounding box touched the region's bounding box (a circle
+  became a square), and a triangle across the dateline joined every region in
+  its latitude band. Crops now hold the triangles that intersect the
+  region (smaller than before for the same config; `halo_layers` adds rings), a
+  circle near a pole covers its whole cap, and the subset carries `elem_area`.
+- `utils/check_grid_hash_cell.py`: window counts and anchor counts use the
+  kernel's cell rule (queries at negative longitude were one cell off).
+- `plot_2d`: start markers sit at the release position for delayed releases,
+  end markers at the last finite record; `plot_diagnostics` handles the
+  dateline step and uses the record times.
+
 ### Documentation
 
 - The per-module notes of `CLAUDE.md` (the module details and the import graph)

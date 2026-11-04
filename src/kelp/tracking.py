@@ -37,8 +37,9 @@ from .numerics.vertical_uv import (check_depth_linear_record,
                                    refuse_elem_cavities)
 from .readers import (get_reader, extract_time_info, time_axis_epoch,
                       NO_EPOCH_NOTE, RESOLVED_BY_READER, _READER_RESOLVES_TIME,
-                      _describe_record_times, _dry_mask_kwargs,
-                      _prepare_dataset, _time_option_kwargs)
+                      _apply_max_levels, _describe_record_times,
+                      _open_run_dataset, _prepare_dataset,
+                      _time_option_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -563,60 +564,6 @@ def _mark_depth_linear(vel, option: str, mesh, *, record: str = ""):
             f"{option!r}")
     check_depth_linear_record(vel, mesh, record=record)
     return vel
-
-
-def _apply_max_levels(mesh, mode, verbose: bool = False) -> None:
-    """Cut ``mesh.sigma`` to ``mode.max_levels`` interfaces from the surface.
-
-    The uncut table is kept once in ``mesh.metadata["sigma_full"]`` and
-    every cut is taken from it, so calls with different limits on one mesh
-    (direct ``run_single_realization`` entries) each get their own table;
-    ``max_levels`` None restores the full table of a mesh cut earlier.  A
-    call that leaves the table as it is keeps the very array object, so a
-    depth-point table built for it stays valid.  On a mesh never cut, None
-    changes nothing and stores nothing.
-
-    Raises
-    ------
-    ValueError
-        ``max_levels < 2`` in 3-D mode.
-    """
-    max_levels = getattr(mode, "max_levels", None)
-    md = getattr(mesh, "metadata", None)
-    if md is None:
-        md = {}
-    full = md.get("sigma_full")
-    sig = mesh.sigma
-    if full is not None and not (
-            sig is full or (sig.size <= full.size
-                            and np.array_equal(sig, full[:sig.size]))):
-        # the table was replaced by someone else since: it is the new full
-        full = None
-        md.pop("sigma_full", None)
-    if max_levels is None:
-        if full is not None and sig.size != full.size:
-            mesh.sigma = full
-        return
-    if full is None and sig.size == 0:
-        return
-    if getattr(mode, "Fdrift3D", False) and max_levels < 2:
-        raise ValueError(
-            f"max_levels must be >= 2 in 3D mode, got {max_levels}"
-        )
-    if full is None:
-        full = sig
-        if getattr(mesh, "metadata", None) is None:
-            mesh.metadata = md
-        md["sigma_full"] = full
-    keep = min(int(max_levels), full.size)
-    if sig.size != keep:
-        mesh.sigma = full[:keep]
-    if verbose:
-        if getattr(mesh, "vertical_coord", "zlevel") == "sigma":
-            print(f"Vertical interfaces limited to {keep} (sigma mesh)")
-        else:
-            print(f"Depth levels limited to {keep} "
-                  f"(max depth {mesh.sigma[-1]:.1f}m)")
 
 
 # ---------------------------------------------------------------------------
@@ -2012,7 +1959,22 @@ def run_single_realization(
         shared=shared_cache)
     if use_tinterp:
         # simulation time in seconds, relative to file_times[0]
-        sim_time = sim_time_start if sim_time_start is not None else file_times[start_time_idx]
+        if sim_time_start is not None:
+            sim_time = sim_time_start
+        elif 0 <= start_time_idx < n_time_total:
+            sim_time = file_times[start_time_idx]
+        elif on_exhausted == "cycle":
+            # a later realization's start (start + k·run_interval) wraps by
+            # whole forcing periods, as the discrete reads do
+            sim_time = _index_to_sim_time(start_time_idx, file_times,
+                                          n_time_total, on_exhausted, dt=dt)
+        else:
+            # past the end was an IndexError; a negative index silently
+            # read the end of the axis
+            raise ValueError(
+                f"start_time_idx {start_time_idx} is outside the records "
+                f"[0, {n_time_total}) of the forcing (on_exhausted: stop); "
+                f"start on a record, or set on_exhausted: cycle")
 
     # Copy initial state
     state = init_state.replace(
@@ -2488,10 +2450,19 @@ def run_single_realization(
                         direction=direction,
                     )
                     if rec_bracket is not None:
+                        # keep the PCHIP stencil of this bracket — the next
+                        # step's bracket — or its flanks are evicted and
+                        # read again next step (the step's own stencil
+                        # still misses one read at the range edges)
+                        rec_stencil = (
+                            _resolve_recon_stencil(rec_bracket, n_time_total)
+                            if (recon_enabled and _is_multistage) else None)
                         rec_vel, _vn, _dtn, _fi = _build_vel_payload(
                             rec_bracket, vel_cache, reader, ds, mesh, mode,
                             diffusion=diff_cfg, sample_vars=sample_vars,
                             direction=direction,
+                            keep_extra=(set(rec_stencil[0])
+                                        if rec_stencil is not None else None),
                         )
                     else:
                         rec_vel = vel
@@ -2643,13 +2614,18 @@ def _index_to_sim_time(
     file_times: np.ndarray,
     n_time_total: int,
     on_exhausted: str,
+    dt: Optional[float] = None,
 ) -> float:
     """Return the sim-time corresponding to file index ``idx``.
 
     For ``on_exhausted == "cycle"`` indices outside ``[0, n_time_total)``
     wrap with full-period offset, where the period equals
-    ``file_times[-1] - file_times[0] + trailing_interval``.  For ``"stop"``
-    out-of-range indices are clamped to the valid range.
+    ``file_times[-1] - file_times[0] + trailing_interval``; a single record
+    repeats with the period ``dt`` (the run's step, the output's
+    ``forcing_cycle_period``) when given, else 1 s.  For ``"stop"``
+    out-of-range indices are clamped to the valid range (``run_tracking``
+    refuses such a start before it gets here; direct discrete calls still
+    reach the clamp through ``_record_clock_origin``).
     """
     if n_time_total <= 0:
         return 0.0
@@ -2657,7 +2633,7 @@ def _index_to_sim_time(
         # Synthetic 1s period for single-snapshot cycling, matching
         # _resolve_time_bracket's treatment of the same degenerate case.
         if n_time_total == 1:
-            period = 1.0
+            period = float(dt) if dt is not None else 1.0
         else:
             period = (file_times[-1] - file_times[0]
                       + (file_times[-1] - file_times[-2]))
@@ -3003,8 +2979,9 @@ def run_tracking(
 
     reader = get_reader(config.mesh.type)
     # the stamp options (and the time_averaging rule of a reader that
-    # resolves its record times), refused before anything is read
-    time_kw = _time_option_kwargs(config)
+    # resolves its record times), refused before anything is read;
+    # _open_run_dataset passes them on
+    _time_option_kwargs(config)
 
     # Load mesh
     if verbose:
@@ -3050,37 +3027,12 @@ def run_tracking(
         if verbose:
             print("    " + describe_grid_hash(mesh))
 
-    # Slice vertical interfaces to match max_levels if configured.
-    # For 3D staggered fields, max_levels is interpreted as the number of
-    # interfaces to keep from the surface downward.
-    _apply_max_levels(mesh, config.mode, verbose)
-
-    # Open velocity dataset
+    # Cut mesh.sigma to mode.max_levels (interfaces kept from the surface)
+    # and open the velocity dataset with the keywords that are set — one
+    # helper with `kelp info`, so both see the same levels and dataset
     if verbose:
         print(f"Opening velocity dataset: {config.data.ncinput}")
-    v_path = config.data.ncinput_v or None
-    w_path = config.data.ncinput_w or None
-    # eta_path is passed only when set: only readers that support a separate
-    # ssh store (healpix) accept the kwarg — a set key with another reader
-    # fails loudly with a TypeError naming it.
-    _extra = {}
-    if getattr(config.data, "ncinput_eta", ""):
-        _extra["eta_path"] = config.data.ncinput_eta
-    # var_az family for the multi-year exact layout (Av.fesom.<year>.nc):
-    # pass diffusion only on the one reader/combination that consumes it,
-    # so other readers' open_dataset signatures stay untouched.
-    _d0 = config.numerics.diffusion
-    if (config.mesh.type == "fesom2" and _d0.enabled
-            and getattr(_d0, "az_enabled", False)
-            and getattr(_d0, "var_az", None)):
-        _extra["diffusion"] = _d0
-    # the stamp options, only when set (only the fesom14 reader takes them)
-    _extra.update(time_kw)
-    # the beaching dry mask, for a reader that opens only the variables the
-    # run consumes (fesom14); empty for every other reader
-    _extra.update(_dry_mask_kwargs(config))
-    ds = reader.open_dataset(config.data.ncinput, v_path=v_path, w_path=w_path,
-                             mode_cfg=config.mode, **_extra)
+    ds = _open_run_dataset(reader, mesh, config, verbose)
     # the reader's optional mesh-relative dataset hook, before anything
     # below reads the dataset on the mesh (the sampling and dry-mask probes)
     # and before the writer exists, so its refusals leave no output file;
@@ -3265,6 +3217,57 @@ def run_tracking(
             and config.time.n_steps is None and config.time.end_time_idx is not None
             and config.mode.time_dir < 0):
         start_idx = config.time.end_time_idx
+
+    # Under "stop" every realization must start on a record (cycle wraps):
+    # refuse before the probes and before any output exists (an interpolated
+    # run failed in a later realization, a discrete one ran zero steps).
+    if on_exhausted == "stop":
+        for ire in range(config.time.num_runs):
+            idx = start_idx + ire * config.time.run_interval
+            if not 0 <= idx < n_time_total and ire == 0:
+                raise ValueError(
+                    f"the run starts at time index {idx} (time.start_time_idx, "
+                    f"or time.end_time_idx for a backward run), outside the "
+                    f"records [0, {n_time_total}) of the forcing "
+                    f"(on_exhausted: stop); move the start onto the records")
+            if not 0 <= idx < n_time_total:
+                raise ValueError(
+                    f"realization {ire} of time.num_runs = "
+                    f"{config.time.num_runs} (time.run_interval = "
+                    f"{config.time.run_interval}) starts at time index {idx}, "
+                    f"outside the records [0, {n_time_total}) of the forcing "
+                    f"(on_exhausted: stop); lower num_runs or run_interval, "
+                    f"move the start, or set on_exhausted: cycle")
+        # A start_date between records shifts every realization's start by
+        # the record times between the start indices (the shift at the end
+        # of the realization loop, repeated operation for operation): an
+        # index on the records can still start past them, and that
+        # realization would write no record.  Bound as _resolve_time_bracket's.
+        if temporal_interp and sim_time_start is not None and n_time_total > 0:
+            t_run = sim_time_start
+            idx = start_idx
+            for ire in range(config.time.num_runs):
+                if ire > 0:
+                    t_run += (
+                        _index_to_sim_time(idx + config.time.run_interval,
+                                           file_times, n_time_total,
+                                           on_exhausted, dt=dt)
+                        - _index_to_sim_time(idx, file_times, n_time_total,
+                                             on_exhausted, dt=dt))
+                    idx += config.time.run_interval
+                if not (file_times[0] - 1e-6 <= t_run
+                        <= file_times[-1] + 1e-6):
+                    raise ValueError(
+                        f"realization {ire} of time.num_runs = "
+                        f"{config.time.num_runs} (time.run_interval = "
+                        f"{config.time.run_interval}) starts {t_run:g} s "
+                        f"after the first time stamp (time.start_date "
+                        f"{config.time.start_date!r} plus {ire} x "
+                        f"run_interval records), outside the record times "
+                        f"[{file_times[0]:g}, {file_times[-1]:g}] s of the "
+                        f"forcing (on_exhausted: stop); lower num_runs or "
+                        f"run_interval, move time.start_date, or set "
+                        f"on_exhausted: cycle")
 
     direction_str = "forward" if config.mode.time_dir >= 0 else "backward"
     print(f"  Tracking steps:    {n_steps} ({direction_str}), start_idx={start_idx}")
@@ -3765,9 +3768,9 @@ def run_tracking(
         ):
             sim_time_start += (
                 _index_to_sim_time(start_idx, file_times, n_time_total,
-                                   on_exhausted)
+                                   on_exhausted, dt=dt)
                 - _index_to_sim_time(prev_idx, file_times, n_time_total,
-                                     on_exhausted)
+                                     on_exhausted, dt=dt)
             )
 
     ds.close()

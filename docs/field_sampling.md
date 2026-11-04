@@ -79,6 +79,12 @@ is the number of vertical *interfaces* (the layer boundaries), so there are
   the model is being integrated forwards or backwards in time — so backward
   sampling produces exactly the same value as forward sampling.
 
+The reader hands `sample_field` the shape: a variable on a canonical vertical
+dimension (`nz1`/`nz`, FESOM-C `sigma_lay`/`sigma`) is a layer or interface field
+by that name; one on a dimension named `depth` or `level` is classified by its
+size in the file, before a `mode.max_levels` cut (one row fewer than the
+interfaces = layers), and cut to the run's levels afterwards.
+
 For sigma-coordinate meshes (FESOM-C) the depth of each layer or interface
 depends on the local water-column thickness, which in turn depends on the
 free-surface elevation. So **sigma meshes require the `eta` (sea-surface

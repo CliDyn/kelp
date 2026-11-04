@@ -53,7 +53,7 @@ let RK4 separate from RK2 at coarse file cadence, set
 |-----|--------|
 | `time.start_time_idx` | first file time index (default `0`) |
 | `time.n_steps` | number of tracking steps (**preferred**) |
-| `time.end_time_idx` | legacy: → `n_steps = end - start` |
+| `time.end_time_idx` | legacy: → `n_steps = end - start` (refused together with `start_date`: use `duration_days` or `n_steps`) |
 | `time.start_date` + `time.duration_days` | start at an ISO datetime; `n_steps = days·86400/dt` |
 
 `start_date` matches the raw file timestamps; starting **between** snapshots
@@ -85,6 +85,9 @@ from `data.time_stamp` + `data.time_window`), so leave `time_averaging` unset �
 `num_runs` repeats tracking with the same seeds, shifting `start_time_idx` by
 `run_interval` each time (ensemble over forcing windows). When `num_runs > 1`,
 output files get an `_r0`, `_r1`, … suffix; a single run keeps the plain name.
+Under `on_exhausted: cycle` a start past either end of the records wraps by
+whole forcing periods; under `stop` a schedule whose start (index, or the
+`start_date`-shifted time) leaves the records is refused before any output.
 
 ## Delayed / staggered release
 

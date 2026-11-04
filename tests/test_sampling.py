@@ -502,6 +502,32 @@ class TestReadScalarFieldsFesom2:
             self.ds, 0, self.mesh, ["temp"], mode)
         assert out["temp"].shape == (2, self.mesh.n_nodes)
 
+    @pytest.mark.parametrize("vdim", ["depth", "level"])
+    @pytest.mark.parametrize("trim_mesh", [True, False])
+    def test_max_levels_depth_dim_layer_field_by_pre_trim_size(
+            self, vdim, trim_mesh):
+        # A mid-layer field on a non-canonical vertical dim (K-1 = 3 layers
+        # next to the interface dim nz = 4) under max_levels=3 keeps 2
+        # layers.  Before 2026-11 the size was compared with the TRIMMED
+        # interface count (3 >= 3), so the field passed as an interface
+        # field: 3 rows, half a layer shifted.
+        N = self.mesh.n_nodes
+        vals = np.arange(2 * 3 * N, dtype=np.float64).reshape(2, 3, N)
+        iface = np.arange(2 * 4 * N, dtype=np.float64).reshape(2, 4, N)
+        other = "level" if vdim == "depth" else "depth"
+        ds = self.ds.assign(tlay=(("time", vdim, "nod2"), vals),
+                            tifc=(("time", other, "nod2"), iface))
+        mesh = self.mesh
+        if trim_mesh:
+            mesh.sigma = mesh.sigma[:3]
+        out = self.reader.read_scalar_fields(
+            ds, 1, mesh, ["tlay", "tifc"], self._mode(max_levels=3))
+        assert out["tlay"].shape == (2, N)
+        np.testing.assert_array_equal(out["tlay"], vals[1, :2])
+        # an interface field on the other name stays an interface field
+        assert out["tifc"].shape == (3, N)
+        np.testing.assert_array_equal(out["tifc"], iface[1, :3])
+
     def test_read_velocities_attaches_scalars(self):
         vel = self.reader.read_velocities(
             self.ds, 0, self.mesh, self._mode(), sample_vars=["temp", "salt"])
@@ -681,6 +707,47 @@ class TestReadScalarFieldsFesomc:
         out = self.reader.read_scalar_fields(
             self.ds, 0, self.mesh, ["temp"], mode)
         assert out["temp"].shape == (2, self.mesh.n_nodes)
+
+    @pytest.mark.parametrize("vdim", ["depth", "level"])
+    @pytest.mark.parametrize("trim_mesh", [True, False])
+    def test_max_levels_depth_dim_layer_field_by_pre_trim_size(
+            self, vdim, trim_mesh):
+        # A mid-layer field on a non-canonical vertical dim: K_ds - 1 = 3
+        # layers next to the dataset's interface dim sigma (K_ds = 4).
+        # Under max_levels=3 it keeps 2 layers; before 2026-11 it was
+        # compared with the TRIMMED interface count and kept 3 rows.
+        N = self.mesh.n_nodes
+        vals = np.arange(2 * 3 * N, dtype=np.float64).reshape(2, 3, N)
+        iface = np.arange(2 * 4 * N, dtype=np.float64).reshape(2, 4, N)
+        other = "level" if vdim == "depth" else "depth"
+        ds = self.ds.assign(sigma_lev=(("sigma",), self.mesh.sigma.copy()),
+                            tlay=(("time", vdim, "node"), vals),
+                            tifc=(("time", other, "node"), iface))
+        mesh = self.mesh
+        if trim_mesh:
+            mesh.sigma = mesh.sigma[:3]
+        out = self.reader.read_scalar_fields(
+            ds, 1, mesh, ["tlay", "tifc"], self._mode(max_levels=3))
+        assert out["tlay"].shape == (2, N)
+        np.testing.assert_array_equal(out["tlay"], vals[1, :2])
+        assert out["tifc"].shape == (3, N)
+        np.testing.assert_array_equal(out["tifc"], iface[1, :3])
+
+    def test_2d_mode_thickness_mean_of_interface_field(self):
+        # sigma_mean on an interface field (K rows): adjacent interfaces are
+        # averaged to layers, then weighted by the layer thickness.  Before
+        # 2026-11 np.average got K values with K-1 weights and raised.
+        N = self.mesh.n_nodes
+        rng = np.random.default_rng(11)
+        vals = rng.normal(size=(2, 4, N))
+        ds = self.ds.assign(kv=(("time", "sigma", "node"), vals))
+        mode = self._mode(Fdrift2D=True, Fdrift3D=False, sigma_mean=True)
+        out = self.reader.read_scalar_fields(ds, 0, self.mesh, ["kv"], mode)
+        layers = 0.5 * (vals[0, :-1] + vals[0, 1:])
+        expected = np.average(layers, axis=0,
+                              weights=np.abs(np.diff(self.mesh.sigma)))
+        assert out["kv"].shape == (N,)
+        np.testing.assert_allclose(out["kv"], expected, rtol=1e-12)
 
     def test_read_velocities_attaches(self, tmp_path):
         from types import SimpleNamespace
