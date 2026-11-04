@@ -35,6 +35,7 @@ if str(_root) not in sys.path:
 
 from kelp.readers import (get_reader, extract_time_info, _detect_engine,
                           _require_same_time_axis)
+from kelp.readers.fesom2 import _orient_vert_first
 from kelp.w_reconstruct import (
     compute_ssh_tendency,
     compute_divergence_approx,
@@ -103,7 +104,8 @@ def _read_mesh_extras(meshpath: str) -> dict:
     """Read additional fields from mesh diag for W reconstruction.
 
     Returns dict with available fields (missing keys omitted):
-        nod_area:         (nz, nod2) depth-dependent control volume area
+        nod_area:         (nz, nod2) depth-dependent control volume area,
+                          vertical first whatever the stored order
         nlevels_nod2D:    (nod2,)    active level count per node
         nlevels:          (elem,)    active level count per element
         ulevels:          (elem,)    upper active level per element
@@ -121,7 +123,10 @@ def _read_mesh_extras(meshpath: str) -> dict:
     }
     for key, dtype in field_dtypes.items():
         if key in ds:
-            extras[key] = np.asarray(ds[key].values, dtype=dtype)
+            # nod_area may be stored (nz, nod2) or (nod2, nz): vertical
+            # first by dimension NAME (no-op for the 1-D level counts)
+            extras[key] = np.ascontiguousarray(
+                np.asarray(_orient_vert_first(ds[key]).values, dtype=dtype))
             print(f"    Found {key}: shape {extras[key].shape}")
 
     ds.close()
@@ -221,7 +226,10 @@ def _w_ale_positive_down(ds_wale, key, ti, n_keep=None):
     positive-up field went in, and the output was then stamped positive-down
     (review 2026-09-23)."""
     from kelp.readers import resolve_w_sign
-    arr = np.asarray(ds_wale[key].isel(time=ti).values, dtype=np.float64)
+    # (nz, nod2) whatever the stored order: vertical first by dim NAME
+    arr = np.ascontiguousarray(np.asarray(
+        _orient_vert_first(ds_wale[key].isel(time=ti)).values,
+        dtype=np.float64))
     arr = resolve_w_sign(ds_wale[key], None, "up") * arr
     if n_keep is not None and arr.ndim == 2:
         # W has K interfaces for K-1 velocity layers
@@ -286,6 +294,27 @@ def _refuse_level_inputs(source: SourceConfig) -> None:
                         f"{why}. {_LEVEL_FIX}")
     finally:
         ds.close()
+
+
+def _bottom_residual(w_raw, z_lev, depth) -> float:
+    """Largest ``|w_raw(H)|`` over the nodes whose bottom the integrated
+    interfaces reach (``0 < H <= z_lev[-1]``), 0.0 when none does.
+
+    ``w_raw`` ``(K, N)`` is the raw integral, before the bottom correction
+    and before any level mask; it is read at each node's own bottom ``H``,
+    linear between the two interfaces around it — the residual
+    ``integrate_continuity(correct_bottom=True)`` removes.
+    """
+    z_lev = np.asarray(z_lev, dtype=np.float64)
+    depth = np.asarray(depth, dtype=np.float64)
+    nodes = np.flatnonzero((depth > 0) & (depth <= z_lev[-1]))
+    if nodes.size == 0:
+        return 0.0
+    H = depth[nodes]
+    k = np.clip(np.searchsorted(z_lev, H), 1, z_lev.size - 1)
+    frac = (H - z_lev[k - 1]) / (z_lev[k] - z_lev[k - 1])
+    w0, w1 = w_raw[k - 1, nodes], w_raw[k, nodes]
+    return float(np.max(np.abs(w0 + frac * (w1 - w0))))
 
 
 def run(cfg: ReconstructConfig):
@@ -410,13 +439,14 @@ def run(cfg: ReconstructConfig):
     for out_i, ti in enumerate(range(t_start, t_stop)):
         step_t0 = _time.perf_counter()
 
-        # Read u, v for this timestep
-        u_var = ds_u[u_key].isel(time=ti)
-        v_var = ds_v[v_key].isel(time=ti)
+        # Read u, v for this timestep, (K-1, E) whatever the stored order
+        # ((time, nz1, elem) or (time, elem, nz1)): vertical first by
+        # dimension NAME, as the FESOM2 reader does
+        u_var = _orient_vert_first(ds_u[u_key].isel(time=ti))
+        v_var = _orient_vert_first(ds_v[v_key].isel(time=ti))
 
-        # Strip depth to get (K-1, E) shape
-        u_arr = np.asarray(u_var.values, dtype=np.float64)
-        v_arr = np.asarray(v_var.values, dtype=np.float64)
+        u_arr = np.ascontiguousarray(np.asarray(u_var.values, dtype=np.float64))
+        v_arr = np.ascontiguousarray(np.asarray(v_var.values, dtype=np.float64))
         if cfg.max_levels and u_arr.ndim == 2:
             u_arr = u_arr[:cfg.max_levels]
             v_arr = v_arr[:cfg.max_levels]
@@ -474,21 +504,20 @@ def run(cfg: ReconstructConfig):
             else:
                 div_h = compute_divergence_approx(u_arr, v_arr, mesh)
 
+            # The residual the correction removes: the raw integral at each
+            # node's own bottom, before the level mask (which zeroes every
+            # interface below the node's last level, so the last interface
+            # printed ~0 whatever the residual)
             w_raw = integrate_continuity(
+                div_h, z_lev, ssh_t, mesh.depth, correct_bottom=False,
+            )
+            bottom_res = _bottom_residual(w_raw, z_lev, mesh.depth)
+
+            w_out = integrate_continuity(
                 div_h, z_lev, ssh_t, mesh.depth,
                 nlevels_nod=nlevels_nod,
-                correct_bottom=False,
+                correct_bottom=cfg.correct_bottom,
             )
-            bottom_res = np.max(np.abs(w_raw[-1, :]))
-
-            if cfg.correct_bottom:
-                w_out = integrate_continuity(
-                    div_h, z_lev, ssh_t, mesh.depth,
-                    nlevels_nod=nlevels_nod,
-                    correct_bottom=True,
-                )
-            else:
-                w_out = w_raw
 
             # Auto mode: cross-validate against ALE if available
             if cfg.method == "auto" and ds_wale is not None and out_i == 0:

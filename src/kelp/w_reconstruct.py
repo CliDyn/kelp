@@ -148,17 +148,22 @@ def _divergence_layer_single_node(
         x_n = nodes_lon[n] * cos_lat * _SLM
         y_n = nodes_lat[n] * _SLM
 
-        # Element area (signed)
+        # Element area (signed: > 0 counter-clockwise)
         dx1 = x_next - x_n
         dy1 = y_next - y_n
         dx2 = x_prev - x_n
         dy2 = y_prev - y_n
         two_A = dx1 * dy2 - dx2 * dy1
+        if two_A == 0.0:
+            continue                  # degenerate: no area, no gradient
+        sgn = 1.0 if two_A > 0.0 else -1.0
 
         # Weak-form divergence: ∫ div(u) N_n = -∫ u·∇N_n + boundary
-        # δ_n = -[u(y_next-y_prev) + v(x_prev-x_next)] / 2
-        flux_sum -= (u_layer[e] * (y_next - y_prev)
-                     + v_layer[e] * (x_prev - x_next)) / 2.0
+        # δ_n = -sign(2A)·[u(y_next-y_prev) + v(x_prev-x_next)] / 2 —
+        # ∇N_n carries 1/(2A), so the term flips with the vertex order
+        # (FESOM2 writes its triangles clockwise)
+        flux_sum -= sgn * (u_layer[e] * (y_next - y_prev)
+                           + v_layer[e] * (x_prev - x_next)) / 2.0
         area_sum += abs(two_A) / 6.0  # |A_e| / 3
 
     if area_sum > 0:
@@ -246,7 +251,8 @@ def compute_divergence_approx(
         Meridional velocity per element per layer (m/s).
     mesh : Mesh
         Must have ``elem_nodes``, ``nodes_lon``, ``nodes_lat``,
-        ``node_to_elems``, ``node_to_elems_count``.
+        ``node_to_elems``, ``node_to_elems_count``.  Elements may be written
+        in either vertex order (FESOM2 writes them clockwise).
     uv_vertical : str
         Where u/v lie; ``"level"`` (and a FESOM 1.4 mesh) is refused by
         :func:`require_layer_data`.
@@ -348,9 +354,19 @@ def _divergence_layer_with_area(
             y_next = nodes_lat[i_next] * _SLM
             x_prev = lon_prev * cos_lat * _SLM
             y_prev = nodes_lat[i_prev] * _SLM
+            x_n = nodes_lon[n] * cos_lat * _SLM
+            y_n = nodes_lat[n] * _SLM
 
-            flux_sum -= (u_layer[e] * (y_next - y_prev)
-                         + v_layer[e] * (x_prev - x_next)) / 2.0
+            # Same winding sign as the Tier-1 kernel: the flux term
+            # carries sign(2A), FESOM2's triangles are clockwise
+            two_A = ((x_next - x_n) * (y_prev - y_n)
+                     - (x_prev - x_n) * (y_next - y_n))
+            if two_A == 0.0:
+                continue
+            sgn = 1.0 if two_A > 0.0 else -1.0
+
+            flux_sum -= sgn * (u_layer[e] * (y_next - y_prev)
+                               + v_layer[e] * (x_prev - x_next)) / 2.0
 
         div_out[n] = flux_sum / area_n
 
@@ -374,6 +390,8 @@ def compute_divergence_with_area(
     v : np.ndarray, shape (K-1, E)
         Meridional velocity per element per layer (m/s).
     mesh : Mesh
+        Elements may be written in either vertex order (FESOM2 writes them
+        clockwise).
     nod_area : np.ndarray, shape (K-1, N) or (K, N)
         Depth-dependent control volume area from mesh diag.
     nlevels_elem : np.ndarray, shape (E,), optional
@@ -445,7 +463,10 @@ def integrate_continuity(
     nlevels_nod : np.ndarray, shape (N,), optional
         Active level count per node.  Layers below this are masked to 0.
     correct_bottom : bool
-        If True, apply linear correction so w(H) = 0.
+        If True, apply linear correction so w(H) = 0 at every node whose
+        bottom ``0 < H <= z_levels[-1]`` the interfaces reach; a node deeper
+        than the last interface (levels cut above its bottom) is left
+        uncorrected.
 
     Returns
     -------
@@ -470,11 +491,13 @@ def integrate_continuity(
     # applied to the interfaces at or above H only.  Until 2026-09-23 the
     # residual came from the global last interface (w(H) != 0 on shallow
     # nodes) and the correction re-filled masked below-bottom interfaces
-    # (review 2026-09-22, F05).
+    # (review 2026-09-22, F05).  A node deeper than the last interface (a
+    # level cut) has no bottom in the column: np.interp would clamp R to the
+    # cut interface and pull it to zero as if it were the bed — left as is.
     if correct_bottom:
         for n in range(N):
             H = node_depths[n]
-            if H <= 0:
+            if H <= 0 or H > z_levels[-1]:
                 continue
             R = float(np.interp(H, z_levels, w[:, n]))
             for k in range(K):

@@ -564,6 +564,190 @@ class TestDivergenceSeam:
         assert res["s"] == pytest.approx(res["o"], rel=1e-12)
 
 
+# ---------------------------------------------------------------------------
+# Winding of the elements (FESOM2 writes its triangles clockwise)
+# ---------------------------------------------------------------------------
+
+_NX = _NY = 5
+_INTERIOR = [j * _NX + i for j in range(1, _NY - 1) for i in range(1, _NX - 1)]
+
+
+def _winding_mesh(winding, z_levels=(0.0, 10.0, 25.0, 50.0, 100.0)):
+    """The 5x5 test mesh with its interior nodes moved off the grid
+    (irregular triangles) and its elements written counter-clockwise
+    ("ccw"), clockwise ("cw", the order FESOM2 writes) or alternating
+    ("mixed").  The element indices and positions do not depend on the
+    winding, only the vertex order inside each element does."""
+    base = _make_mesh(nx=_NX, ny=_NY, z_levels=list(z_levels))
+    lon = base.nodes_lon.copy()
+    lat = base.nodes_lat.copy()
+    rng = np.random.default_rng(7)
+    for n in _INTERIOR:                      # spacing 0.5 deg: no flips
+        lon[n] += rng.uniform(-0.1, 0.1)
+        lat[n] += rng.uniform(-0.1, 0.1)
+    elem = base.elem_nodes.copy()
+    if winding == "cw":
+        elem = elem[:, ::-1].copy()
+    elif winding == "mixed":
+        elem[::2] = elem[::2, ::-1]
+    n2e, n2e_count = build_node_to_elems(lon.size, elem)
+    mesh = Mesh(
+        name=f"test_{winding}", nodes_lon=lon, nodes_lat=lat,
+        depth=base.depth.copy(), elem_nodes=elem,
+        elem_center_lon=lon[elem].mean(axis=1),
+        elem_center_lat=lat[elem].mean(axis=1),
+        node_to_elems=n2e, node_to_elems_count=n2e_count,
+        sigma=base.sigma.copy(),
+    )
+    x, y = lon[elem], lat[elem]
+    two_a = ((x[:, 1] - x[:, 0]) * (y[:, 2] - y[:, 0])
+             - (x[:, 2] - x[:, 0]) * (y[:, 1] - y[:, 0]))
+    want = {"ccw": two_a > 0, "cw": two_a < 0}.get(winding)
+    if want is not None:
+        assert want.all()
+    else:
+        assert (two_a > 0).any() and (two_a < 0).any()
+    return mesh
+
+
+def _cluster_area(mesh):
+    """Sum of |A_e| / 3 over the elements around each node, in the metric of
+    that node (x = lon * cos(lat_node) * METERS_PER_DEG_LAT): the area the
+    Tier-1 kernel normalises by, here from the shoelace formula."""
+    area = np.zeros(mesh.n_nodes)
+    for n in range(mesh.n_nodes):
+        c = math.cos(mesh.nodes_lat[n] * DEG2RAD)
+        for e in mesh.node_to_elems[n, :mesh.node_to_elems_count[n]]:
+            nd = mesh.elem_nodes[e]
+            x = mesh.nodes_lon[nd] * c * METERS_PER_DEG_LAT
+            y = mesh.nodes_lat[nd] * METERS_PER_DEG_LAT
+            area[n] += abs(np.dot(x, np.roll(y, -1))
+                           - np.dot(y, np.roll(x, -1))) / 6.0
+    return area
+
+
+class TestDivergenceWinding:
+    """The weak-form flux of node n through element e is u . grad(N_n)
+    times the element area; grad(N_n) carries 1 / (signed double area), so
+    the term flips sign with the vertex order.  Both kernels dropped that
+    sign: on a clockwise element (every element of a FESOM2 mesh but a few)
+    the divergence came out negated.  Pinned by linear fields, whose
+    weak-form divergence at an interior node is exact: with
+    u_e = a cos(lat_ref) SLM lon_c(e) and v_e = b SLM lat_c(e) (element
+    centroids), the kernel's metric at node n gives
+    a cos(lat_ref) / cos(lat_n) + b."""
+
+    A, B = 1e-6, -3e-7
+    COS_REF = math.cos(5.0 * DEG2RAD)
+
+    def _fields(self, mesh, n_layers):
+        u = self.A * self.COS_REF * METERS_PER_DEG_LAT * mesh.elem_center_lon
+        v = self.B * METERS_PER_DEG_LAT * mesh.elem_center_lat
+        return np.tile(u, (n_layers, 1)), np.tile(v, (n_layers, 1))
+
+    def _expected(self, mesh):
+        lat = mesh.nodes_lat[_INTERIOR] * DEG2RAD
+        return self.A * self.COS_REF / np.cos(lat) + self.B
+
+    @pytest.mark.parametrize("winding", ["ccw", "cw", "mixed"])
+    def test_tier1_linear_field(self, winding):
+        mesh = _winding_mesh(winding)
+        u, v = self._fields(mesh, len(mesh.sigma) - 1)
+        div = compute_divergence_approx(u, v, mesh)
+        np.testing.assert_allclose(div[:, _INTERIOR],
+                                   np.tile(self._expected(mesh), (u.shape[0], 1)),
+                                   rtol=1e-9)
+
+    @pytest.mark.parametrize("winding", ["ccw", "cw", "mixed"])
+    def test_tier2_linear_field(self, winding):
+        from kelp.w_reconstruct import compute_divergence_with_area
+        mesh = _winding_mesh(winding)
+        K = len(mesh.sigma)
+        u, v = self._fields(mesh, K - 1)
+        nod_area = np.tile(_cluster_area(mesh), (K, 1))
+        div = compute_divergence_with_area(u, v, mesh, nod_area)
+        np.testing.assert_allclose(div[:, _INTERIOR],
+                                   np.tile(self._expected(mesh), (K - 1, 1)),
+                                   rtol=1e-9)
+
+    @pytest.mark.parametrize("tier", [1, 2])
+    @pytest.mark.parametrize("winding", ["cw", "mixed"])
+    def test_reconstructed_w_does_not_depend_on_winding(self, winding, tier):
+        rng = np.random.default_rng(3)
+        ref = _winding_mesh("ccw")
+        K, E, N = len(ref.sigma), ref.n_elements, ref.n_nodes
+        u = 0.1 * rng.standard_normal((K - 1, E))
+        v = 0.1 * rng.standard_normal((K - 1, E))
+        eta_prev = 0.01 * rng.standard_normal(N)
+        eta_next = 0.01 * rng.standard_normal(N)
+        out = {}
+        for tag, mesh in (("ccw", ref), (winding, _winding_mesh(winding))):
+            extras = ({"nod_area": np.tile(_cluster_area(mesh), (K, 1))}
+                      if tier == 2 else None)
+            out[tag] = reconstruct_w(u, v, eta_prev, eta_next, 3600.0, mesh,
+                                     mesh_extras=extras, method="divergence",
+                                     correct_bottom=True)
+        assert np.abs(out["ccw"]).max() > 1e-6
+        np.testing.assert_allclose(out[winding], out["ccw"],
+                                   rtol=1e-12, atol=1e-20)
+
+    def test_degenerate_element_is_skipped(self):
+        """A zero-area element has no shape-function gradient; it adds no
+        flux to either kernel (before, its edge term went in without area)."""
+        from kelp.w_reconstruct import (_divergence_layer_single_node,
+                                        _divergence_layer_with_area)
+        lon = np.array([5.0, 5.5, 5.0, 4.5, 4.0])
+        lat = np.array([5.0, 5.0, 5.5, 5.0, 5.0])   # 0, 3, 4 collinear
+        res = {}
+        for tag, en in (("valid", [[0, 1, 2]]),
+                        ("with_degenerate", [[0, 1, 2], [0, 3, 4]])):
+            en = np.array(en, dtype=np.int32)
+            n2e, cnt = build_node_to_elems(lon.size, en)
+            u = np.full(len(en), 0.3)
+            v = np.full(len(en), 0.5)
+            t1 = _divergence_layer_single_node(0, u, v, en, lon, lat, n2e, cnt)
+            out = np.zeros(lon.size)
+            _divergence_layer_with_area(
+                u, v, lon.size, en, lon, lat, n2e, cnt, np.ones(lon.size),
+                np.full(len(en), 2, dtype=np.int32),
+                np.ones(len(en), dtype=np.int32), 0, out)
+            res[tag] = (t1, out[0])
+        assert res["valid"][0] != 0.0 and res["valid"][1] != 0.0
+        assert res["with_degenerate"] == res["valid"]
+
+
+class TestBottomCorrectionLevelCut:
+    """A node deeper than the last integrated interface (the tool's
+    ``max_levels`` cut) has no bottom in the column: np.interp clamped the
+    residual to the last interface and the correction pulled the cut
+    interface to zero as if it were the bed."""
+
+    Z = np.array([0.0, 10.0, 20.0])
+    DIV = np.array([[0.1, 0.1, 0.1], [0.3, 0.3, 0.3]])
+    SSH_T = np.full(3, 1e-3)
+    DEPTHS = np.array([50.0, 20.0, 15.0])     # below the cut, at it, above it
+
+    def _w(self, correct_bottom):
+        return integrate_continuity(self.DIV, self.Z, self.SSH_T, self.DEPTHS,
+                                    correct_bottom=correct_bottom)
+
+    def test_node_below_the_cut_is_left_uncorrected(self):
+        np.testing.assert_array_equal(self._w(True)[:, 0], self._w(False)[:, 0])
+
+    def test_nodes_reaching_their_bottom_corrected_as_before(self):
+        raw, w = self._w(False), self._w(True)
+        # H = 20 m on the last interface: R = raw w there
+        np.testing.assert_allclose(
+            w[:, 1], raw[:, 1] - (self.Z / 20.0) * raw[2, 1], atol=1e-15)
+        assert w[2, 1] == pytest.approx(0.0, abs=1e-15)
+        # H = 15 m inside the last layer: R between the interfaces, the
+        # interface at 20 m in the ground
+        R = raw[1, 2] + 0.5 * (raw[2, 2] - raw[1, 2])
+        np.testing.assert_allclose(
+            w[:, 2], [raw[0, 2], raw[1, 2] - (10.0 / 15.0) * R, 0.0],
+            atol=1e-15)
+
+
 class TestCliOutputLayout:
     """The CLI's file must be readable back by the FESOM2 reader.
 
