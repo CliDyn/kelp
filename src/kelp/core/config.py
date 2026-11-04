@@ -728,7 +728,8 @@ class TimeConfig:
     pulse_interval: float = 0.0              # seconds between pulses
     # Date-based regime (resolved by run_tracking._resolve_start_date):
     # start_date overrides start_time_idx; duration_days converts to
-    # n_steps = duration_days * 86400 / dt.
+    # n_steps = duration_days * 86400 / dt.  With start_date the length is
+    # n_steps or duration_days; end_time_idx alone is refused.
     start_date: Optional[str] = None         # e.g. "2020-01-01T00:00"
     duration_days: Optional[float] = None    # e.g. 27.9
 
@@ -754,6 +755,14 @@ class TimeConfig:
                     "time.duration_days needs time.start_date (it is converted "
                     "to n_steps from the start date); with start_time_idx set "
                     "time.n_steps instead")
+        # end_time_idx - start_time_idx ignores the record start_date resolves
+        # to: the window length would come from the wrong start
+        if (self.start_date is not None and self.end_time_idx is not None
+                and self.n_steps is None and self.duration_days is None):
+            raise ValueError(
+                "time.end_time_idx cannot set the length of a run that starts "
+                "at time.start_date; use time.duration_days or time.n_steps "
+                "with time.start_date")
 
 
 @dataclass

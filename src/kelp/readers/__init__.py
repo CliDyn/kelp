@@ -97,6 +97,108 @@ def _prepare_dataset(reader, mesh, ds) -> None:
     prep(mesh, ds)
 
 
+def _apply_max_levels(mesh, mode, verbose: bool = False) -> None:
+    """Cut ``mesh.sigma`` to ``mode.max_levels`` interfaces from the surface.
+
+    The uncut table is kept once in ``mesh.metadata["sigma_full"]`` and
+    every cut is taken from it, so calls with different limits on one mesh
+    (direct ``run_single_realization`` entries) each get their own table;
+    ``max_levels`` None restores the full table of a mesh cut earlier.  A
+    call that leaves the table as it is keeps the very array object, so a
+    depth-point table built for it stays valid.  On a mesh never cut, None
+    changes nothing and stores nothing.  It lives next to the registry, not
+    in ``tracking``, so that ``kelp info`` cuts as a run does without
+    importing the integrators (``_open_run_dataset``).
+
+    Raises
+    ------
+    ValueError
+        ``max_levels < 2`` in 3-D mode.
+    """
+    max_levels = getattr(mode, "max_levels", None)
+    md = getattr(mesh, "metadata", None)
+    if md is None:
+        md = {}
+    full = md.get("sigma_full")
+    sig = mesh.sigma
+    if full is not None and not (
+            sig is full or (sig.size <= full.size
+                            and np.array_equal(sig, full[:sig.size]))):
+        # the table was replaced by someone else since: it is the new full
+        full = None
+        md.pop("sigma_full", None)
+    if max_levels is None:
+        if full is not None and sig.size != full.size:
+            mesh.sigma = full
+        return
+    if full is None and sig.size == 0:
+        return
+    if getattr(mode, "Fdrift3D", False) and max_levels < 2:
+        raise ValueError(
+            f"max_levels must be >= 2 in 3D mode, got {max_levels}"
+        )
+    if full is None:
+        full = sig
+        if getattr(mesh, "metadata", None) is None:
+            mesh.metadata = md
+        md["sigma_full"] = full
+    keep = min(int(max_levels), full.size)
+    if sig.size != keep:
+        mesh.sigma = full[:keep]
+    if verbose:
+        if getattr(mesh, "vertical_coord", "zlevel") == "sigma":
+            print(f"Vertical interfaces limited to {keep} (sigma mesh)")
+        else:
+            print(f"Depth levels limited to {keep} "
+                  f"(max depth {mesh.sigma[-1]:.1f}m)")
+
+
+def _open_run_dataset(reader, mesh, config, verbose: bool = False):
+    """Cut the levels and open the dataset as a run does.
+
+    One place for ``run_tracking`` and ``kelp info``: ``mode.max_levels``
+    is applied to ``mesh.sigma`` (:func:`_apply_max_levels`), then
+    ``open_dataset`` gets ``data.ncinput`` with the separate v / w paths and
+    only the keywords that are set — ``eta_path`` (``data.ncinput_eta``;
+    only readers with a separate surface-elevation store accept it, another
+    reader fails loudly naming it), the diffusion block for the FESOM2
+    ``var_az`` field, the stamp options (:func:`_time_option_kwargs`) and
+    the beaching dry mask (:func:`_dry_mask_kwargs`) — so the other
+    readers' signatures stay untouched.
+
+    Parameters
+    ----------
+    reader : reader class
+    mesh : Mesh
+        Cut in place.
+    config : AppConfig
+    verbose : bool
+        Print the cut.
+
+    Returns
+    -------
+    xr.Dataset
+        The open dataset.
+    """
+    _apply_max_levels(mesh, config.mode, verbose)
+    extra = {}
+    if getattr(config.data, "ncinput_eta", ""):
+        extra["eta_path"] = config.data.ncinput_eta
+    diff = config.numerics.diffusion
+    if (config.mesh.type == "fesom2" and diff.enabled
+            and getattr(diff, "az_enabled", False)
+            and getattr(diff, "var_az", None)):
+        # the multi-year exact layout (Av.fesom.<year>.nc) is discovered
+        # from it
+        extra["diffusion"] = diff
+    extra.update(_time_option_kwargs(config))
+    extra.update(_dry_mask_kwargs(config))
+    return reader.open_dataset(config.data.ncinput,
+                               v_path=config.data.ncinput_v or None,
+                               w_path=config.data.ncinput_w or None,
+                               mode_cfg=config.mode, **extra)
+
+
 #: exact unit tokens of a numeric time axis without an epoch
 _TIME_UNIT_SECONDS = {
     **{k: 86400.0 for k in ("days", "day", "d")},
