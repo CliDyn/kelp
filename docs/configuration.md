@@ -50,7 +50,8 @@ Rules enforced by `load_config` (verified against the code):
    `mesh.meshpath`, `mesh.levels` (when it is a path), `data.ncinput`,
    `data.ncinput_v`, `data.ncinput_w`, `data.ncinput_eta`, `data.inicloud`,
    `data.output_path`. `numerics.shared_fields_dir` is NOT resolved: a
-   relative value is taken from the current working directory.
+   relative value is taken from the current working directory (`~` is
+   expanded, since 2026-11).
 5. Validation of values (allowed enum strings, ranges) happens at load time in
    each section's `__post_init__`; invalid values raise `ValueError`
    immediately, before any data is opened. Since 2026-10-04 this also covers

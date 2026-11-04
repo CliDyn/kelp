@@ -74,7 +74,9 @@ class SharedFieldCache:
         if fcntl is None:               # pragma: no cover - non-POSIX
             raise OSError(
                 "shared_fields needs POSIX file locks (fcntl).")
-        base = Path(root_dir)
+        # ``~`` is the home directory; a relative path stays relative to the
+        # working directory (docs/configuration.md)
+        base = Path(root_dir).expanduser()
         base.mkdir(parents=True, exist_ok=True)
         self.root = base / str(tag)
         self._marker = None

@@ -548,6 +548,37 @@ class TestPhaseBEndToEnd:
             assert ds.getncattr("diffusion_scheme") == "em"
             assert ds.getncattr("diffusion_composition") == "combined"
 
+    @pytest.mark.parametrize("scheme", ["em", "m1"])
+    @pytest.mark.parametrize("time_dir", [1.0, -1.0])
+    def test_combined_run_writes_the_flow_velocity(self, tmp_path, scheme,
+                                                   time_dir):
+        """euler + em/m1 records a finite ``vel_u``/``vel_v`` (the flow).
+
+        Before 2026-11 the combined step dropped u/v, so every record of
+        such a run held NaN velocities.  With Kh = 0 the recorded value is
+        the constant flow velocity in both directions (the output holds
+        the flow velocity, not the tracking velocity).
+        """
+        u_val, v_val = 0.3, -0.1
+        nc_path = _make_fesomc_wide_with_kh(tmp_path, u_val=u_val,
+                                            v_val=v_val, kh_const=0.0)
+        particles = _write_particles(tmp_path / "p.dat", n=6)
+        out_path = tmp_path / "traj.nc"
+        cfg = _build_app_config(nc_path, particles, out_path, seed=1,
+                                scheme=scheme, dres_m=2000.0, kh=0.0)
+        if time_dir < 0:
+            cfg.mode.time_dir = -1.0
+            cfg.time.start_time_idx = 3
+        run_tracking(cfg, verbose=False)
+        with netCDF4.Dataset(out_path) as ds:
+            assert ds.getncattr("diffusion_composition") == "combined"
+            vu = np.asarray(ds.variables["vel_u"][:], dtype=np.float64)
+            vv = np.asarray(ds.variables["vel_v"][:], dtype=np.float64)
+        assert vu.shape == (6, 3)                    # one record per step
+        assert np.all(np.isfinite(vu)) and np.all(np.isfinite(vv))
+        np.testing.assert_allclose(vu, u_val, rtol=1e-12)
+        np.testing.assert_allclose(vv, v_val, rtol=1e-12)
+
     def test_m1_combined_runs(self, tmp_path):
         nc_path = _make_fesomc_wide_with_kh(tmp_path, kh_const=2.0)
         particles = _write_particles(tmp_path / "p.dat", n=12)
