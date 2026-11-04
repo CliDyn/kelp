@@ -166,7 +166,8 @@ Paths are below `src/kelp/`.
   epoch, the sign rule for W in the file; the reader hook `prepare` (`_prepare_dataset`)
   and the stamp options of a reader that resolves its record times
   (`_time_option_kwargs`) and the beaching dry mask of a reader that opens only the
-  consumed variables (`_dry_mask_kwargs`), which `tracking.py` and `kelp info` share — they live here
+  consumed variables (`_dry_mask_kwargs`), the `max_levels` cut (`_apply_max_levels`) and the
+  dataset open of a run (`_open_run_dataset`), which `tracking.py` and `kelp info` share — they live here
   so that `kelp info` does not import the integrators. Notes:
   [readers.md](readers.md); how a run uses the hook and the options in
   [tracking.md](tracking.md); the W sign from
@@ -219,8 +220,9 @@ Paths are below `src/kelp/`.
   clock, the lazy temporal-interp payload, the beaching, sampling, rotation and
   edge-walk hooks, fail-fast checks before the writer exists, `mode.uv_vertical`
   (every field the velocity cache stores is marked and checked,
-  `_mark_depth_linear`), the `max_levels` cut (`_apply_max_levels`) and the
-  reader hook `prepare(mesh, ds)`. Notes:
+  `_mark_depth_linear`), the `max_levels` cut (`_apply_max_levels`, defined in
+  `readers/__init__.py` with `_open_run_dataset`, the one open path shared with
+  `kelp info`) and the reader hook `prepare(mesh, ds)`. Notes:
   [tracking.md](tracking.md); also: periodic windows (`NumericsConfig.periodic_lon`),
   the `start_date` resolution (`TimeConfig`), the shared-fields tag
   (`NumericsConfig.shared_fields_dir`) and the grid-hash / exact-guard calls of
@@ -237,8 +239,9 @@ Paths are below `src/kelp/`.
   positive down. Notes: [numerics.md](numerics.md).
 - **`cli/main.py`** — the `kelp run|info` console script; `--temporal-interp` and
   `--checkpoint-freq` default to None so the YAML values pass through; `info` opens the
-  dataset as a run does (`ncinput_v` / `ncinput_w`, the stamp options, the reader's
-  `prepare`) without importing `tracking.py`. Notes:
+  dataset as a run does (`readers._open_run_dataset`: the `max_levels` cut,
+  `ncinput_v` / `ncinput_w` / `ncinput_eta`, the `var_az` diffusion block, the stamp
+  options; then the reader's `prepare`) without importing `tracking.py`. Notes:
   [tracking.md](tracking.md); what `kelp info` applies and prints (the grid-hash
   cell) in [config.md](config.md) and [mesh.md](mesh.md).
 

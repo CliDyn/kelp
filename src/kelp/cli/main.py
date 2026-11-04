@@ -59,7 +59,7 @@ def _cmd_info(args: argparse.Namespace) -> int:
     # the helpers a run uses too, from the registry: info never imports the
     # tracking loop and its integrators
     from ..readers import (get_reader, _describe_record_times,
-                           _dry_mask_kwargs, _prepare_dataset,
+                           _open_run_dataset, _prepare_dataset,
                            _time_option_kwargs)
 
     config_path = Path(args.config).expanduser()
@@ -75,8 +75,9 @@ def _cmd_info(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
     try:
-        # the stamp options reach open_dataset as in a run (fesom14 only)
-        time_kw = _time_option_kwargs(config)
+        # the stamp options, refused before the mesh is read as in a run
+        # (fesom14 only; _open_run_dataset passes them on)
+        _time_option_kwargs(config)
     except (TypeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -122,13 +123,10 @@ def _cmd_info(args: argparse.Namespace) -> int:
         print(f"    grid hash: (not evaluated: {exc})")
 
     try:
-        # the separate v/w paths, as a run passes them; the beaching dry
-        # mask too, for a reader that opens only what a run consumes
-        ds = reader.open_dataset(config.data.ncinput,
-                                 v_path=config.data.ncinput_v or None,
-                                 w_path=config.data.ncinput_w or None,
-                                 mode_cfg=config.mode, **time_kw,
-                                 **_dry_mask_kwargs(config))
+        # the levels and the open_dataset keywords of a run (the max_levels
+        # cut, separate v/w/eta paths, the var_az diffusion block, the stamp
+        # options, the beaching dry mask): one helper with run_tracking
+        ds = _open_run_dataset(reader, mesh, config)
     except Exception as exc:
         print(f"error: could not open dataset {config.data.ncinput!r}: {exc}",
               file=sys.stderr)

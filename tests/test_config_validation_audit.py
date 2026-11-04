@@ -83,6 +83,41 @@ def test_duration_days_without_start_date_is_refused():
     TimeConfig(duration_days=30.0, start_date="2020-01-01")
 
 
+def test_start_date_with_end_time_idx_alone_is_refused(tmp_path):
+    """With start_date set and neither n_steps nor duration_days, the run
+    took n_steps = end_time_idx - start_time_idx, ignoring the record that
+    start_date resolved to (bug audit 2026-11-04).  Refused at load, so
+    ``kelp info`` and ``kelp run`` both refuse it."""
+    with pytest.raises(ValueError) as exc:
+        TimeConfig(start_date="2020-01-03", end_time_idx=10)
+    msg = str(exc.value)
+    for part in ("time.start_date", "time.end_time_idx",
+                 "time.duration_days", "time.n_steps"):
+        assert part in msg, (part, msg)
+    p = tmp_path / "c.yaml"
+    p.write_text(textwrap.dedent("""\
+        mode:
+        numerics:
+          dt: 3600
+        mesh:
+          type: fesomc
+          meshpath: m.nc
+        data:
+          ncinput: d.nc
+        time:
+          start_date: "2020-01-03"
+          end_time_idx: 10
+    """))
+    with pytest.raises(ValueError, match="time.end_time_idx"):
+        load_config(str(p))
+    # n_steps or duration_days set: they decide, as before
+    assert TimeConfig(start_date="2020-01-03", n_steps=5).n_steps == 5
+    TimeConfig(start_date="2020-01-03", end_time_idx=10, n_steps=5)
+    TimeConfig(start_date="2020-01-03", end_time_idx=10, duration_days=2.0)
+    # end_time_idx without start_date: the legacy window, unchanged
+    TimeConfig(start_time_idx=2, end_time_idx=10)
+
+
 # --- strings, booleans and bounds --------------------------------------------
 
 def test_quoted_periodic_window_is_refused():

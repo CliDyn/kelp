@@ -174,6 +174,59 @@ class TestCliInfo:
         assert rc == 0
         assert "grid hash: cell 0.33 deg (explicit)" in buf.getvalue()
 
+    def test_info_opens_the_dataset_like_a_run(self, tmp_path, monkeypatch):
+        """``kelp info`` opens the dataset with the keywords and the levels
+        of a run: the separate surface-elevation path (``data.ncinput_eta``),
+        the diffusion block when it reads a ``var_az`` field (FESOM2), and
+        ``mode.max_levels`` cut from ``mesh.sigma`` before the reader's
+        ``prepare`` (bug audit 2026-11-04: info passed none of them).  A
+        FESOM-C reader stands in for the FESOM2 one, recording what it gets."""
+        from kelp import readers
+        from kelp.readers.fesomc import FesomCReader
+
+        seen = {}
+
+        class _Recording(FesomCReader):
+            @staticmethod
+            def open_dataset(path, v_path=None, w_path=None, mode_cfg=None,
+                             **kw):
+                seen["open_kw"] = dict(kw)
+                return FesomCReader.open_dataset(path, v_path=v_path,
+                                                 w_path=w_path,
+                                                 mode_cfg=mode_cfg)
+
+            @staticmethod
+            def prepare(mesh, ds):
+                seen["n_sigma"] = mesh.sigma.size
+
+        monkeypatch.setitem(readers._READERS, "fesom2", _Recording)
+        nc_path = _make_fesomc_minimal(tmp_path)
+        particles = _write_particles(tmp_path / "p.dat")
+        cfg = _write_config(tmp_path / "cfg.yaml", nc_path, particles,
+                            tmp_path / "out.nc")
+        text = cfg.read_text()
+        text = text.replace("  time_dir: 1.0\n",
+                            "  time_dir: 1.0\n  max_levels: 2\n")
+        text = text.replace("  output_freq: 1\n",
+                            "  output_freq: 1\n  diffusion:\n"
+                            "    enabled: true\n    az_enabled: true\n"
+                            "    var_az: Av\n")
+        text = text.replace("  type: fesomc\n", "  type: fesom2\n")
+        text = text.replace("  time_averaging: instant\n",
+                            f"  time_averaging: instant\n"
+                            f"  ncinput_eta: {nc_path}\n")
+        cfg.write_text(text)
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cli_main(["info", str(cfg)])
+        assert rc == 0, buf.getvalue()
+        assert seen["open_kw"].get("eta_path") == str(nc_path), seen
+        assert getattr(seen["open_kw"].get("diffusion"), "var_az",
+                       None) == "Av", seen
+        # three interfaces in the file, two kept, as the run keeps them
+        assert seen["n_sigma"] == 2, seen
+
     def test_info_missing_config_returns_2(self, tmp_path):
         rc = cli_main(["info", str(tmp_path / "no-such-file.yaml")])
         assert rc == 2

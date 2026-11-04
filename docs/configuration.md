@@ -372,10 +372,13 @@ mode with a clean directory.)
 
 `kelp info config.yaml` prints the mesh statistics and the time range of
 whatever was actually opened — use it to verify a config before running. It
-opens the data as a run does: `ncinput` with `ncinput_v`/`ncinput_w` (since
-2026-10-19; before, `ncinput` only), the `data.time_*` stamp options and, for
-`fesom14` with beaching enabled, `beaching.dry_mask_var`, and
-it runs the reader's checks against the mesh; for `fesom14` it also prints
+opens the data as a run does, through the same helper: `ncinput` with
+`ncinput_v`/`ncinput_w` (since 2026-10-19; before, `ncinput` only), `ncinput_eta`,
+the diffusion block when it reads a `var_az` field (FESOM2), the `data.time_*`
+stamp options and, for `fesom14` with beaching enabled, `beaching.dry_mask_var`
+(the eta path, `var_az` and the cut below since 2026-11-04); it cuts
+`mode.max_levels` from the levels (the `sigma:` line shows the file's count)
+and runs the reader's checks against the mesh on the kept levels; for `fesom14` it also prints
 what resolved the record times and the first and last instant.
 
 ## 6. `time` — time window and realizations
@@ -384,12 +387,12 @@ what resolved the record times and the first and last instant.
 |---|---|---|
 | `start_time_idx` | `0` | First file time index to read. |
 | `n_steps` | `null` | Number of integration steps (**the preferred way** to set run length). Required unless `end_time_idx` or `start_date` + `duration_days` is given. In temporal-interp mode these are `dt`-sized sub-steps, not file steps. |
-| `end_time_idx` | `null` | Legacy: last file index; converted to `n_steps = end_time_idx − start_time_idx` (in every entry point since 2026-10-04; the direct API added one step before). `n_steps` wins if both are set. Quirk kept for backward compatibility: with `time_dir: -1.0` (and no `n_steps`/`start_date`), tracking *starts* at `end_time_idx`. |
+| `end_time_idx` | `null` | Legacy: last file index; converted to `n_steps = end_time_idx − start_time_idx` (in every entry point since 2026-10-04; the direct API added one step before). `n_steps` wins if both are set. Quirk kept for backward compatibility: with `time_dir: -1.0` (and no `n_steps`/`start_date`), tracking *starts* at `end_time_idx`. With `start_date` and neither `n_steps` nor `duration_days` it is refused at load (`kelp run` and `kelp info`): the length would ignore the record `start_date` resolves to — set `duration_days` or `n_steps`. |
 | `start_date` | `null` | ISO datetime string (e.g. `"2020-01-15T00:00"`) resolved against the file time coordinate; overrides `start_time_idx`. Requires an interpretable time coordinate. Must match a file timestamp **exactly** unless `temporal_interp: true`, in which case the run may start between snapshots; outside the file range → error. Note: the match is done against the **raw timestamps stored in the file** — with `time_averaging: mean`, give the end-of-window timestamp as written in the file, not the window midpoint. With `temporal_interp: true` the run clock starts at the requested instant itself, exact stamp or not; in discrete mode the run starts at the record (under `mean` its window centre). Under `mean` the last stamp lies past the last window centre and keeps the record start (with a warning), and `start_time_idx: k` starts at the record's window centre, half a record before `start_date: <stamp k>`. **`fesom14`**: the file time coordinate is the reader's resolved instants — the window centres of means — so a daily mean sits at 12:00 and a discrete-mode `start_date` at 00:00 matches no record: use `temporal_interp: true` or a 12:00 start. Monthly means are a calendar month apart (irregular), which discrete mode refuses: they need `temporal_interp: true`. `kelp info` prints the first and last resolved instant. |
 | `duration_days` | `null` | With `start_date`: run length in days (a finite number > 0), converted to `n_steps = duration_days · 86400 / dt` (it then overrides `n_steps`). Without `start_date` it is refused at load — set `n_steps`. |
 | `on_exhausted` | `stop` | What happens when file time indices run out before `n_steps` is reached (validated at load, case-sensitive): `stop` (halt) or `cycle` (wrap around to index 0 — periodic forcing; useful to spin long runs from a short or single-snapshot file). |
 | `num_runs` | `1` | Number of realizations. Each gets its own output file (`_rN` suffix) and its own diffusion realization id (different random kicks, same seed). |
-| `run_interval` | `0` | File-time-index shift between consecutive realizations (realization k starts at `start_time_idx + k·run_interval`). |
+| `run_interval` | `0` | File-time-index shift between consecutive realizations (realization k starts at `start_time_idx + k·run_interval`). Under `on_exhausted: cycle` a start index outside the records wraps by whole forcing periods (index `n_time + 1` starts one period after record 1, index `-1` one period before the last record). Under `stop` every start must be a record: a start outside `[0, n_time)` refuses the run before the first realization, naming `num_runs`, `run_interval`, the index and the range. |
 | `n_pulses` | `1` | **Delayed/staggered release.** Re-release the whole seed set this many times (pulses) at the *same* coordinates, `pulse_interval` seconds apart: pulse `p` is released `p·pulse_interval` after the run start. Total particles = `n_pulses × (seeds in inicloud)`. `1` (default) = single release. Composes additively with the per-particle `release_sec` seed column (pulse `p` adds `p·pulse_interval` to each seed's own offset). Release time is an offset from the run start (→ step index `round(sec/dt)`), so it behaves identically forward and backward. Frozen particles are written as NaN with status `not_released` until they activate; the output's `release_time` holds each particle's rounded release instant (`io_and_time.md` §5.3). `1` + `pulse_interval=0` + no seed column → byte-identical to no feature. |
 | `pulse_interval` | `0.0` | Seconds between release pulses (see `n_pulses`). Must be `> 0` when `n_pulses > 1`. |
 
