@@ -370,6 +370,8 @@ def _apply_combined_em_step(state: ParticleState,
     lon_out = state.lon.copy()
     lat_out = state.lat.copy()
     ok_out = np.zeros(P, dtype=np.bool_)
+    U_out = np.zeros(P, dtype=np.float64)
+    V_out = np.zeros(P, dtype=np.float64)
 
     _loop_em_combined_2d(
         P, state.lon, state.lat,
@@ -389,7 +391,7 @@ def _apply_combined_em_step(state: ParticleState,
         mesh.node_to_elems, mesh.node_to_elems_count, mesh.elem_nodes,
         mesh.elem_center_lon, mesh.elem_center_lat,
         mesh.nodes_lon, mesh.nodes_lat,
-        lon_out, lat_out, ok_out,
+        lon_out, lat_out, ok_out, U_out, V_out,
         pid_offset=np.uint64(diffusion.pid_offset),
     )
 
@@ -428,11 +430,15 @@ def _apply_combined_em_step(state: ParticleState,
          FailureReason.OUT_OF_BOUNDS: domain_failed},
     )
 
+    # u/v as the plain Euler step stores them (time_dir * u, 0 for dead
+    # slots); without them the step kept the entry state's u = None and a
+    # run wrote vel_u/vel_v all NaN.
     return state.replace(
         lon=lon_final, lat=lat_final,
         z=state.z,  # 2D only — z untouched
         status=new_status, nearest_node=nn_final,
         failure_reason=new_failure_reason,
+        u=U_out, v=V_out,
     )
 
 

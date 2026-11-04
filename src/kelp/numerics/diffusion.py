@@ -1192,6 +1192,7 @@ def _loop_em_combined_2d(
     nodes_lon: np.ndarray, nodes_lat: np.ndarray,
     lon_out: np.ndarray, lat_out: np.ndarray,
     ok_out: np.ndarray,
+    U_out: np.ndarray, V_out: np.ndarray,
     pid_offset=0,
 ):
     """Combined Euler + EM/M1 loop kernel (2D horizontal).
@@ -1204,10 +1205,16 @@ def _loop_em_combined_2d(
 
     ``ok_out[i] = True`` if every interp succeeded for particle ``i``;
     the wrapper treats ``False`` slots as failed-this-step (revert +
-    OUTSIDE).
+    OUTSIDE).  ``U_out``/``V_out`` receive ``time_dir`` times the
+    interpolated velocity of every alive particle (0 where the
+    interpolation failed) — what the fused Euler kernel stores; dead slots
+    are left untouched.
     """
     abs_dt = dt_signed if dt_signed >= 0.0 else -dt_signed
     sqrt_abs_dt = math.sqrt(abs_dt)
+    # the step's u/v are the tracking velocity time_dir * u, like every
+    # Euler/RK kernel (the tracking layer flips them back for output)
+    tdir = 1.0 if dt_signed >= 0.0 else -1.0
 
     for i in prange(P):
         if not alive[i]:
@@ -1227,6 +1234,8 @@ def _loop_em_combined_2d(
             elem_center_lon, elem_center_lat,
             u_field, v_field,
         )
+        U_out[i] = tdir * UU
+        V_out[i] = tdir * VV
         if not ok_uv:
             lon_out[i] = xp
             lat_out[i] = yp

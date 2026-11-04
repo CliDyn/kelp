@@ -124,6 +124,8 @@ def _reduce_scalar_to_2d(arr_kn, mesh, sigma_layer=None, sigma_mean=False):
     Order: layer pick, then thickness-weighted mean, else surface layer
     (``_reduce_to_2d`` checks the mean first; the configuration refuses
     ``sigma_layer`` together with ``sigma_mean``, so the two never meet).
+    The mean takes an interface field ``(K, N)`` too: adjacent interfaces
+    are averaged to layers first.
     """
     if arr_kn.ndim == 1:
         return np.asarray(arr_kn, dtype=np.float64)
@@ -131,6 +133,9 @@ def _reduce_scalar_to_2d(arr_kn, mesh, sigma_layer=None, sigma_mean=False):
         return np.asarray(arr_kn[sigma_layer], dtype=np.float64)
     if sigma_mean:
         thick = np.abs(np.diff(mesh.sigma))
+        if arr_kn.shape[0] == thick.size + 1:
+            # an interface field: adjacent interfaces averaged to layers
+            arr_kn = 0.5 * (arr_kn[:-1] + arr_kn[1:])
         return np.average(arr_kn, axis=0, weights=thick)
     return np.asarray(arr_kn[0], dtype=np.float64)
 
@@ -480,9 +485,17 @@ class FesomCReader:
                     keep = min(K_t, arr.shape[0])            # interface field
                 elif vdim in layer_dims:
                     keep = min(K_t - 1, arr.shape[0])        # layer field
-                else:                                         # depth/level: size
-                    keep = min(K_t if arr.shape[0] >= K_t else K_t - 1,
-                               arr.shape[0])
+                else:
+                    # depth/level: a layer field when it has one row fewer
+                    # than the dataset's UNTRIMMED interface dim (a
+                    # max_levels cut would let K-1 layers pass the trimmed
+                    # count as interfaces), else by the trimmed size
+                    n_src = arr.shape[0]
+                    k_ds = next((ds.sizes[d] for d in iface_dims
+                                 if d in ds.dims), None)
+                    layer = n_src < K_t or (k_ds is not None
+                                            and n_src == k_ds - 1)
+                    keep = min(K_t - 1 if layer else K_t, n_src)
                 arr = arr[:keep]
             # 2D mode: collapse the vertical axis to a single node field.
             if not is_3d and arr.ndim == 2:

@@ -561,8 +561,9 @@ only, never the particle state.
 
 A 2-D run has **no `vel_w` variable** (format 1 wrote zeros). A tracking run
 creates `vel_u`/`vel_v` (and `vel_w` in 3-D) when it starts (§5.1). The combined
-em/m1 diffusion step (with Euler) evaluates no stored velocity, so in such a run
-they hold NaN throughout.
+em/m1 diffusion step (with Euler) records the flow velocity interpolated at the
+start of the step, like a plain Euler step (the diffusive displacement is not
+part of it); before 2026-11 it recorded none, so such a run held NaN throughout.
 
 ### 5.5 Sampled fields
 

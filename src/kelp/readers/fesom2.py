@@ -1376,8 +1376,12 @@ class Fesom2Reader:
                     keep = min(K_t, n_src)              # interface field
                 elif vdim == "nz1":
                     keep = min(K_t - 1, n_src)          # layer field
-                else:                                    # depth/level: by size
-                    keep = min(K_t if n_src >= K_t else K_t - 1, n_src)
+                else:
+                    # depth/level: a layer field by its PRE-trim size against
+                    # nz (a max_levels cut would let K-1 layers pass the
+                    # trimmed count as interfaces), else by the trimmed size
+                    layer = n_src < K_t or _az_var_is_mid_layer(ds, name)
+                    keep = min(K_t - 1 if layer else K_t, n_src)
                 da = da.isel({vdim: slice(0, keep)})
             # Orient by dim NAME (known before .values), not by shape: a square
             # field (N == n_layers) stored (nod2, nz1) would defeat a

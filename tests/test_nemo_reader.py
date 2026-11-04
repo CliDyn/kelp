@@ -255,6 +255,43 @@ def test_no_time_coord_gets_integer_axis(tmp_path):
     assert extract_time_info(ds) == (None, None)
 
 
+@pytest.mark.parametrize("calendar", ["gregorian", "standard"])
+def test_merged_time_keeps_source_calendar(tmp_path, calendar):
+    # The merged time coordinate keeps grid_T's attrs and encoding, so the
+    # output time:calendar is the source's.  Before 2026-11 it was assigned
+    # from bare values and a 'gregorian' axis came out
+    # 'proleptic_gregorian' (values and dt were unaffected).
+    import xarray as xr
+    from kelp.readers import extract_time_info, time_axis_epoch
+    ny, nx, nt = 5, 6, 3
+    X, Y = np.meshgrid(np.linspace(0.0, 6.0, nx), np.linspace(0.0, 5.0, ny))
+    hours = np.arange(nt, dtype=np.float64)
+    tc = xr.Variable(("time_counter",), hours,
+                     {"units": "hours since 2020-01-01 00:00:00",
+                      "calendar": calendar, "standard_name": "time"})
+
+    def _w(name, var, val):
+        xr.Dataset({var: (("time_counter", "y", "x"),
+                          np.full((nt, ny, nx), val)),
+                    "nav_lon": (("y", "x"), X), "nav_lat": (("y", "x"), Y)},
+                   coords={"time_counter": tc}).to_netcdf(tmp_path / name)
+
+    _w("C_grid_T.nc", "ssh", 0.0)
+    _w("C_grid_U.nc", "uo", 0.5)
+    _w("C_grid_V.nc", "vo", 0.0)
+    with xr.open_dataset(tmp_path / "C_grid_T.nc") as src:
+        src_cal = src["time_counter"].encoding["calendar"]
+    assert src_cal == calendar
+    reader = get_reader("nemo")
+    mode = ModeConfig(Fdrift2D=True, Fdrift3D=False)
+    ds = reader.open_dataset(str(tmp_path / "C_grid_T.nc"), mode_cfg=mode)
+    assert time_axis_epoch(ds) == ("seconds since 2020-01-01 00:00:00",
+                                   calendar)
+    assert ds["time"].encoding.get("calendar") == calendar
+    assert ds["time"].attrs.get("standard_name") == "time"
+    assert extract_time_info(ds)[1] == 3600.0
+
+
 def test_mismatched_uv_time_axis_refused(tmp_path):
     # grid_U on a shifted time axis -> indexing u(t_i) would pair with ssh(t_j);
     # open_dataset must fail fast rather than silently mixing physical times.

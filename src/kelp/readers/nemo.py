@@ -321,7 +321,11 @@ class NemoReader:
         # auto-detect / temporal_interp work, mirroring the other readers.
         tname = next((d for d in dsT.dims if d.lower().startswith("time")), None)
         if tname is not None and tname in dsT.variables:
-            merged = merged.assign_coords(time=dsT[tname].to_numpy())
+            # keep attrs and encoding: the output's time:calendar comes from
+            # them (bare values made a 'gregorian' axis 'proleptic_gregorian')
+            tv = dsT[tname].variable
+            merged = merged.assign_coords(time=xr.Variable(
+                ("time",), tv.values, tv.attrs, tv.encoding))
         elif "time" in merged.dims and "time" not in merged.coords:
             # No decodable time coordinate anywhere: still give the merged "time"
             # dim an integer coordinate so ds["time"] exists downstream
