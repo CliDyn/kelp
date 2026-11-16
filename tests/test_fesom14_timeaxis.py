@@ -948,6 +948,15 @@ GAP_FIX = ("Gaps are not allowed: add the missing record or file, or give "
      "data/dir: records overlap — the record at 2001-01-02T00:00:00 comes "
      "before the next snapshot expected at 2001-01-03T00:00:00",
      "check data.time_window"),
+    ([PG(2001, 1, 1), PG(2001, 1, 1), PG(2001, 1, 2)],
+     TimeOptions("start", "calendar_day"),
+     "data/dir: duplicate record — two records are stamped "
+     "2001-01-01T00:00:00", "repair the file or leave it out"),
+    ([PG(2001, 1, 2), PG(2001, 1, 1), PG(2001, 1, 3)],
+     TimeOptions("start", "calendar_day"),
+     "data/dir: records are not in time order — the record stamped "
+     "2001-01-01T00:00:00 follows the one stamped 2001-01-02T00:00:00",
+     "repair the file or leave it out"),
 ])
 def test_resolve_stamps_messages_name_the_dataset(stamps, opts, head, tail):
     with pytest.raises(ValueError) as info:
@@ -956,6 +965,20 @@ def test_resolve_stamps_messages_name_the_dataset(stamps, opts, head, tail):
     assert msg.startswith(head), msg
     assert msg.endswith(tail), msg
     assert "variable" not in msg and "files after it" not in msg, msg
+
+
+def test_fesom14_cadence_overlap_wording_unchanged():
+    """With a variable name the snapshot-overlap message keeps its FESOM 1.4
+    wording (the single-axis wording is for variable=None only)."""
+    msg = refusal([plain("a.nc", "days since 2001-01-01", [0, 2]),
+                   plain("b.nc", "days since 2001-01-01", [3, 5])],
+                  TimeOptions("instant", "2 d"))
+    assert msg.startswith(
+        "variable 'uo': records overlap between a.nc and b.nc — the record "
+        "at 2001-01-04T00:00:00 comes before the next snapshot expected at "
+        "2001-01-05T00:00:00"), msg
+    assert msg.endswith("check data.time_window, or leave one of the "
+                        "overlapping files out"), msg
 
 
 def test_fesom14_gap_wording_unchanged():
