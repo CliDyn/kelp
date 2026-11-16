@@ -24,11 +24,16 @@ consumes (``_READER_OPENS_CONSUMED``) takes the beaching dry mask
 """
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import warnings
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import xarray as xr
+
+    from .fesom14._timeaxis import TimeOptions
 
 _READERS = {}
 
@@ -389,8 +394,10 @@ def time_axis_epoch(ds) -> Optional[Tuple[str, str]]:
     return None
 
 
-#: ``data.*`` keys that say what each record's time stamp means; only the
-#: mesh types listed in ``_READER_RESOLVES_TIME`` read them
+#: ``data.*`` keys that say what each record's time stamp means; the mesh
+#: types listed in ``_READER_RESOLVES_TIME`` take them as ``open_dataset``
+#: keywords, for any other :func:`apply_time_options` resolves the opened
+#: dataset's axis from them
 _TIME_OPTION_KEYS = ("time_stamp", "time_window", "time_offset")
 
 #: mesh types whose reader resolves what time each record represents (the
@@ -400,6 +407,13 @@ _READER_RESOLVES_TIME = ("fesom14",)
 
 #: the output's ``time_averaging`` attribute for those readers
 RESOLVED_BY_READER = "resolved_by_reader"
+
+#: the output's ``time_averaging`` attribute for another reader whose record
+#: times were resolved from the stamp options (:func:`apply_time_options`)
+RESOLVED_FROM_OPTIONS = "resolved_from_options"
+
+#: windows of unequal length: the cycle period assumes equally spaced records
+_UNEQUAL_WINDOWS = ("calendar_month", "calendar_year")
 
 #: what resolved the record times, by ``ds.attrs["fesom14_time_source"]``
 _TIME_SOURCE_TEXT = {
@@ -519,6 +533,241 @@ def _describe_record_times(ds, offset: Optional[str] = None) -> Optional[str]:
     if len(t):
         text += f"; first {t[0]}, last {t[-1]}"
     return text
+
+
+def _set_time_options(data_cfg) -> Dict[str, str]:
+    """``{key: value}`` for each stamp option set in ``data_cfg``."""
+    return {k: getattr(data_cfg, k) for k in _TIME_OPTION_KEYS
+            if getattr(data_cfg, k, None) is not None}
+
+
+def _keys_text(kw) -> str:
+    """The set keys as ``data.<key>`` joined by ``", "``."""
+    return ", ".join(f"data.{k}" for k in kw)
+
+
+def _check_time_options(data_cfg,
+                        mesh_type: str) -> Optional[TimeOptions]:
+    """The one validation of the stamp options for a reader that does not
+    resolve its record times itself.
+
+    Parameters
+    ----------
+    data_cfg : DataConfig
+    mesh_type : str
+        ``mesh.type``.
+
+    Returns
+    -------
+    TimeOptions or None
+        None when no key is set or the mesh type's reader resolves the
+        keys itself (``_READER_RESOLVES_TIME``); else the validated options
+        with ``data.time_stamp`` and ``data.time_window`` both set.
+
+    Raises
+    ------
+    ValueError
+        An invalid key; ``data.time_averaging`` set next to any key (named
+        first, so ``time_offset`` + ``time_averaging`` says to remove
+        ``time_averaging``); ``data.time_offset`` without
+        ``data.time_stamp`` and ``data.time_window``.
+    """
+    kw = _set_time_options(data_cfg)
+    if not kw or mesh_type in _READER_RESOLVES_TIME:
+        return None
+    from .fesom14._timeaxis import TimeOptions
+    opts = TimeOptions(stamp=kw.get("time_stamp"),
+                       window=kw.get("time_window"),
+                       offset=kw.get("time_offset"))
+    opts.validate()
+    value = getattr(data_cfg, "time_averaging", None)
+    if value is not None:
+        raise ValueError(
+            f"data.time_averaging = {value!r} is set together with "
+            f"{_keys_text(kw)}: the stamp options place every record at the "
+            "time it represents, and nothing shifts the time axis again. "
+            "Remove data.time_averaging")
+    if not opts.explicit:
+        raise ValueError(
+            "data.time_offset is set without data.time_stamp and "
+            f"data.time_window, but mesh.type is {mesh_type!r}: this reader "
+            "has no time bounds or output schedule to resolve record times "
+            "from, so an offset alone has nothing to act on. Set "
+            "data.time_stamp (start | centre | end | instant) and "
+            "data.time_window with it, or remove data.time_offset")
+    return opts
+
+
+def _check_cycle_window(config) -> None:
+    """Refuse ``time.on_exhausted: cycle`` with a calendar month or year
+    window for a reader that does not resolve its record times itself.
+
+    The cycle period (span between the first and last record plus the last
+    interval) is computed for equally spaced records; month and year windows
+    differ in length.  Fixed-duration and ``calendar_day`` windows cycle
+    exactly.
+
+    Parameters
+    ----------
+    config : AppConfig
+
+    Raises
+    ------
+    ValueError
+        Naming ``time.on_exhausted: stop`` as the alternative.
+    """
+    if config.mesh.type in _READER_RESOLVES_TIME:
+        return None
+    if getattr(config.time, "on_exhausted", None) != "cycle":
+        return None
+    window = getattr(config.data, "time_window", None)
+    if window is None or window.strip() not in _UNEQUAL_WINDOWS:
+        return None
+    raise ValueError(
+        f"time.on_exhausted: cycle with data.time_window: {window.strip()} is "
+        "refused: calendar months and years differ in length, and the cycle "
+        "period is computed for equally spaced records. Set "
+        "time.on_exhausted: stop, or use a fixed-duration or calendar_day "
+        "window")
+
+
+def _record_time_mode(config) -> Optional[str]:
+    """What resolved a run's record times, for the output's
+    ``time_averaging`` attribute.
+
+    Parameters
+    ----------
+    config : AppConfig
+
+    Returns
+    -------
+    str or None
+        ``RESOLVED_BY_READER`` for a mesh type in ``_READER_RESOLVES_TIME``;
+        ``RESOLVED_FROM_OPTIONS`` for another one with the stamp options
+        set (validated by :func:`_check_time_options`); else None — then
+        ``data.time_averaging`` decides and the caller applies the midpoint
+        shift.
+    """
+    if config.mesh.type in _READER_RESOLVES_TIME:
+        return RESOLVED_BY_READER
+    if _check_time_options(config.data, config.mesh.type) is not None:
+        return RESOLVED_FROM_OPTIONS
+    return None
+
+
+def _time_axis_label(ds, data_cfg) -> str:
+    """What messages about a dataset's time axis name: the configured paths
+    (``data.ncinput``, ``ncinput_v``, ``ncinput_w``, ``ncinput_eta``; the set
+    ones, each once, joined by ``", "``), else the dataset's ``source``
+    encoding, else ``"the dataset"``."""
+    paths = []
+    for key in ("ncinput", "ncinput_v", "ncinput_w", "ncinput_eta"):
+        p = str(getattr(data_cfg, key, "") or "")
+        if p and p not in paths:
+            paths.append(p)
+    if paths:
+        return ", ".join(paths)
+    source = (getattr(ds, "encoding", None) or {}).get("source")
+    return str(source) if source else "the dataset"
+
+
+def apply_time_options(ds, data_cfg, mesh_type: str) -> xr.Dataset:
+    """The dataset with its ``time`` coordinate resolved from the stamp
+    options, for a reader that does not resolve its record times itself.
+
+    The offset is added to the stamps first; each record then sits at the
+    centre of its window (``start`` / ``centre`` / ``end``) or at its
+    shifted stamp (``instant``) — the arithmetic and the refusals of the
+    FESOM 1.4 reader's options (:func:`.fesom14._timeaxis.resolve_stamps`)
+    on the dataset's one, already concatenated axis.  Nothing shifts the axis
+    again: no midpoint shift follows.  Applying it to an already resolved
+    dataset shifts again.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        As the reader's ``open_dataset`` returned it; not mutated.
+    data_cfg : DataConfig
+    mesh_type : str
+        ``mesh.type``.
+
+    Returns
+    -------
+    xr.Dataset
+        ``ds`` itself when no key is set or the mesh type's reader resolves
+        the keys (``_READER_RESOLVES_TIME``).  Otherwise a new dataset whose
+        ``time`` holds the resolved instants in the axis's form: cftime
+        stays cftime of its calendar; datetime64 (read in
+        ``proleptic_gregorian``) stays datetime64 at ``ns`` while every
+        instant fits that range, else at ``us`` (never coarser, so a
+        half-window centre is exact), with the input's
+        ``encoding["calendar"]`` and attributes; the data variables are
+        shared, the close hook is kept.
+
+    Raises
+    ------
+    ValueError
+        The rules of :func:`_check_time_options`; no ``time`` dimension; an
+        axis without calendar dates (numeric, an index); a stamp off the
+        convention, a gap, an overlap or a broken cadence (the messages
+        start with the label of :func:`_time_axis_label`).
+    """
+    opts = _check_time_options(data_cfg, mesh_type)
+    if opts is None:
+        return ds
+    from datetime import datetime
+
+    import cftime
+    import xarray as xr
+
+    from .fesom14._timeaxis import resolve_stamps
+
+    label = _time_axis_label(ds, data_cfg)
+    keys = _keys_text(_set_time_options(data_cfg))
+    if "time" not in ds.dims:
+        raise ValueError(
+            f"{label}: {keys} are set, but the dataset has no 'time' "
+            "dimension, so there are no record times to resolve. Remove the "
+            "stamp options")
+    tv = ds["time"]
+    vals = tv.values
+    if np.issubdtype(vals.dtype, np.datetime64):
+        # numpy's calendar is proleptic_gregorian
+        py = vals.astype("datetime64[us]").astype(object)
+        stamps = [cftime.DatetimeProlepticGregorian(
+            p.year, p.month, p.day, p.hour, p.minute, p.second,
+            p.microsecond) for p in py]
+    elif vals.dtype == object and all(hasattr(v, "calendar")
+                                      for v in vals[:1]):
+        stamps = list(vals)
+    else:
+        raise ValueError(
+            f"{label}: {keys} are set, but the time axis carries no calendar "
+            f"dates (dtype {vals.dtype}): the stamp options need a decoded "
+            "axis (datetime64 or cftime), i.e. time units of the form "
+            "'<unit> since <date>' in the files. Remove the stamp options")
+    ax = resolve_stamps(stamps, opts, label=label)
+    if vals.dtype == object:
+        new = ax.instants
+    else:
+        us = np.array([np.datetime64(datetime(t.year, t.month, t.day, t.hour,
+                                              t.minute, t.second,
+                                              t.microsecond), "us")
+                       for t in ax.instants], dtype="datetime64[us]")
+        # ns only while every instant fits its range (1677-09-21 ..
+        # 2262-04-11): a window centre can cross it, and numpy wraps on
+        # overflow without an error — the round trip shows it
+        fits_ns = bool((us.astype("datetime64[ns]")
+                        .astype("datetime64[us]") == us).all())
+        unit = ("ns" if np.datetime_data(vals.dtype)[0] == "ns" and fits_ns
+                else "us")
+        new = us.astype(f"datetime64[{unit}]")
+    enc = {k: tv.encoding[k] for k in ("calendar",) if k in tv.encoding}
+    out = ds.assign_coords(time=xr.Variable(("time",), new, dict(tv.attrs),
+                                            enc))
+    # assign_coords drops the close hook
+    out.set_close(ds._close)
+    return out
 
 
 # ---------------------------------------------------------------------------
