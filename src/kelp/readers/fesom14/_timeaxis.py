@@ -50,6 +50,13 @@ overlapping or duplicate records and files of one variable in calendars that
 differ.  ``standard`` and ``proleptic_gregorian`` are one calendar for dates on
 or after 1582-10-15.  Every refusal is a :class:`ValueError` naming the file,
 the variable and the record (by its instant, ISO 8601) and saying the fix.
+
+A second entry, :func:`resolve_stamps`, serves an axis that is decoded
+already — the time axis of one dataset of another reader, in one calendar,
+with no files behind it.  Only the explicit options decide there (no bounds or
+schedule are read, so nothing is overridden), with the same offset, the same
+window arithmetic and the same refusals; its messages name the dataset by a
+label in place of a file and a variable.
 """
 from __future__ import annotations
 
@@ -71,6 +78,7 @@ __all__ = [
     "ResolvedAxis",
     "parse_output_schedule",
     "resolve_axis",
+    "resolve_stamps",
     "first_difference",
 ]
 
@@ -546,7 +554,9 @@ def _check_tiling(recs: List[_Rec], variable: Optional[str],
     """Consecutive windows must touch: no gap, no overlap.
 
     ``hint`` follows every gap's interval; ``short_gap_note`` is added to a
-    gap shorter than one day.
+    gap shorter than one day.  ``variable=None`` (one already-decoded
+    dataset axis, :func:`resolve_stamps`): the messages name only the
+    records' path, the dataset's label.
     """
     for r, n in zip(recs[:-1], recs[1:]):
         if _same(r.end, n.start):
@@ -556,15 +566,28 @@ def _check_tiling(recs: List[_Rec], variable: Optional[str],
         if n.start > r.end:
             note = (short_gap_note
                     if n.start - r.end < timedelta(days=1) else "")
+            if variable is None:
+                head = f"{r.path}: gap"
+                way_out = ("give the run only the records on one side of "
+                           "the gap")
+            else:
+                head = f"variable {variable!r}: gap {files}"
+                way_out = f"leave out {n.path} and the files after it"
             raise ValueError(
-                f"variable {variable!r}: gap {files} — no record covers "
+                f"{head} — no record covers "
                 f"{_iso(r.end)} to {_iso(n.start)} (between the record at "
                 f"{_iso(r.instant)}, window {_iso(r.start)} – {_iso(r.end)}, "
                 f"and the record at {_iso(n.instant)}, window "
                 f"{_iso(n.start)} – {_iso(n.end)}){hint}.{note} Gaps are not "
-                f"allowed: add the missing record or file, or leave out "
-                f"{n.path} and the files after it")
+                f"allowed: add the missing record or file, or {way_out}")
         dup = " (a duplicate record)" if _same(r.instant, n.instant) else ""
+        if variable is None:
+            raise ValueError(
+                f"{r.path}: records overlap{dup} — the record at "
+                f"{_iso(r.instant)} (window {_iso(r.start)} – {_iso(r.end)}) "
+                f"and the record at {_iso(n.instant)} (window "
+                f"{_iso(n.start)} – {_iso(n.end)}); check data.time_window "
+                "(the windows of consecutive records must touch)")
         fix = ("leave one of the overlapping files out" if r.path != n.path
                else "repair the file's time axis (or check data.time_window "
                     "when it is set) or leave the file out")
@@ -576,7 +599,10 @@ def _check_tiling(recs: List[_Rec], variable: Optional[str],
 
 
 def _check_cadence(recs: List[_Rec], step, variable: Optional[str]) -> None:
-    """Consecutive snapshots must be exactly one cadence step apart."""
+    """Consecutive snapshots must be exactly one cadence step apart.
+
+    ``variable=None``: the single-axis wording of :func:`_check_tiling`.
+    """
     for r, n in zip(recs[:-1], recs[1:]):
         expected = step(r.instant)
         if _same(n.instant, expected):
@@ -584,13 +610,25 @@ def _check_cadence(recs: List[_Rec], step, variable: Optional[str]) -> None:
         files = (f"in {r.path}" if r.path == n.path
                  else f"between {r.path} and {n.path}")
         if n.instant > expected:
+            if variable is None:
+                head = f"{r.path}: gap"
+                way_out = ("give the run only the records on one side of "
+                           "the gap")
+            else:
+                head = f"variable {variable!r}: gap {files}"
+                way_out = f"leave out {n.path} and the files after it"
             raise ValueError(
-                f"variable {variable!r}: gap {files} — the snapshot at "
+                f"{head} — the snapshot at "
                 f"{_iso(expected)} is missing (between the records at "
                 f"{_iso(r.instant)} and {_iso(n.instant)}). Gaps are not "
-                f"allowed: add the missing record or file, or leave out "
-                f"{n.path} and the files after it")
+                f"allowed: add the missing record or file, or {way_out}")
         dup = (" (a duplicate record)" if _same(r.instant, n.instant) else "")
+        if variable is None:
+            raise ValueError(
+                f"{r.path}: records overlap{dup} — the record at "
+                f"{_iso(n.instant)} comes before the next snapshot expected "
+                f"at {_iso(expected)} (data.time_window cadence); check "
+                "data.time_window")
         raise ValueError(
             f"variable {variable!r}: records overlap {files}{dup} — the "
             f"record at {_iso(n.instant)} comes before the next snapshot "
@@ -942,6 +980,59 @@ def resolve_axis(files: Sequence[FileAxis], opts: TimeOptions, *,
         _warn_override(decoded, result, opts, variable)
         return result
     return _resolve_auto(decoded, variable)
+
+
+def resolve_stamps(stamps: Sequence, opts: TimeOptions, *,
+                   label: str) -> ResolvedAxis:
+    """Resolve what every record of an already-decoded dataset axis represents.
+
+    The second entry next to :func:`resolve_axis`, for one dataset axis that
+    is decoded already: only the explicit options decide, with the same
+    offset, the same window arithmetic and the same refusals.  No bounds and
+    no schedule are read, so nothing is overridden and nothing is warned.
+
+    Parameters
+    ----------
+    stamps : sequence of cftime.datetime
+        The decoded stamps of ONE dataset axis, in one calendar, in record
+        order.
+    opts : TimeOptions
+        The user's options; validated here.  ``data.time_stamp`` and
+        ``data.time_window`` are required; ``data.time_offset``, when given,
+        is added to every stamp first.
+    label : str
+        What the messages name in place of a file (e.g. the dataset's
+        configured paths).
+
+    Returns
+    -------
+    ResolvedAxis
+        Instants (window centres for means, the shifted stamps for
+        snapshots) in the stamps' calendar, windows (None for snapshots),
+        ``source == "options"``.  No stamps give an empty axis.
+
+    Raises
+    ------
+    ValueError
+        Invalid options, or no ``data.time_stamp`` and ``data.time_window``;
+        duplicate or unordered stamps; a stamp that does not fit the chosen
+        convention; a gap or an overlap.
+    """
+    opts.validate()
+    if not opts.explicit:
+        raise ValueError(
+            f"{label}: what time each record represents cannot be "
+            f"established without the stamp options: {_OPTIONS_FIX}")
+    offset = (_parse_offset(opts.offset) if opts.offset is not None
+              else timedelta(0))
+    calendar = str(stamps[0].calendar or "") if len(stamps) else ""
+    d = _Decoded(path=str(label), calendar=calendar, units="",
+                 raw_epoch=None, epoch=None,
+                 stamps=[s + offset for s in stamps], bounds=None,
+                 schedule=None)
+    _check_stamp_order(d, None)
+    recs, means = _options_records([d], opts, None)
+    return _to_axis(recs, means, "options")
 
 
 def first_difference(a: ResolvedAxis, b: ResolvedAxis) -> Optional[int]:
