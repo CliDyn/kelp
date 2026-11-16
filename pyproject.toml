@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kelp-tracker"
 dynamic = ["version"]
-description = "KELP, the Kinematic Engine for Lagrangian Particles: a particle tracker for unstructured ocean model meshes (FESOM2, FESOM-C), structured NEMO grids and HEALPix grids"
+description = "KELP, the Kinematic Engine for Lagrangian Particles: a particle tracker for unstructured ocean model meshes (FESOM2, FESOM 1.4, FESOM-C) and HEALPix grids"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "BSD-3-Clause"
