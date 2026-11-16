@@ -5,7 +5,7 @@ All notable changes to KELP are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Public history starts with 0.9.0;
 the tracker was developed privately from 2026-06.
 
-## [Unreleased]
+## [1.1.0] - 2026-11-16
 
 ### Added — horizontal velocity linear in depth (`mode.uv_vertical`)
 
@@ -256,8 +256,6 @@ the tracker was developed privately from 2026-06.
   size before a `max_levels` cut, so a mid-layer field is no longer sampled half
   a layer shifted; FESOM-C 2-D `sigma_mean` of an interface field no longer
   raises.
-- NEMO: the time coordinate keeps its attributes, so the output `time:calendar`
-  names the source calendar.
 - `numerics.shared_fields_dir` expands a leading `~`.
 - `utils/extract_fesom_region.py`: the `bbox` and `center_radius` modes took
   every element whose bounding box touched the region's bounding box (a circle
