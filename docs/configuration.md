@@ -183,7 +183,7 @@ the remaining keys are not even validated.
 | Key | Default | Meaning |
 |---|---|---|
 | `ncinput` | `""` (required) | Velocity input: a single NetCDF file, a Zarr store, or (FESOM2 and FESOM 1.4) a **directory** of per-variable files; FESOM 1.4 also takes a glob pattern — see §5.1 for exactly what gets opened. |
-| `ncinput_u` | `""` | `nemo` only: the grid_U file(s) when their names lack the `grid_T` token (grid_V: `ncinput_v`, grid_W: `ncinput_w`). |
+| `ncinput_u` | `""` | `nemo` only: the grid_U file(s) when their names lack the `grid_T` token (grid_V: `ncinput_v`; `ncinput_w` is refused for `nemo`: W is recomputed). |
 | `ncinput_v` | `""` | Separate v-velocity file, for datasets where u and v live in different files. Empty = v is in `ncinput`. FESOM 1.4: more files, a directory or a glob, whose files simply join those of `ncinput`. |
 | `ncinput_w` | `""` | Separate vertical-velocity file (3-D). Empty = no W or W is in `ncinput`. FESOM 1.4: as `ncinput_v`. |
 | `ncinput_eta` | `""` | **healpix only** (other readers reject it). Separate ssh store for products whose velocity store carries no sea-surface height — the ng5 recipe: u/v from the 3-D store, `avg_zos` from the 2-D store. Empty = ssh is in `ncinput`, or a `3D`→`2D` filename sibling is auto-derived; if neither exists the run proceeds with eta = 0 (one warning). Both stores must share the exact same time axis (validated). |

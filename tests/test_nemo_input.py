@@ -179,3 +179,8 @@ def test_yaml_list_of_inputs_is_resolved_fingerprinted_and_labelled(tmp_path):
     assert cfg.data.ncinput == [str(tmp_path / "a_grid_T.nc"), str(tmp_path / "b_grid_T.nc")]
     assert [f[0] for f in _path_fingerprint(cfg.data.ncinput)] == ["a_grid_T.nc", "b_grid_T.nc"]
     assert "a_grid_T.nc" in _time_axis_label(None, cfg.data)
+
+
+def test_ncinput_w_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="ncinput_w"):
+        get_reader("nemo").open_dataset(str(tmp_path / "x_grid_T.nc"), w_path=str(tmp_path / "w.nc"))

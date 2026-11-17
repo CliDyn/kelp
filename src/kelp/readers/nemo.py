@@ -21,9 +21,8 @@ File layout: NEMO splits output by C-grid point into ``*_grid_T.nc`` (temp/salt/
 ssh), ``*_grid_U.nc`` (u), ``*_grid_V.nc`` (v), ``*_grid_W.nc`` (w).  Point
 ``data.ncinput`` at the **grid_T** file; the grid_U/grid_V siblings are derived by
 swapping the ``grid_T`` token in the basename (override grid_V with
-``data.ncinput_v``).  ``grid_W`` / ``ncinput_w`` and ``open_dataset``'s
-``w_path`` are **reserved for the 3-D follow-up and inert in v1** — ``w`` is
-always None.  The land-sea mask + coordinates come from
+``data.ncinput_v``).  ``grid_W`` is never read: in 3-D, W is recomputed from the
+u/v fluxes (``data.ncinput_w`` / ``open_dataset``'s ``w_path`` are refused).  The land-sea mask + coordinates come from
 ``mesh.meshpath`` (``mesh_mask.nc`` / ``domain_cfg.nc``), falling back to the
 grid_T file's ``nav_lon``/``nav_lat`` with an all-wet mask.
 """
@@ -336,8 +335,8 @@ def _read_raster(da, layout, kind, name, *, vector=False, check=False, surface=F
     ``"V"``), ``vector`` only for u and v.  ``check=True`` REFUSES when a halo /
     fold copy of the raw raster differs from its canonical point: used for
     every raster that defines the flux (u, v of every record, tmask, e1t / e2t,
-    e2u / e1v, e3t_0 / e3u_0 / e3v_0).  The T / S samples, bathymetry,
-    ``w_file`` and ``e3t_file`` are canonicalised silently (their stale copies
+    e2u / e1v, e3t_0 / e3u_0 / e3v_0).  The T / S samples, bathymetry
+    and the file's ``e3t`` are canonicalised silently (their stale copies
     -- ``bathy_metry`` on the fold row, eddy-induced velocities -- are real)."""
     a = _surface_2d(da) if surface else np.asarray(da)
     a = cgrid_to_canonical(a, layout, kind, vector=vector, check=check, name=name)
@@ -405,6 +404,18 @@ def _siblings(files, letter):
     """The grid_<letter> file of every grid_T file (``None`` when one is missing)."""
     out = [_sibling(f, letter) for f in files]
     return None if None in out else out
+
+
+def _rename_tz_da(da):
+    """``da`` with its time and depth dimensions renamed ``time`` / ``z``."""
+    ren = {}
+    for d in da.dims:
+        dl = d.lower()
+        if dl.startswith("time"):
+            ren[d] = "time"
+        elif dl.startswith("depth") or dl in ("nav_lev", "lev", "z"):
+            ren[d] = "z"
+    return da.rename(ren) if ren else da
 
 
 def _grid_point(da) -> str:
@@ -692,6 +703,10 @@ class NemoReader:
         ``w_path`` replace that for files without the token.
         """
         _refuse_unsupported_mode(mode_cfg, "open_dataset")
+        if w_path:
+            raise ValueError(
+                "NEMO reader: data.ncinput_w is not used -- W is recomputed from "
+                "the u/v fluxes (continuity); remove it.")
         t_files = _expand(path)
         u_files = _expand(u_path) if u_path else _siblings(t_files, "U")
         v_files = _expand(v_path) if v_path else _siblings(t_files, "V")
@@ -744,15 +759,7 @@ class NemoReader:
             raise KeyError("NEMO reader: u/v variable not found in grid_U/grid_V "
                            f"(looked for {_U_ALIASES} / {_V_ALIASES}).")
 
-        def _rename_tz(da):
-            ren = {}
-            for d in da.dims:
-                dl = d.lower()
-                if dl.startswith("time"):
-                    ren[d] = "time"
-                elif dl.startswith("depth") or dl in ("nav_lev", "lev", "z"):
-                    ren[d] = "z"
-            return da.rename(ren) if ren else da
+        _rename_tz = _rename_tz_da
 
         data = {"u": _rename_tz(dsU[u_n]), "v": _rename_tz(dsV[v_n])}
         ssh_n = _first(dsT, _SSH_ALIASES, getattr(cfg, "var_eta", None) if cfg else None)
@@ -774,15 +781,9 @@ class NemoReader:
                     data[nm] = _rename_tz(dsT[nm])
                     break
 
-        w_files = _expand(w_path) if w_path else _siblings(t_files, "W")
-        if getattr(cfg, "Fdrift3D", False) and w_files is not None:
-            dsW = _open_nemo(w_files)
-            wn = _first(dsW, ("vovecrtz", "w", "wo"))
-            if wn is not None:            # the file's W: only compared with the
-                data["w_file"] = _rename_tz(dsW[wn])   # continuity W
-        if getattr(cfg, "Fdrift3D", False) and "e3t" in dsT.variables:
-            data["e3t_file"] = _rename_tz(dsT["e3t"])    # z*/vvl check only
         merged = xr.Dataset({k: v.variable for k, v in data.items()})
+        if getattr(cfg, "Fdrift3D", False) and "e3t" in dsT.variables:
+            merged.attrs["nemo_t_files"] = t_files     # prepare() reads e3t from them (z*/vvl check)
         # Preserve a usable time axis (``.variable`` dropped coords) so dt
         # auto-detect / temporal_interp work, mirroring the other readers.
         tname = next((d for d in dsT.dims if d.lower().startswith("time")), None)
@@ -869,20 +870,22 @@ class NemoReader:
     @staticmethod
     def prepare(mesh, ds) -> None:
         """z*/vvl check (3-D cgrid only; changes nothing): when ``grid_T`` carries
-        ``e3t`` (merged as ``e3t_file``), warn if records 0 / last deviate from
-        the reference thickness.  Fixed reference thicknesses (``e3*_0``) are
+        ``e3t`` (read here from the files ``open_dataset`` recorded, never merged
+        into the run's fields), warn if records 0 / last deviate from the
+        reference thickness.  Fixed reference thicknesses (``e3*_0``) are
         used either way, so z* transports are off by about eta/H."""
         if not (getattr(mesh, "_cgrid", False) and mesh._cgrid_zw.size
-                and "e3t_file" in ds.variables):
+                and "nemo_t_files" in ds.attrs):
             return
+        e3t = _rename_tz_da(_open_nemo(ds.attrs["nemo_t_files"])["e3t"])
         ny, nx = mesh._structured_shape
         nlev = mesh._cgrid_nlev_raster
         ref = cgrid_thickness(mesh._cgrid_zw, np.where(nlev > 0, nlev - 1, -1),
                               mesh._cgrid_e3b.reshape(ny, nx))
         wet = np.arange(ref.shape[0])[:, None, None] < nlev
-        dev = max(float(np.nanmax(np.abs(_read_raster(ds["e3t_file"].isel(time=r), mesh._cgrid_layout,
-                                                      "T", "e3t_file") - ref)[wet] / ref[wet]))
-                  for r in (0, ds.sizes["time"] - 1))
+        dev = max(float(np.nanmax(np.abs(_read_raster(e3t.isel(time=r), mesh._cgrid_layout,
+                                                      "T", "e3t") - ref)[wet] / ref[wet]))
+                  for r in (0, e3t.sizes["time"] - 1))
         if dev > 1e-4:
             import warnings
             warnings.warn(

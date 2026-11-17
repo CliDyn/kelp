@@ -25,7 +25,7 @@ output. The default `tpoint` path is 2-D, E/N-aligned grids only.
    cells are assumed — wrong on zps output, check `VertCoord` / `ncdump -h`).
 2. **Velocity files**: u in grid_U, v in grid_V; T/S and `ssh` in grid_T. W is
    NOT read: the reader computes it from continuity (equal to the model's W
-   on ORCA05); a grid_W file is optional and only compared in tests.
+   on ORCA05); grid_W is never read (`ncinput_w` is refused).
 3. **File names**: the reader finds grid_U/V by swapping the `grid_T` token in
    the `data.ncinput` name. Files without that token (crops, renamed
    files): set `data.ncinput_u`, `ncinput_v` explicitly. Every one of the four
@@ -57,7 +57,7 @@ output. The default `tpoint` path is 2-D, E/N-aligned grids only.
 |---|---|---|
 | `uo`, `vozocrtx`, `uos` (grid_U) | zonal velocity | auto alias; `mode.var_u` for others |
 | `vo`, `vomecrty`, `vos` (grid_V) | meridional velocity | auto alias; `mode.var_v` |
-| `wo`, `vovecrtz` (grid_W) | model W | not used (continuity W); optional file |
+| `wo`, `vovecrtz` (grid_W) | model W | not used (continuity W); `ncinput_w` is refused |
 | `ssh`, `zos`, `sossheig`, `sshn` | free surface | auto alias; `mode.var_eta` |
 | `votemper`, `thetao`, `thetao_con`, `toce` | temperature | `mode.sample_vars` — EXACT name in grid_T, no alias |
 | `vosaline`, `so`, `so_abs`, `soce` | salinity | `mode.sample_vars` — exact name |

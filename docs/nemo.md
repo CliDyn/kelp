@@ -61,7 +61,7 @@ a pole row, a wet cell at a fold pivot, coincident nodes, a contradiction
 between the flags and the raster, and any halo or fold copy of u, v (every
 record), `tmask`, `e1t/e2t`, `e2u/e1v`, `e3t_0/e3u_0/e3v_0` that differs from its
 canonical point (stale halos, a wrong grid file). T/S samples, bathymetry and
-the optional `grid_W`/`e3t` comparison fields are canonicalised silently.
+the `e3t` of the z*/vvl check are canonicalised silently.
 
 ## 3. Inputs
 
@@ -75,9 +75,9 @@ the optional `grid_W`/`e3t` comparison fields are canonicalised silently.
   partial cells (absent: full reference cells).
 
 The model output is `data.ncinput` (the grid_T file(s)), with the grid_U /
-grid_V / grid_W siblings derived by swapping the `grid_T` token in the file
-name. Files without that token take `ncinput_u`, `ncinput_v`, `ncinput_w`
-explicitly. Each of the four keys takes a file, a glob (sorted; no match
+grid_V siblings derived by swapping the `grid_T` token in the file
+name. Files without that token take `ncinput_u`, `ncinput_v` explicitly
+(`ncinput_w` is refused: grid_W is never read). Each of these keys takes a file, a glob (sorted; no match
 refuses) or a list; several files per grid are joined along time (each file may
 have its own time epoch; the joined axis must be strictly increasing; grid_U/V
 must share grid_T's time axis). Velocity names `uo`/`vozocrtx`, `vo`/`vomecrty`
@@ -111,8 +111,8 @@ Land values in the velocity files (0 or NaN) are irrelevant: the faces a
   only.
 - **W.** Computed by the reader from continuity of the partial-cell fluxes
   `u e2u e3u`, `v e1v e3v` (integrated up from 0 at the floor); it equals the
-  model's W to float32 rounding on ORCA05. A `grid_W` file, when present, is
-  only compared with it by the tests, never used. W is linear in the
+  model's W to float32 rounding on ORCA05. A `grid_W` file is never read (`ncinput_w` is
+  refused); the data-gated tests open it themselves to compare. W is linear in the
   fractional level inside a cell.
 - **Surface.** `s` is clamped at 0 (the continuity W leaves a small surface
   residual, as the model's free surface does); never at the bottom.

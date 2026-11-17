@@ -195,7 +195,7 @@ def test_crossing_into_a_thinner_cell_stays_in_the_fluid():
     assert (np.abs(st.u) > 0).all()                              # and still moving
 
 
-def test_zstar_thicknesses_warn_and_use_the_reference():
+def test_zstar_thicknesses_warn_and_use_the_reference(tmp_path):
     import warnings
     import pytest
     import xarray as xr
@@ -205,10 +205,14 @@ def test_zstar_thicknesses_warn_and_use_the_reference():
     u = rng.normal(size=(2, K, NY, NX)); v = rng.normal(size=(2, K, NY, NX))
     ref = np.broadcast_to(np.diff(ZW)[:, None, None], (K, NY, NX))
     dims = ("time", "z", "y", "x")
-    ds = xr.Dataset({"u": (dims, u), "v": (dims, v),
-                     "e3t_file": (dims, np.stack([ref, 1.05 * ref]))})
+    ds = xr.Dataset({"u": (dims, u), "v": (dims, v)})
+
+    def with_e3t(e3t):                       # prepare() reads e3t from the grid_T files
+        f = tmp_path / f"t{e3t[1, 0, 0, 0]:.3f}_grid_T.nc"
+        xr.Dataset({"e3t": (("time_counter", "deptht", "y", "x"), e3t)}).to_netcdf(f)
+        return ds.assign_attrs(nemo_t_files=[str(f)])
     with pytest.warns(RuntimeWarning, match=r"5\.0%.*z\*/vvl"):
-        NemoReader.prepare(mesh, ds)
+        NemoReader.prepare(mesh, with_e3t(np.stack([ref, 1.05 * ref])))
     vel = NemoReader._read_cgrid_3d(ds, 0, mesh, np.float64, None)
     fl = mesh._cgrid_face_levels                          # land faces read as zero
     kk = np.arange(K)[:, None, None]
@@ -216,7 +220,7 @@ def test_zstar_thicknesses_warn_and_use_the_reference():
                                _w(mesh, u[0] * (kk < fl["U"]), v[0] * (kk < fl["V"]), e2u, e1v))
     with warnings.catch_warnings():
         warnings.simplefilter("error")                    # reference thicknesses: silent
-        NemoReader.prepare(mesh, ds.assign(e3t_file=(dims, np.stack([ref, ref]))))
+        NemoReader.prepare(mesh, with_e3t(np.stack([ref, ref])))
 
 
 def test_porous_changes_metres_only_in_partial_bottom_cells():

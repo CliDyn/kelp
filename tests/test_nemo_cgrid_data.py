@@ -28,7 +28,10 @@ def test_orca05_partial_cell_w_equals_model_w():
     mesh, ds, vel = _read(d / "orca05_equatorial_mesh.nc", d / "orca05_equatorial_grid_T.nc",
                           "vozocrtx", "vomecrty")
     ny, nx = mesh._structured_shape
-    wf = -np.nan_to_num(ds["w_file"].isel(time=0).values.astype(float))   # positive down
+    import xarray as xr
+    with xr.open_dataset(d / "orca05_equatorial_grid_W.nc") as dw:        # the model's W
+        wn = next(n for n in ("vovecrtz", "wo", "w") if n in dw.variables)
+        wf = -np.nan_to_num(dw[wn].isel({dw[wn].dims[0]: 0}).values.astype(float))   # positive down
     K = wf.shape[0]
     w = vel.w.reshape(K + 1, ny, nx)[:-1].astype(float)
     wet = np.arange(K)[:, None, None] < mesh._cgrid_nlev_raster
@@ -217,5 +220,5 @@ def test_eorca025_crops_without_the_grid_token_via_explicit_paths():
     mode = ModeConfig(Fdrift3D=True, var_u="uo", var_v="vo")
     ds = get_reader("nemo").open_dataset(
         str(d / "eorca025_equatorial_T.nc"), u_path=str(d / "eorca025_equatorial_U.nc"),
-        v_path=str(d / "eorca025_equatorial_V.nc"), w_path=str(d / "eorca025_equatorial_W.nc"), mode_cfg=mode)
-    assert {"u", "v", "w_file"} <= set(ds.variables)
+        v_path=str(d / "eorca025_equatorial_V.nc"), mode_cfg=mode)
+    assert {"u", "v"} <= set(ds.variables)
