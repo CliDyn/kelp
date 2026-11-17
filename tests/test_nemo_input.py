@@ -56,6 +56,29 @@ def test_domain_cfg_refusals(tmp_path, kw, match):
         _load(_domain_cfg(tmp_path, **kw))
 
 
+def _with_misf(tmp_path, wet_val, land_val):
+    import xarray as xr
+    p = _domain_cfg(tmp_path, tmask=True)
+    ds = xr.open_dataset(p).load()
+    ds.close()
+    m = np.where(np.asarray(ds["bottom_level"]) > 0, wet_val, land_val)
+    ds["misf"] = (("y", "x"), m)
+    ds["isfdraft"] = (("y", "x"), np.where(m > 0, 0.0, 50.0) * (wet_val == 99))
+    p.unlink()
+    ds.to_netcdf(p)
+    return p
+
+
+def test_misf_presence_and_land_values_are_not_cavities(tmp_path):
+    assert _load(_with_misf(tmp_path, 1, 0)).n_elements > 0      # ORCA05 mesh_mask pattern
+    assert _load(_with_misf(tmp_path, 1, 7)).n_elements > 0
+
+
+def test_misf_above_one_at_wet_columns_is_a_cavity(tmp_path):
+    with pytest.raises(NotImplementedError, match="ice-shelf cavities"):
+        _load(_with_misf(tmp_path, 2, 0))
+
+
 # --- several files per grid ---------------------------------------------------
 def _files(tmp_path, nt=4, parts=((0, 2), (2, 4))):
     """Per-part grid_T / grid_U / grid_V files plus the unsplit reference."""

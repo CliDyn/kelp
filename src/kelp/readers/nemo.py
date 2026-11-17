@@ -438,13 +438,27 @@ def _refuse_unsupported_vertical(ds, path) -> None:
         raise NotImplementedError(
             f"mesh file {path!r}: VertCoord = {str(vc)!r}; only z-levels "
             "(zco, zps) are supported, not s-coordinates")
-    if int(np.asarray(ds.attrs.get("IsfCav", 0)).reshape(-1)[0]) != 0 or (
-            "misf" in ds.variables and (np.asarray(ds["misf"]) > 0).any()) or (
-            "top_level" in ds.variables and (np.asarray(ds["top_level"]) > 1).any()):
+    # only real cavities: the variables count at WET columns (ORCA05 mesh_mask
+    # carries misf = 1 and isfdraft = 0 there, and 0 on land)
+    if "tmask" in ds.variables:
+        tm = np.asarray(ds["tmask"]).squeeze()
+        wet = (tm > 0.5).any(0) if tm.ndim == 3 else tm > 0.5
+    elif "bottom_level" in ds.variables:
+        wet = np.asarray(ds["bottom_level"]).squeeze() > 0
+    else:
+        wet = None
+    cav = int(np.asarray(ds.attrs.get("IsfCav", 0)).reshape(-1)[0]) != 0
+    for name, bad in (("misf", lambda a: a > 1), ("top_level", lambda a: a > 1),
+                      ("isfdraft", lambda a: a > 0)):
+        if cav or name not in ds.variables:
+            continue
+        a = np.asarray(ds[name]).squeeze()
+        cav = bool((bad(a) if wet is None or a.shape != wet.shape else bad(a) & wet).any())
+    if cav:
         raise NotImplementedError(
-            f"mesh file {path!r} has ice-shelf cavities (IsfCav / misf / "
-            "top_level > 1); they are not supported (levels must start at the "
-            "surface)")
+            f"mesh file {path!r} has ice-shelf cavities (IsfCav / misf > 1 / "
+            "top_level > 1 / isfdraft > 0 at wet columns); they are not "
+            "supported (levels must start at the surface)")
 
 
 def _check_zps_rule(zw, nlev, e3b, e3u0, e3v0):
