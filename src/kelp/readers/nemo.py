@@ -644,6 +644,7 @@ class NemoReader:
         wet = tm3[0] if tm3.ndim == 3 else tm3
         depth2d = None
         vert = {}
+        zps_refusal = None
         if tm3.ndim == 3 and all(
                 v in ds.variables for v in ("e3t_1d", "e1t", "e2t")):
             # 3-D z-levels: interfaces from the 1-D e3t; partial (zps) bottom
@@ -657,6 +658,7 @@ class NemoReader:
                                  "contiguous wet column from the surface "
                                  "(ice-shelf cavities are not supported)")
             e3b = e3u0 = e3v0 = None
+            zps_refusal = None
             if all(v in ds.variables for v in ("e3t_0", "e3u_0", "e3v_0")):
                 e3t0, e3u0, e3v0 = (rd(v, k) for v, k in
                                     (("e3t_0", "T"), ("e3u_0", "U"), ("e3v_0", "V")))
@@ -678,7 +680,8 @@ class NemoReader:
                     if "ln_zps" in src:
                         zps = zps or bool(np.asarray(getattr(src["ln_zps"], "values", src["ln_zps"])).any())
                 if zps:
-                    raise ValueError(
+                    # only a 3-D run is affected: refused at its first read
+                    zps_refusal = (
                         f"mesh file {path!r}: the vertical grid has partial steps (zps) but the "
                         "file lacks e3t_0 / e3u_0 / e3v_0; full reference cells would misplace the "
                         "floor and the fluxes (use a mesh_mask / domain_cfg that carries them)")
@@ -734,18 +737,20 @@ class NemoReader:
                                 r_earth=getattr(mesh_cfg, "r_earth", None),
                                 **widths, **vert)
         mesh.rotation_angles = angles
+        mesh._cgrid_zps_refusal = zps_refusal
         return mesh
 
     @staticmethod
     def open_dataset(path, v_path=None, w_path=None, mode_cfg=None, u_path=None) -> xr.Dataset:
-        """Assemble grid_T (+ derived/overridden grid_U, grid_V[, grid_W]) into
-        ONE dataset with vars u, v, [w], ssh, temp, salt sharing (time, [z],
+        """Assemble grid_T (+ derived/overridden grid_U, grid_V) into
+        ONE dataset with vars u, v, ssh, temp, salt sharing (time, [z],
         y, x) — so the per-step reader and the prefetch ``isel(time=slice)`` work.
 
         Every path argument may be a glob or a list: the files of one grid are
-        joined along time.  grid_U/grid_V/grid_W default to the name-siblings of
-        each grid_T file (the ``grid_T`` token swapped); ``u_path`` / ``v_path`` /
-        ``w_path`` replace that for files without the token.
+        joined along time.  grid_U/grid_V default to the name-siblings of
+        each grid_T file (the ``grid_T`` token swapped); ``u_path`` / ``v_path``
+        replace that for files without the token.  grid_W is never read and
+        ``w_path`` is refused (W comes from continuity).
         """
         _refuse_unsupported_mode(mode_cfg, "open_dataset")
         if w_path:
@@ -947,6 +952,8 @@ class NemoReader:
     def _read_cgrid_3d(ds, timestep, mesh, vd, scalars):
         """3-D faces of one record on the partial-step cells, plus the W
         that makes them non-divergent up to float32 rounding (``cgrid_w_from_continuity``)."""
+        if getattr(mesh, "_cgrid_zps_refusal", None):
+            raise ValueError(mesh._cgrid_zps_refusal)
         ny, nx = mesh._structured_shape
         zw = mesh._cgrid_zw
         if zw.size == 0:

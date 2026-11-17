@@ -62,8 +62,10 @@ def test_domain_cfg_refusals(tmp_path, kw, match):
 
 @pytest.mark.parametrize("attrs", [{"VertCoord": "zps"}, {"ln_zps": 1}])
 def test_zps_without_partial_cell_thicknesses_is_refused(tmp_path, attrs):
+    m = _load(_domain_cfg(tmp_path, no_e3=True, attrs=attrs))   # 2-D runs are unaffected
+    assert m.n_elements > 0
     with pytest.raises(ValueError, match="partial steps"):
-        _load(_domain_cfg(tmp_path, no_e3=True, attrs=attrs))
+        get_reader("nemo")._read_cgrid_3d(None, 0, m, None, None)
     assert _load(_domain_cfg(tmp_path, no_e3=True, attrs={"VertCoord": "zco"})).n_elements > 0
 
 

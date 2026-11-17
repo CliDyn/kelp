@@ -308,7 +308,7 @@ annotated template: [`config.yaml`](config.yaml).
 | `ncinput` | `""` | **required**: velocity file or directory (u-file if split); NEMO: a file, glob or list of grid_T files |
 | `ncinput_u` | `""` | NEMO only: grid_U file(s) when their names lack the `grid_T` token |
 | `ncinput_v` | `""` | separate v file (NEMO: a file, glob or list) |
-| `ncinput_w` | `""` | separate w file (3D) |
+| `ncinput_w` | `""` | separate w file (3D); refused for `nemo` (W from continuity) |
 | `ncinput_eta` | `""` | separate SSH store (HEALPix two-store recipes) |
 | `inicloud` | `""` | **required**: seeds, one `lon lat [depth] [release_sec]` per line |
 | `particle_offset` | `null` | global index of the file's first particle in a sharded release (default: the shard file's header, else 0) |
