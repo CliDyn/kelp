@@ -9,14 +9,16 @@ the matching options, gives the trajectories and output times of the
 centre-stamped field read as snapshots.  Also pinned: no midpoint shift and
 no default warning with the options, the one ``Record times`` line, ``kelp
 info`` printing the resolved first and last instants, and the default
-``time_averaging`` warning pointing to the options.
+``time_averaging`` warning pointing to the options, and the output
+attributes: each set key as a string, none without the keys, and the shard
+concat refusing shards with different options.
 
 Fixture (all synthetic, ``tests/_fesom2_synth``): the 17 x 17 node grid of
 ``tests/test_depth_linear_analytic.py`` with six levels, node u, v constant
 in depth and varying from record to record, six daily records restamped to
 seconds since 1958-01-01.
 """
-import contextlib, dataclasses, io, warnings
+import contextlib, dataclasses, io, sys, warnings
 from pathlib import Path
 import numpy as np, pytest, xarray as xr, yaml
 from kelp import tracking
@@ -28,6 +30,7 @@ from tests.test_depth_linear_analytic import (
     _quadrant_beds, _write_data, _write_mesh)
 from tests.test_uv_vertical_elements_run import _global_attrs, _load_mesh
 
+REPO = Path(__file__).resolve().parents[1]
 DAY = 86400.0
 N_REC = 6
 K = np.arange(N_REC, dtype=np.float64)
@@ -213,3 +216,71 @@ def test_default_warning_points_to_the_stamp_options(tmp_path):
     assert len(msgs) == 1, msgs
     assert "data.time_stamp" in msgs[0], msgs[0]
     assert "assuming 'mean'" in msgs[0], msgs[0]
+
+
+# ---------------------------------------------------------------------------
+# output attributes
+# ---------------------------------------------------------------------------
+
+def test_attributes_with_the_options(tmp_path):
+    """Each set key is written as a string attribute, a key not set is not
+    written, and ``time_averaging`` says what resolved the record times."""
+    world = _world(tmp_path)
+    cfg, _ = _case(tmp_path, world, "opts", STAMPS["start"],
+                   time_stamp="start", time_window="calendar_day")
+    attrs = _global_attrs(cfg.data.output_path)
+    assert attrs["time_stamp"] == "start"
+    assert attrs["time_window"] == "calendar_day"
+    assert "time_offset" not in attrs
+    assert attrs["time_averaging"] == "resolved_from_options"
+
+
+def test_offset_run_equals_reference_and_stamps_three_keys(tmp_path):
+    """Daily means stamped 23:15, a model step before the end of their day
+    (as ``write_multiyear`` writes them), read with ``end`` /
+    ``calendar_day`` and ``+45 min`` sit at 12:00 of their day: the run
+    equals the centre-stamped field read as snapshots, and the output names
+    all three keys."""
+    world = _world(tmp_path)
+    start = {"start_date": "1958-01-02T06:00:00"}
+    ref, _ = _case(tmp_path, world, "ref", STAMPS["centre"], time=start,
+                   time_averaging="instant")
+    cfg, _ = _case(tmp_path, world, "late", None, time=start,
+                   time_stamp="end", time_window="calendar_day",
+                   time_offset="+45 min")
+    _same_run(cfg.data.output_path, ref.data.output_path)
+    attrs = _global_attrs(cfg.data.output_path)
+    assert attrs["time_offset"] == "+45 min"
+    assert attrs["time_stamp"] == "end"
+    assert attrs["time_window"] == "calendar_day"
+    assert attrs["time_averaging"] == "resolved_from_options"
+
+
+def test_no_new_attribute_without_the_keys(tmp_path):
+    """A run without the keys writes none of them (never ``"None"``) and
+    keeps its ``time_averaging``."""
+    world = _world(tmp_path)
+    ref, _ = _case(tmp_path, world, "ref", STAMPS["centre"],
+                   time_averaging="instant")
+    attrs = _global_attrs(ref.data.output_path)
+    assert {"time_stamp", "time_window", "time_offset"}.isdisjoint(attrs), \
+        attrs
+    assert attrs["time_averaging"] == "instant"
+
+
+def test_concat_refuses_shards_with_different_time_stamp(tmp_path):
+    """Two shards with the same resolved record times but different stamp
+    options do not merge: the concat compares every run attribute."""
+    pytest.importorskip("zarr")
+    utils = str(REPO / "utils")
+    if utils not in sys.path:
+        sys.path.insert(0, utils)
+    from concat_trajectories import concat_trajectories
+    world = _world(tmp_path)
+    a, _ = _case(tmp_path, world, "sa", STAMPS["start"], ext="zarr",
+                 time_stamp="start", time_window="calendar_day")
+    b, _ = _case(tmp_path, world, "sb", STAMPS["end"], ext="zarr",
+                 time_stamp="end", time_window="calendar_day")
+    with pytest.raises(ValueError, match="time_stamp"):
+        concat_trajectories([Path(a.data.output_path),
+                             Path(b.data.output_path)], tmp_path / "m.zarr")

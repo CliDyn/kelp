@@ -326,6 +326,10 @@ def test_no_warning_for_fesom14(tmp_path, monkeypatch):
     dates, _, attrs = _output_dates(cfg.data.output_path)
     assert dates[0] == cftime.datetime(2000, 1, 2, calendar=CAL)
     assert attrs["time_averaging"] == "resolved_by_reader"
+    # the set options are written as string attributes, the unset one not
+    assert attrs["time_stamp"] == "instant"
+    assert attrs["time_window"] == "1 d"
+    assert "time_offset" not in attrs
 
 
 def test_time_offset_reaches_the_reader(tmp_path):
@@ -337,12 +341,34 @@ def test_time_offset_reaches_the_reader(tmp_path):
                time_offset="+12 h")
     out = _run(cfg)
     assert "data.time_offset +12 h" in out
-    dates, release, _ = _output_dates(cfg.data.output_path)
+    dates, release, attrs = _output_dates(cfg.data.output_path)
     assert release == [T0, T0]
     assert dates == [T0 + timedelta(days=k + 1) for k in range(3)]
     tr = load_trajectories(cfg.data.output_path)
     np.testing.assert_allclose(tr["lon"], _expected_lon(SEEDS, [0.01, 0.08], 3),
                                rtol=0, atol=1e-10)
+    assert attrs["time_stamp"] == "instant"
+    assert attrs["time_window"] == "1 d"
+    assert attrs["time_offset"] == "+12 h"
+    assert attrs["time_averaging"] == "resolved_by_reader"
+
+
+def test_offset_only_run_gains_only_time_offset(tmp_path):
+    """An offset on files with time bounds is the one key set: the output
+    gains ``time_offset`` and no other stamp attribute; a run on the same
+    files without the keys writes none of them."""
+    cfg = _cfg(tmp_path, out="offset.nc", time_offset="+0 h")
+    _run(cfg)
+    _, _, attrs = _output_dates(cfg.data.output_path)
+    assert attrs["time_offset"] == "+0 h"
+    assert "time_stamp" not in attrs and "time_window" not in attrs, attrs
+    assert attrs["time_averaging"] == "resolved_by_reader"
+    cfg = _cfg(tmp_path, out="plain.nc")
+    _run(cfg)
+    _, _, attrs = _output_dates(cfg.data.output_path)
+    assert {"time_stamp", "time_window", "time_offset"}.isdisjoint(attrs), \
+        attrs
+    assert attrs["time_averaging"] == "resolved_by_reader"
 
 
 @pytest.mark.parametrize("value", ["mean", "instant"])

@@ -684,6 +684,42 @@ def _record_time_mode(config) -> Optional[str]:
     return None
 
 
+def _time_metadata(config, time_averaging) -> Dict[str, object]:
+    """The output attributes that say how a run's record times were
+    resolved: ``time_averaging`` and the stamp options that are set.
+
+    One helper for ``run_tracking`` and the chain-driver template, so both
+    write the same attributes; the shard concat compares them like every
+    other run attribute.
+
+    Parameters
+    ----------
+    config : AppConfig
+    time_averaging : str or None
+        What the caller writes as ``time_averaging`` for a run without the
+        stamp options (``run_tracking``: ``"mean"`` / ``"instant"``, or
+        ``RESOLVED_BY_READER``; the chain-driver template:
+        ``config.data.time_averaging``).
+
+    Returns
+    -------
+    dict
+        Without any of ``data.time_stamp`` / ``time_window`` /
+        ``time_offset`` set: ``{"time_averaging": time_averaging}``, the
+        caller's value unchanged, so such a run writes exactly the
+        attributes it wrote before.  With one set: ``time_averaging`` from
+        :func:`_record_time_mode` and each set key as a string; a key not
+        set is absent (never ``"None"``, and the NetCDF writer cannot store
+        a ``None`` value).
+    """
+    keys = _set_time_options(config.data)
+    if not keys:
+        return {"time_averaging": time_averaging}
+    meta: Dict[str, object] = {"time_averaging": _record_time_mode(config)}
+    meta.update({k: str(v) for k, v in keys.items()})
+    return meta
+
+
 def _time_axis_label(ds, data_cfg) -> str:
     """What messages about a dataset's time axis name: the configured paths
     (``data.ncinput``, ``ncinput_v``, ``ncinput_w``, ``ncinput_eta``; the set

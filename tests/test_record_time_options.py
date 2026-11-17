@@ -18,8 +18,8 @@ import xarray as xr
 from kelp.core.config import DataConfig
 from kelp.readers import (RESOLVED_BY_READER, RESOLVED_FROM_OPTIONS,
                           _check_cycle_window, _check_time_options,
-                          _record_time_mode, apply_time_options,
-                          time_axis_epoch)
+                          _record_time_mode, _time_metadata,
+                          apply_time_options, time_axis_epoch)
 
 OTHERS = ["fesom2", "fesomc", "healpix", "nemo"]
 
@@ -407,6 +407,24 @@ def test_record_time_mode():
         _cfg("fesom2", time_stamp="start", time_window="1 d")
     ) == RESOLVED_FROM_OPTIONS
     assert _record_time_mode(_cfg("fesom2")) is None
+
+
+def test_time_metadata():
+    """The output attributes of the record times: with a key set, what
+    resolved them plus each set key as a string (a key not set is absent);
+    without a key, the caller's ``time_averaging`` value unchanged, even
+    ``None`` (a chain segment of a FESOM 1.4 run without the keys)."""
+    assert _time_metadata(
+        _cfg("fesom2", time_stamp="start", time_window="1 d"), "mean") == {
+        "time_averaging": "resolved_from_options", "time_stamp": "start",
+        "time_window": "1 d"}
+    assert _time_metadata(_cfg("fesom2"), "mean") == {"time_averaging": "mean"}
+    assert _time_metadata(
+        _cfg("fesom14", time_offset="+6 h"), None) == {
+        "time_averaging": "resolved_by_reader", "time_offset": "+6 h"}
+    assert _time_metadata(_cfg("fesom14"), None) == {"time_averaging": None}
+    assert _time_metadata(_cfg("fesom14"), "resolved_by_reader") == {
+        "time_averaging": "resolved_by_reader"}
 
 
 # ---------------------------------------------------------------------------

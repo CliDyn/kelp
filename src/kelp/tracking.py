@@ -39,7 +39,7 @@ from .readers import (get_reader, extract_time_info, time_axis_epoch,
                       NO_EPOCH_NOTE, _apply_max_levels,
                       _describe_record_times, _open_run_dataset,
                       _prepare_dataset, _record_time_mode,
-                      _time_option_kwargs)
+                      _time_metadata, _time_option_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -3617,7 +3617,9 @@ def run_tracking(
                 "temporal_interp": int(bool(temporal_interp)),
                 "temporal_reconstruction": str(
                     config.numerics.temporal_reconstruction),
-                "time_averaging": str(time_avg),
+                # time_averaging, plus each stamp option that is set (a
+                # run without them writes what it wrote before)
+                **_time_metadata(config, str(time_avg)),
                 "kelp_version": _kelp_version(),
             }
             if getattr(config.mode, "Fdrift3D", False):
