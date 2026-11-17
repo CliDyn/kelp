@@ -81,8 +81,8 @@ def _case(tmp_path, world, name, seconds, *, calendar="standard", interp=True,
     """Write one data set stamped ``seconds``, run it, return what a test reads.
 
     ``numerics`` may override ``n_steps`` / ``dt`` / ``temporal_interp`` (one
-    merged dict: passing them twice to ``_cfg`` is a TypeError — plan review
-    r1, agy F1); ``n_rec`` writes only the first records of the field."""
+    merged dict: passing them twice to ``_cfg`` is a TypeError); ``n_rec``
+    writes only the first records of the field."""
     mesh_path, mesh, u, v = world
     if n_rec is not None:
         u, v = u[:n_rec], v[:n_rec]
@@ -131,7 +131,7 @@ def test_fesom2_convention_invariance(tmp_path, window, interp):
     end, each with the matching options, and the centre-stamped field read as
     snapshots (no options) give the same trajectories and output times."""
     world = _world(tmp_path)
-    # a start INSIDE the records' coverage (plan review r1, codex 1): a run
+    # a start INSIDE the records' coverage: a run
     # from record 0 follows the records, so a uniform shift of the axis
     # moves only the output epoch, not the particles
     start = {"start_date": "1958-01-02T06:00:00" if interp
