@@ -6,13 +6,15 @@ reader's time axis as it is: no midpoint shift, ``data.time_averaging``
 refused (it points to ``data.time_stamp`` / ``data.time_window``), and the
 output metadata says ``time_averaging = "resolved_by_reader"``.  The stamp
 options ``data.time_stamp`` / ``data.time_window`` / ``data.time_offset``
-reach ``open_dataset`` only for ``mesh.type: fesom14``; with any other mesh
-type they are refused by name.  Also pinned here: a vertex whose bed lies
-above the particle left out of the blend (a wall at depth), the refusals that
-must come before the output file exists (``beaching.use_eta`` without a
-sea-surface height, em/m1 diffusion), ``mesh.input_rotation`` with other mesh
-types, ``kelp info`` with the stamp options, the sharding concat, and the W
-reconstruction's refusal of data on the levels.
+reach ``open_dataset`` only for ``mesh.type: fesom14``; any other mesh type
+resolves them on the opened dataset (``tests/test_record_time_options.py``,
+``tests/test_record_time_options_runs.py``).  Also pinned here: a vertex
+whose bed lies above the particle left out of the blend (a wall at depth),
+the refusals that must come before the output file exists
+(``beaching.use_eta`` without a sea-surface height, em/m1 diffusion),
+``mesh.input_rotation`` with other mesh types, ``kelp info`` with the stamp
+options, the sharding concat, and the W reconstruction's refusal of data on
+the levels.
 
 Fixture: a 5 x 5 grid of nodes one degree apart (10..14 E, 40..44 N),
 triangulated, with levels at 0/10/25/50 m; every column is four levels deep
@@ -324,6 +326,10 @@ def test_no_warning_for_fesom14(tmp_path, monkeypatch):
     dates, _, attrs = _output_dates(cfg.data.output_path)
     assert dates[0] == cftime.datetime(2000, 1, 2, calendar=CAL)
     assert attrs["time_averaging"] == "resolved_by_reader"
+    # the set options are written as string attributes, the unset one not
+    assert attrs["time_stamp"] == "instant"
+    assert attrs["time_window"] == "1 d"
+    assert "time_offset" not in attrs
 
 
 def test_time_offset_reaches_the_reader(tmp_path):
@@ -335,12 +341,34 @@ def test_time_offset_reaches_the_reader(tmp_path):
                time_offset="+12 h")
     out = _run(cfg)
     assert "data.time_offset +12 h" in out
-    dates, release, _ = _output_dates(cfg.data.output_path)
+    dates, release, attrs = _output_dates(cfg.data.output_path)
     assert release == [T0, T0]
     assert dates == [T0 + timedelta(days=k + 1) for k in range(3)]
     tr = load_trajectories(cfg.data.output_path)
     np.testing.assert_allclose(tr["lon"], _expected_lon(SEEDS, [0.01, 0.08], 3),
                                rtol=0, atol=1e-10)
+    assert attrs["time_stamp"] == "instant"
+    assert attrs["time_window"] == "1 d"
+    assert attrs["time_offset"] == "+12 h"
+    assert attrs["time_averaging"] == "resolved_by_reader"
+
+
+def test_offset_only_run_gains_only_time_offset(tmp_path):
+    """An offset on files with time bounds is the one key set: the output
+    gains ``time_offset`` and no other stamp attribute; a run on the same
+    files without the keys writes none of them."""
+    cfg = _cfg(tmp_path, out="offset.nc", time_offset="+0 h")
+    _run(cfg)
+    _, _, attrs = _output_dates(cfg.data.output_path)
+    assert attrs["time_offset"] == "+0 h"
+    assert "time_stamp" not in attrs and "time_window" not in attrs, attrs
+    assert attrs["time_averaging"] == "resolved_by_reader"
+    cfg = _cfg(tmp_path, out="plain.nc")
+    _run(cfg)
+    _, _, attrs = _output_dates(cfg.data.output_path)
+    assert {"time_stamp", "time_window", "time_offset"}.isdisjoint(attrs), \
+        attrs
+    assert attrs["time_averaging"] == "resolved_by_reader"
 
 
 @pytest.mark.parametrize("value", ["mean", "instant"])
@@ -355,29 +383,6 @@ def test_time_averaging_set_refused(tmp_path, value):
                    "data.time_window"):
         assert needle in msg, msg
     assert not Path(cfg.data.output_path).exists()
-
-
-@pytest.mark.parametrize("mesh_type", ["fesom2", "fesomc", "healpix", "nemo"])
-@pytest.mark.parametrize("keys", [
-    {"time_stamp": "end", "time_window": "calendar_month"},
-    {"time_offset": "+6 h"},
-], ids=["stamp_and_window", "offset"])
-def test_time_keys_rejected_for_other_readers(tmp_path, mesh_type, keys):
-    """The stamp options with any other mesh type: a TypeError naming each
-    key set and the mesh type, before the mesh path is even looked at."""
-    cfg = AppConfig(
-        mode=ModeConfig(), numerics=NumericsConfig(dt=3600.0),
-        mesh=MeshConfig(type=mesh_type, meshpath=str(tmp_path / "absent")),
-        data=DataConfig(ncinput=str(tmp_path / "absent"),
-                        inicloud=str(tmp_path / "absent.dat"),
-                        time_averaging="instant", **keys),
-        time=TimeConfig(n_steps=1))
-    with pytest.raises(TypeError) as info:
-        tracking.run_tracking(cfg)
-    msg = str(info.value)
-    for key in keys:
-        assert f"data.{key}" in msg, msg
-    assert repr(mesh_type) in msg and "fesom14" in msg, msg
 
 
 @pytest.mark.parametrize("keys, needles", [
@@ -738,8 +743,8 @@ def test_kelp_info_options(tmp_path, capsys):
     """``kelp info`` on bounds-free files: exit 1 with the options message;
     with ``data.time_stamp``/``data.time_window`` it prints the resolved
     first and last instants and the time source; a mesh the data does not
-    fit is refused by ``prepare``; the options with another mesh type are
-    refused by name."""
+    fit is refused by ``prepare``; with another mesh type the options next
+    to ``data.time_averaging`` are refused before the mesh is read."""
     raw = _data(tmp_path / "raw", bounds=False)
     rc, out, err = _info(tmp_path, "bare", _info_cfg(raw, raw), capsys)
     assert rc == 1, (out, err)
@@ -774,11 +779,13 @@ def test_kelp_info_options(tmp_path, capsys):
     assert "data.time_averaging" in err and "data.time_stamp" in err, err
 
     cfg = _info_cfg(tmp_path / "absent", raw, time_stamp="instant",
-                    time_window="1 d")
+                    time_window="1 d", time_averaging="mean")
     cfg["mesh"]["type"] = "fesom2"
     rc, out, err = _info(tmp_path, "other", cfg, capsys)
     assert rc == 1, (out, err)
-    assert "data.time_stamp" in err and "'fesom2'" in err, err
+    assert "is set together with" in err, err
+    assert "Remove data.time_averaging" in err, err
+    assert "could not load mesh" not in err, err
 
 
 def test_kelp_info_reads_split_paths(tmp_path, capsys):

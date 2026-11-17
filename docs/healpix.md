@@ -135,6 +135,37 @@ picks another) and ssh comes from `data.ncinput_eta` (auto-derived
 Variable names: `mode.var_*` overrides first (set-but-absent → `KeyError`,
 never a silent fallback), then aliases `avg_uoe`/`uo`/`u` etc.
 
+**Where the stamps sit.** A HEALPix store of daily or monthly means stamps
+each record somewhere in its averaging window, and where depends on the tool
+that wrote the store, not on the model. A store written from GRIB by a
+polytope or earthkit download carries the GRIB reference time, which is the
+START of the averaging window: the mean over day D is stamped D 00:00, a
+monthly mean the first day of its month at 00:00. A gribscan-indexed store of
+the same GRIB messages carries the validity time, the END of the window: the
+mean over day D is stamped D+1 00:00. When unsure, read one GRIB message of
+the source: its `stepRange` gives the averaging interval (`0-24` for a daily
+mean) and its validity date and time give the end of that interval; compare
+them with the stamp the store shows for the same record. The settings:
+
+- stamps at the window end (gribscan): `data.time_averaging: mean`, as before
+  (also the guess when the key is left out);
+- stamps at the window start, daily means: `data.time_stamp: start` with
+  `data.time_window: calendar_day`, and no `time_averaging` (refused next to
+  them); each record then sits at 12:00 of its day, so a discrete-mode
+  `time.start_date` names 12:00;
+- stamps at the window start, monthly means: `data.time_stamp: start` with
+  `data.time_window: calendar_month` and `numerics.temporal_interp: true`
+  (months differ in length; `time.on_exhausted: cycle` is refused with this
+  window).
+
+A wrong choice does not fail: under `mean`, daily means stamped at the window
+start are placed 24 h early and monthly means a month early (a January mean in
+mid-December), and the statistical validation of §5 cannot see a uniform
+offset of the time axis. With the two-store recipe the options apply to the
+joined dataset, and a refusal names both stores. `kelp info` prints the first
+and last resolved instant; compare them with a record whose window you know.
+The options are described in `configuration.md` §5 and `io_and_time.md` §3.
+
 **3-D** (`mode.Fdrift3D`, Phase 4): the vertical conventions were
 verified on the real ng5 store — u/v sit on the **K−1 layer mids** (the
 K-th GRIB level is all-NaN padding), `avg_wo` sits **ON the K

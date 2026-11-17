@@ -6,7 +6,7 @@ support for the FESOM family: the Finite-volumE Sea ice--Ocean Model in its seco
 version \citep[FESOM2;][]{danilov2017fesom2}, on purely triangular meshes, its finite-element
 predecessor FESOM~1.4 \citep{wang2014fesom14}, and its coastal relative FESOM-C, on mixed
 triangular--quadrilateral meshes. It also reads ocean fields
-remapped to the HEALPix grid and, in a first two-dimensional version, structured NEMO grids. Given a time sequence of stored model
+remapped to the HEALPix grid. Given a time sequence of stored model
 velocity snapshots and a set of release positions, it integrates the trajectories
 of passive particles either forward or backward in time, optionally in three
 dimensions and optionally subject to a stochastic eddy-diffusion term. This manual
@@ -66,10 +66,10 @@ Its predecessor FESOM~1.4 \citep{wang2014fesom14} uses the same kind of triangul
 fixed levels, but it is a finite-element model of the P1 type: $u$, $v$, $\Wvel$, temperature and
 salinity are piecewise linear on the tetrahedra of a three-dimensional mesh and live together \emph{on
 the levels at the nodes}, rather than at layer centres and element centroids. \textsf{KELP} supports all
-three, and represents the other sources on the same kind of mesh: a HEALPix
+three, and represents HEALPix products on the same kind of mesh: a HEALPix
 product becomes either a mesh whose nodes are the pixel centres (quadrilaterals, with triangles at the
-eight points where only three pixels meet) or a mesh whose elements are the pixels themselves, and a
-structured NEMO grid becomes a mesh of quadrilaterals (\cref{ch:mesh}). We therefore treat an element as
+eight points where only three pixels meet) or a mesh whose elements are the pixels themselves
+(\cref{ch:mesh}). We therefore treat an element as
 a triangle or a quadrilateral throughout. The unstructured
 horizontal mesh permits the spatial resolution to vary smoothly across the domain
 --- fine where the dynamics demand it, coarse elsewhere --- but it removes the
@@ -82,7 +82,7 @@ A second feature of the unstructured mesh bears directly on interpolation: the
 model stores different quantities at different geometric locations. The two
 horizontal velocity components may be defined either at the element vertices
 (``node-layout'' fields, such as the FESOM2 variables \conf{unod} and
-\conf{vnod}, the FESOM~1.4 velocities, the HEALPix pixel-centre mesh and the NEMO grids) or at the element centroids
+\conf{vnod}, the FESOM~1.4 velocities and the HEALPix pixel-centre mesh) or at the element centroids
 (``element-layout'' fields, such as the FESOM2 variables \conf{u} and \conf{v} and the FESOM-C
 velocities). The
 vertical velocity and other interface quantities are defined at the vertical
@@ -96,7 +96,7 @@ different interpolation stencil, a distinction that recurs throughout
 
 The engine ships with ready configurations that make these choices concrete: global two-dimensional
 runs on node velocities, a regional three-dimensional run with vertical velocity and sampled temperature
-and salinity, a structured-grid run, HEALPix runs and a three-dimensional run on level-wise FESOM~1.4
+and salinity, HEALPix runs and a three-dimensional run on level-wise FESOM~1.4
 output, its mesh recovered from the cell polygons of the data files. Where this manual quotes a size it is usually that of
 the FESOM2 \emph{core2} global mesh (\num{126858} nodes, 48 vertical interfaces reaching to about
 \SI{6250}{\metre}). The object of this document is the engine, not any experiment run with it.

@@ -5,6 +5,74 @@ All notable changes to KELP are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Public history starts with 0.9.0;
 the tracker was developed privately from 2026-06.
 
+## [Unreleased]
+
+### Added — record-time options for every reader
+
+- The keys `data.time_stamp`, `data.time_window` and `data.time_offset`,
+  introduced for the FESOM 1.4 reader in 1.1.0, now work for every mesh type.
+  They say where each record's time stamp sits in its averaging window:
+  `time_stamp` is `start`, `centre` or `end` (or `instant` for snapshots),
+  `time_window` is `calendar_day`, `calendar_month`, `calendar_year` or a fixed
+  duration such as `"5 d"`, and the optional `time_offset` first shifts the raw
+  stamps by a fixed amount such as `"+45 min"`. They are meant for output that
+  is not stamped at the end of its window. `data.time_averaging: mean` assumes
+  window-end stamps, so a daily mean stamped at 00:00 of its own day, as in a
+  store written from GRIB with the reference time, was placed 24 h early under
+  `mean` and 12 h early under `instant`, without any warning. With
+  `time_stamp: start` and `time_window: calendar_day` the same record sits at
+  12:00 of its day.
+- For every reader other than FESOM 1.4 the keys take the place of
+  `data.time_averaging`. The time axis of the opened dataset, with all its files
+  joined, is resolved once when it is opened: each record is placed at the
+  exact centre of its window for a mean, calendar months of different lengths
+  included, or at its shifted stamp for a snapshot, and no midpoint shift
+  follows. `time.start_date` is matched against these resolved times, so a
+  discrete-mode start on daily means names 12:00, and monthly means need
+  `numerics.temporal_interp: true`. `docs/healpix.md` §2 explains how to tell
+  which convention a HEALPix store follows.
+- Such a run is refused, with a message that names the record and the fix, when
+  a stamp does not fit the declared convention (for example a stamp off the day
+  boundary with `calendar_day`), when a record is missing, when
+  `data.time_averaging` is set next to the keys, when `data.time_offset` is
+  given without the other two, when the time axis carries no calendar dates,
+  and when `time.on_exhausted: cycle` is combined with a `calendar_month` or
+  `calendar_year` window, whose records are not equally spaced as the cycle
+  period assumes.
+- `kelp info` prints the resolved first and last instants, and the run summary
+  prints the same line.
+- Output files of such a run carry `time_averaging = "resolved_from_options"`
+  and, as string attributes, each of `time_stamp`, `time_window` and
+  `time_offset` that is set; the shard concatenator therefore refuses to merge
+  shards run with different options.
+- `readers.apply_time_options(ds, config.data, mesh_type)` applies the keys for
+  callers that open a dataset with `reader.open_dataset` and pass it to
+  `run_single_realization` or `track_particles` themselves. It is meant to be
+  applied once: a second call shifts the axis again.
+
+### Changed
+
+- A run that does not set the keys is unchanged: the same trajectories, sampled
+  values and output attributes. The warning printed when `data.time_averaging`
+  is left unset on FESOM2 or HEALPix data adds one sentence pointing to the keys
+  for stamps that are not the window end.
+- Setting one of the keys with another reader than FESOM 1.4 used to raise a
+  `TypeError`; the new refusals are `ValueError`s.
+- A FESOM 1.4 run with any of the keys now also writes the keys it sets as
+  output attributes; its `time_averaging` attribute stays
+  `"resolved_by_reader"`.
+- The chain-driver template of the `kelp-experiment` skill opens the data
+  through `readers._open_run_dataset`, as `run_tracking` does, and applies its
+  own midpoint shift only when the record times were not resolved at the open.
+  A segment of a run with the keys writes the same time attributes as
+  `run_tracking`; a segment without them writes what it wrote before. A leg
+  driver copied from the 1.1.0 template opens the data itself and does not
+  apply the keys, which 1.1.0 refused outside FESOM 1.4 and which are now
+  accepted: copy the new driver before using the keys in a chain.
+- `README.md` and `CITATION.cff` ask users to cite the article that describes
+  KELP (arXiv:2611.18528, https://doi.org/10.48550/arXiv.2611.18528);
+  `CITATION.cff` gives it as `preferred-citation`.
+
 ## [1.1.0] - 2026-11-16
 
 ### Added — horizontal velocity linear in depth (`mode.uv_vertical`)

@@ -22,6 +22,7 @@ from kelp.readers.fesom14._timeaxis import (  # noqa: E402
     first_difference,
     parse_output_schedule,
     resolve_axis,
+    resolve_stamps,
 )
 
 DAY = 86400.0
@@ -886,3 +887,112 @@ def test_one_date_type(make):
     da = xr.DataArray(np.zeros(len(ax.instants)), dims="time",
                       coords={"time": ax.instants})
     assert type(da.indexes["time"]).__name__ == "CFTimeIndex"
+
+
+# ----------------------------------------------------------------------------
+# resolve_stamps: an already-decoded dataset axis, explicit options only
+# ----------------------------------------------------------------------------
+
+PG = cftime.DatetimeProlepticGregorian
+NL = cftime.DatetimeNoLeap
+
+
+def test_resolve_stamps_month_centres_by_hand():
+    ax = resolve_stamps([PG(2001, 1, 1), PG(2001, 2, 1), PG(2001, 3, 1)],
+                        TimeOptions("start", "calendar_month"), label="L")
+    assert ax.source == "options"
+    assert iso(ax.instants) == ["2001-01-16T12:00:00", "2001-02-15T00:00:00",
+                                "2001-03-16T12:00:00"]
+    assert iso_w(ax.windows)[1] == ("2001-02-01T00:00:00", "2001-03-01T00:00:00")
+
+
+@pytest.mark.parametrize("opts", [
+    TimeOptions("start", "calendar_day"), TimeOptions("end", "calendar_day"),
+    TimeOptions("instant", "calendar_day"), TimeOptions("start", "1 d"),
+    TimeOptions("centre", "1 d"), TimeOptions("end", "1 d"),
+    TimeOptions("instant", "1 d"), TimeOptions("end", "1 d", "+6 h"),
+    TimeOptions("instant", "1 d", "+6 h")])
+def test_resolve_stamps_equals_the_file_path(opts):
+    """One arithmetic for both entries: the same stamps through a file axis
+    and through resolve_stamps give the same instants and windows."""
+    f = plain("u.nc", "days since 2001-01-01", [0, 1, 2], cal="noleap")
+    stamps = [NL(2001, 1, 1), NL(2001, 1, 2), NL(2001, 1, 3)]
+    a = resolve_stamps(stamps, opts, label="L")
+    b = resolve_axis([f], opts, variable="uo")
+    assert first_difference(a, b) is None
+
+
+def test_resolve_stamps_offset_moves_the_stamps_first():
+    stamps = [PG(2001, 1, d, 23) for d in (1, 2, 3)]
+    ax = resolve_stamps(stamps, TimeOptions("start", "calendar_day", "+1 h"),
+                        label="L")
+    assert iso(ax.instants) == ["2001-01-02T12:00:00", "2001-01-03T12:00:00",
+                                "2001-01-04T12:00:00"]
+    with pytest.raises(ValueError, match="does not sit on a calendar_day boundary"):
+        resolve_stamps(stamps, TimeOptions("start", "calendar_day"), label="L")
+
+
+GAP_FIX = ("Gaps are not allowed: add the missing record or file, or give "
+           "the run only the records on one side of the gap")
+
+
+@pytest.mark.parametrize("stamps, opts, head, tail", [
+    ([PG(2001, 1, d) for d in (1, 2, 4)], TimeOptions("start", "calendar_day"),
+     "data/dir: gap — no record covers 2001-01-03T00:00:00 to "
+     "2001-01-04T00:00:00", GAP_FIX),
+    ([PG(2001, 1, d) for d in (1, 2, 4)], TimeOptions("instant", "1 d"),
+     "data/dir: gap — the snapshot at 2001-01-03T00:00:00 is missing", GAP_FIX),
+    ([PG(2001, 1, d) for d in (1, 2, 3)], TimeOptions("start", "2 d"),
+     "data/dir: records overlap — the record at 2001-01-02T00:00:00",
+     "check data.time_window (the windows of consecutive records must touch)"),
+    ([PG(2001, 1, d) for d in (1, 2, 3)], TimeOptions("instant", "2 d"),
+     "data/dir: records overlap — the record at 2001-01-02T00:00:00 comes "
+     "before the next snapshot expected at 2001-01-03T00:00:00",
+     "check data.time_window"),
+    ([PG(2001, 1, 1), PG(2001, 1, 1), PG(2001, 1, 2)],
+     TimeOptions("start", "calendar_day"),
+     "data/dir: duplicate record — two records are stamped "
+     "2001-01-01T00:00:00", "repair the file or leave it out"),
+    ([PG(2001, 1, 2), PG(2001, 1, 1), PG(2001, 1, 3)],
+     TimeOptions("start", "calendar_day"),
+     "data/dir: records are not in time order — the record stamped "
+     "2001-01-01T00:00:00 follows the one stamped 2001-01-02T00:00:00",
+     "repair the file or leave it out"),
+])
+def test_resolve_stamps_messages_name_the_dataset(stamps, opts, head, tail):
+    with pytest.raises(ValueError) as info:
+        resolve_stamps(stamps, opts, label="data/dir")
+    msg = str(info.value)
+    assert msg.startswith(head), msg
+    assert msg.endswith(tail), msg
+    assert "variable" not in msg and "files after it" not in msg, msg
+
+
+def test_fesom14_cadence_overlap_wording_unchanged():
+    """With a variable name the snapshot-overlap message keeps its FESOM 1.4
+    wording (the single-axis wording is for variable=None only)."""
+    msg = refusal([plain("a.nc", "days since 2001-01-01", [0, 2]),
+                   plain("b.nc", "days since 2001-01-01", [3, 5])],
+                  TimeOptions("instant", "2 d"))
+    assert msg.startswith(
+        "variable 'uo': records overlap between a.nc and b.nc — the record "
+        "at 2001-01-04T00:00:00 comes before the next snapshot expected at "
+        "2001-01-05T00:00:00"), msg
+    assert msg.endswith("check data.time_window, or leave one of the "
+                        "overlapping files out"), msg
+
+
+def test_fesom14_gap_wording_unchanged():
+    msg = refusal([plain("a.nc", "days since 2001-01-01", [0, 1]),
+                   plain("b.nc", "days since 2001-01-01", [3, 4])],
+                  TimeOptions("start", "calendar_day"))
+    assert msg.startswith("variable 'uo': gap between a.nc and b.nc — "), msg
+    assert msg.endswith("add the missing record or file, or leave out b.nc "
+                        "and the files after it"), msg
+
+
+@pytest.mark.parametrize("opts", [TimeOptions(), TimeOptions(offset="+6 h")])
+def test_resolve_stamps_needs_stamp_and_window(opts):
+    with pytest.raises(ValueError) as info:
+        resolve_stamps([PG(2001, 1, 1)], opts, label="L")
+    assert "data.time_stamp" in str(info.value) and "data.time_window" in str(info.value)

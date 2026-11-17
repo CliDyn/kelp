@@ -84,7 +84,12 @@ into its own small dataclass. (Every key is documented in
    the window midpoints (`_shift_to_midpoints`) — the velocity is effectively
    valid at the middle of the window it averages. A reader that resolves each
    record's time itself (`fesom14`) already returns the window centres: no
-   shift, and `data.time_averaging` is refused (`io_and_time.md` §3). A
+   shift, and `data.time_averaging` is refused (`io_and_time.md` §3). For
+   every other reader, stamps that are not the window end (e.g. the window
+   start) are declared with `data.time_stamp` + `data.time_window`; the
+   dataset's axis is then resolved to the window centres when it is opened
+   (`readers.apply_time_options`, inside `_open_run_dataset`), and no shift
+   follows either. A
    `start_date` / `duration_days` request is converted to a start index and
    step count here.
 

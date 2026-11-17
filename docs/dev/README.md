@@ -164,8 +164,10 @@ Paths are below `src/kelp/`.
 - **`readers/__init__.py`** — the registry (`get_reader("fesomc" | "fesom2" | "fesom14" |
   "nemo" | "healpix")`) and shared helpers: engine detection, the time axis and its
   epoch, the sign rule for W in the file; the reader hook `prepare` (`_prepare_dataset`)
-  and the stamp options of a reader that resolves its record times
-  (`_time_option_kwargs`) and the beaching dry mask of a reader that opens only the
+  and the stamp options with their rules (`_time_option_kwargs`; passed to a reader
+  that resolves its record times, applied to the opened dataset of every other one by
+  `apply_time_options`, with `_time_metadata` for the output attributes) and the
+  beaching dry mask of a reader that opens only the
   consumed variables (`_dry_mask_kwargs`), the `max_levels` cut (`_apply_max_levels`) and the
   dataset open of a run (`_open_run_dataset`), which `tracking.py` and `kelp info` share — they live here
   so that `kelp info` does not import the integrators. Notes:
@@ -188,8 +190,10 @@ Paths are below `src/kelp/`.
   ASCII mesh directory or recovered from the cell polygons of level-wise data;
   level-wise or 3-D-node files; u/v/w on the levels (`native_uv_vertical = "level"`,
   always linear in depth); each record's time resolved by the reader (no midpoint
-  shift, `data.time_averaging` refused, `data.time_stamp` / `time_window` /
-  `time_offset`); a check-only `prepare` hook. Trap: every record is checked against
+  shift, `data.time_averaging` refused; `data.time_stamp` / `time_window` /
+  `time_offset` when the files do not say what their stamps mean — the same keys the
+  other readers take, whose axis `_timeaxis.resolve_stamps` resolves); a check-only
+  `prepare` hook. Trap: every record is checked against
   the static wet mask on every level BEFORE values are changed — a missing value in a
   wet slot is refused, never zeroed. Notes: [readers.md](readers.md) (incl. what is
   validated against what); the keys `mesh.input_rotation` and `data.time_*` in

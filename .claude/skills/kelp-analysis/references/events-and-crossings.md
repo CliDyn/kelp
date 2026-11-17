@@ -84,7 +84,7 @@ Read when counting crossings of a section, arrivals or other events, or relating
   cadence = float(np.median(np.diff(ds["time"].values)))
   print(f"record interval {cadence / 86400:.1f} d: an excursion through the section shorter than this is missed")
   print(f"share of crossings with |age - TAU| <= 1 yr {np.mean(np.abs(ev.age_yr - TAU) <= 1.0):.1%} (the median age: the age block below, never ev.age_yr.median())")
-  units, cal = ds["time"].attrs.get("units", ""), ds["time"].attrs.get("calendar", "standard")   # format 2: "seconds since <forcing's first raw record>"
+  units, cal = ds["time"].attrs.get("units", ""), ds["time"].attrs.get("calendar", "standard")   # format 2: "seconds since <forcing's first raw record>" (first resolved record for fesom14 / the stamp options)
   if " since " not in units: units = f"seconds since {FORCING_T0}"   # format 1 / a forcing without an epoch: its FIRST raw timestamp, typed from the forcing file
   year = lambda s: np.array([d.year for d in cftime.num2date(np.asarray(s, dtype=float), units, cal)], dtype=int)   # the store's calendar (noleap, 360_day)
   ev["crossing_year"] = year(ev.t)

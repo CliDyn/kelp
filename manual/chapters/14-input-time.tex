@@ -128,7 +128,8 @@ spacing and the axis becomes $t_i=i\,\Delta t_{\text{file}}$; without either, th
 The window in time is specified flexibly. The start is an index into the forcing record
 (\conf{time.start\_time\_idx}) or a calendar date (\conf{time.start\_date}), parsed in the calendar of the
 axis. In the interpolated mode the run starts at that instant, whether or not it coincides with a stored
-time; in the discrete mode the date must coincide with a stored time, and the run starts at that record. The length is a number of integration
+time; in the discrete mode the date must coincide with a stored time --- with the FESOM~1.4 reader or the
+stamp keys, a resolved record time (\cref{sec:input-timeavg}) --- and the run starts at that record. The length is a number of integration
 steps (\conf{time.n\_steps}, the preferred form), an explicit end index, or a duration in days
 (\conf{time.duration\_days}, only together with \conf{time.start\_date}, converted to
 $\lfloor\text{days}\cdot86400/\dt\rfloor$ steps). When the run reaches
@@ -187,15 +188,38 @@ CMIP6 monthly stamp, for instance, already sits in the middle of its month --- s
 every record by half a window. Daily means therefore sit at 12:00, and a \conf{start\_date} is matched against
 these centres: a discrete-mode start at midnight matches no record and needs \conf{temporal\_interp}. Monthly
 means lie a calendar month apart, an irregular spacing that the discrete mode refuses, so they need the
-interpolated mode. The three keys are refused for every other mesh type, and the run summary and
-\code{kelp info} print one line saying what resolved the times, with the first and the last instant.
+interpolated mode. The run summary and \code{kelp info} print one line saying what resolved the times, with
+the first and the last instant.
+
+\paragraph{Record times from the stamp keys (every other reader).} The other readers hand on the stamps as the
+files carry them, and \conf{time\_averaging: mean} assumes that each stamp marks the end of its window. Output
+stamped elsewhere --- a store written from GRIB with the reference time, for instance, stamps the start of the
+window --- is then placed one full window early under \conf{mean} and half a window early under
+\conf{instant}, and nothing fails. For such output the same three keys take the place of
+\conf{time\_averaging}, which is refused next to them. Once the dataset is open, with all its files joined into
+one time axis, the offset is added to every stamp, the stamp and the window give each record's window, and each
+record is placed at the centre of its window (a mean) or at its shifted stamp (a snapshot), with the window
+arithmetic and the refusals of the FESOM~1.4 reader. Calendar windows are computed exactly in the calendar of
+the axis, so monthly means stamped on the first of the month at midnight, declared \conf{start} and
+\conf{calendar\_month}, sit at 12:00 on 16 January and at 00:00 on 15 February of a common year; a stamp off
+its window boundary, a gap, an overlap or a broken snapshot cadence refuses the run. Here the offset needs the
+other two keys, since these readers have no time bounds or schedule for it to act on, and
+\conf{time.on\_exhausted: cycle} is refused with calendar-month or calendar-year windows, because the cycle
+period assumes equally spaced records. From then on the axis is treated like the FESOM~1.4 reader's: no midpoint
+shift, a \conf{start\_date} matched against the resolved instants (a daily mean stamped at the start of its day
+sits at 12:00), the summary line in the run and in \code{kelp info}, and
+\code{time\_averaging = "resolved\_from\_options"} in the output, next to each of the three keys that is set.
+A run without the keys is unchanged.
 
 \codeanchor{\raggedright The record times are \fn{resolve\_axis} in \srcfile{readers/fesom14/\_timeaxis.py}, called per
-consumed variable by \fn{Fesom14Reader.open\_dataset} (\srcfile{readers/fesom14/reader.py}); the keys reach it
-through \fn{\_time\_option\_kwargs}, which also refuses \conf{data.time\_averaging} for the mesh types in
-\code{\_READER\_RESOLVES\_TIME}, and \fn{\_describe\_record\_times} prints the summary line
-(\srcfile{readers/\_\_init\_\_.py}); \fn{run\_tracking} (\srcfile{tracking.py}) skips the midpoint shift and
-records \code{RESOLVED\_BY\_READER}.}
+consumed variable by \fn{Fesom14Reader.open\_dataset} (\srcfile{readers/fesom14/reader.py}); for the other
+readers \fn{apply\_time\_options} (\srcfile{readers/\_\_init\_\_.py}), called by \fn{\_open\_run\_dataset},
+resolves the opened dataset's axis with \fn{resolve\_stamps} from the same module. The keys reach them
+through \fn{\_time\_option\_kwargs}, which checks the rules before anything is read and refuses
+\conf{data.time\_averaging} for the mesh types in \code{\_READER\_RESOLVES\_TIME}, and
+\fn{\_describe\_record\_times} prints the summary line (\srcfile{readers/\_\_init\_\_.py});
+\fn{run\_tracking} (\srcfile{tracking.py}) skips the midpoint shift and records \code{RESOLVED\_BY\_READER} or
+\code{RESOLVED\_FROM\_OPTIONS} with the set keys (\fn{\_time\_metadata}).}
 
 
 \section{The velocity handed to a step}\label{sec:input-payload}

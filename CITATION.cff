@@ -2,7 +2,7 @@ cff-version: 1.2.0
 # a doi field is added later, once a release has been archived (CHANGELOG.md).
 version: 1.1.0
 date-released: 2026-11-16
-message: "If you use KELP in your work, please cite it as below."
+message: "If you use KELP in your work, please cite the article given under preferred-citation."
 type: software
 title: "KELP: Kinematic Engine for Lagrangian Particles"
 authors:
@@ -25,3 +25,26 @@ keywords:
   - HEALPix
   - Python
   - Numba
+preferred-citation:
+  type: article
+  title: "KELP v1.0: an agent-ready Lagrangian particle tracker for unstructured meshes and HEALPix grids"
+  authors:
+    - family-names: Kuznetsov
+      given-names: Ivan
+    - family-names: Androsov
+      given-names: Alexey
+    - family-names: Pantiukhin
+      given-names: Dmitrii
+    - family-names: Wekerle
+      given-names: Claudia
+    - family-names: Danilov
+      given-names: Sergey
+    - family-names: Jung
+      given-names: Thomas
+    - family-names: Koldunov
+      given-names: Nikolay
+  journal: "arXiv"
+  year: 2026
+  month: 11
+  doi: "10.48550/arXiv.2611.18528"
+  url: "https://arxiv.org/abs/2611.18528"

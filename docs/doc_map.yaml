@@ -6,7 +6,7 @@ architecture:
   - src/kelp/core/io.py:VelocityField
   - src/kelp/core/particles.py:ParticleState
   doc: docs/architecture.md
-  verified_at: d2df57d
+  verified_at: 1282e33
 beaching:
   code:
   - src/kelp/numerics/beaching.py:evaluate_beaching
@@ -15,7 +15,7 @@ beaching:
   - src/kelp/tracking.py:_apply_beaching_hook
   - src/kelp/core/mesh.py:build_boundary_info
   doc: docs/beaching.md
-  verified_at: d2df57d
+  verified_at: 1282e33
 configuration:
   code:
   - src/kelp/core/config.py:load_config
@@ -26,8 +26,9 @@ configuration:
   - src/kelp/cli/main.py:main
   - src/kelp/core/config.py:ModeConfig
   - src/kelp/readers/fesom14/reader.py:Fesom14Reader
+  - src/kelp/readers/__init__.py:apply_time_options
   doc: docs/configuration.md
-  verified_at: d2df57d
+  verified_at: 8165ac2
 coordinate_frame:
   code:
   - src/kelp/core/rotation.py:euler_matrix
@@ -39,7 +40,7 @@ coordinate_frame:
   - src/kelp/tracking.py:_validate_restart_frame
   - src/kelp/readers/healpix.py:_apply_rotation
   doc: docs/coordinate_frame.md
-  verified_at: d2df57d
+  verified_at: 1282e33
 dev_config:
   code:
   - src/kelp/core/config.py:load_config
@@ -50,7 +51,7 @@ dev_config:
   - src/kelp/core/mesh.py:find_nearest_nodes
   - src/kelp/core/shared_fields.py:SharedFieldCache
   doc: docs/dev/config.md
-  verified_at: d2df57d
+  verified_at: 1282e33
 dev_core:
   code:
   - src/kelp/core/particles.py:ParticleState
@@ -111,8 +112,9 @@ dev_readers:
   - src/kelp/readers/nemo.py:NemoReader
   - src/kelp/readers/fesom14/
   - src/kelp/readers/fesom2.py:_elem_level_metadata
+  - src/kelp/readers/__init__.py:apply_time_options
   doc: docs/dev/readers.md
-  verified_at: d2df57d
+  verified_at: 8165ac2
 dev_tracking:
   code:
   - src/kelp/tracking.py:run_tracking
@@ -125,7 +127,7 @@ dev_tracking:
   - src/kelp/readers/__init__.py:_prepare_dataset
   - src/kelp/tracking.py:_check_linear_element_mesh
   doc: docs/dev/tracking.md
-  verified_at: d2df57d
+  verified_at: 8165ac2
 dev_visualization:
   code:
   - src/kelp/visualization/core.py:TrajectoryDataset
@@ -151,7 +153,7 @@ diffusion:
   - src/kelp/numerics/diffusion.py:DiffusionStepArgs
   - src/kelp/tracking.py:_resolve_composition
   doc: docs/diffusion.md
-  verified_at: d2df57d
+  verified_at: 1282e33
 doc-sync:
   code:
   - docs/check_doc_sync.py
@@ -164,7 +166,7 @@ field_sampling:
   - src/kelp/tracking.py:_sample_record_fields
   - src/kelp/readers/fesom2.py:read_scalar_fields
   doc: docs/field_sampling.md
-  verified_at: d2df57d
+  verified_at: 1282e33
 healpix:
   code:
   - src/kelp/readers/healpix.py:build_healpix_dual_mesh
@@ -174,8 +176,9 @@ healpix:
   - utils/extract_healpix_region.py:extract_region
   - src/kelp/numerics/integrators.py:_bary_fused_anchor_exact
   - src/kelp/core/mesh.py:grid_hash_dense_for_elements
+  - src/kelp/readers/__init__.py:apply_time_options
   doc: docs/healpix.md
-  verified_at: d2df57d
+  verified_at: 8165ac2
 interpolation:
   code:
   - src/kelp/numerics/interpolate.py:_interp_leastsq_core
@@ -205,8 +208,10 @@ io_and_time:
   - src/kelp/tracking.py:_release_arrays
   - src/kelp/core/release.py:mask_inactive_velocity
   - src/kelp/readers/fesom14/_timeaxis.py:resolve_axis
+  - src/kelp/readers/__init__.py:apply_time_options
+  - src/kelp/readers/fesom14/_timeaxis.py:resolve_stamps
   doc: docs/io_and_time.md
-  verified_at: d2df57d
+  verified_at: 8165ac2
 localization:
   code:
   - src/kelp/core/mesh.py:Mesh
@@ -230,20 +235,20 @@ performance:
   - src/kelp/core/io.py:LazyLerpField
   - src/kelp/writers.py:TrajectoryWriter
   doc: docs/performance.md
-  verified_at: d2df57d
+  verified_at: 1282e33
 running:
   code:
   - src/kelp/tracking.py:run_tracking
   - src/kelp/core/config.py:TimeConfig
   - src/kelp/cli/main.py:main
   doc: docs/running.md
-  verified_at: d2df57d
+  verified_at: 1282e33
 shared_fields:
   code:
   - src/kelp/core/shared_fields.py:SharedFieldCache
   - src/kelp/tracking.py:_shared_fields_tag
   doc: docs/configuration.md
-  verified_at: d2df57d
+  verified_at: 1282e33
 time_integration:
   code:
   - src/kelp/numerics/integrators.py:euler_step

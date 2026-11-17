@@ -156,7 +156,8 @@ Authoritative description: `docs/io_and_time.md` §5–§6. Which format: `ds.at
 - `status`: **ALIVE = 1, BEACHED = 2, OUTSIDE = 3, NOT_RELEASED = 4.** Filter to
   `status == ALIVE` for presence maps / live paths. Positions of not-yet-released particles are
   NaN; dead and beached particles keep their frozen last position.
-- `time`: seconds since the forcing's first RAW record, at the END of the recorded step, in BOTH
+- `time`: seconds since the forcing's first RAW record (with `mesh.type: fesom14` or the stamp options
+  `data.time_stamp` / `time_window`: its first RESOLVED instant), at the END of the recorded step, in BOTH
   time modes; `units = "seconds since <that record>"` + `calendar`. xarray decodes it to dates by
   default (cftime objects for `noleap`/`360_day`; `ds.sel(time="2005-03-01")` works); for
   arithmetic in seconds open with `decode_times=False` (`units` then sits in `.attrs`;

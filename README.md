@@ -308,8 +308,8 @@ annotated template: [`config.yaml`](config.yaml).
 | `inicloud` | `""` | **required**: seeds, one `lon lat [depth] [release_sec]` per line |
 | `particle_offset` | `null` | global index of the file's first particle in a sharded release (default: the shard file's header, else 0) |
 | `output_path` | `""` | `.nc` → NetCDF, `.zarr` → Zarr; empty = in-memory only |
-| `time_averaging` | `null` (warns) | `mean` (time-averaged output; timestamps shifted to window midpoints) / `instant`; FESOM 1.4: leave unset (the reader resolves each record's time; refused) |
-| `time_stamp`, `time_window`, `time_offset` | `null` | FESOM 1.4 only, for files that do not say what their stamps mean: `start`/`centre`/`end`/`instant` + `calendar_month`/`calendar_year`/`calendar_day`/`"<n> <s\|min\|h\|d>"`; a fixed `"<±n> <unit>"` shift of the raw stamps |
+| `time_averaging` | `null` (warns) | `mean` (time-averaged output stamped at the window end; timestamps shifted to window midpoints) / `instant`; leave unset when `time_stamp`/`time_window` are set, and for FESOM 1.4 (the reader resolves each record's time; refused) |
+| `time_stamp`, `time_window`, `time_offset` | `null` | where each stamp sits in its averaging window, for every mesh type: `start`/`centre`/`end`/`instant` + `calendar_month`/`calendar_year`/`calendar_day`/`"<n> <s\|min\|h\|d>"`, and a fixed `"<±n> <unit>"` shift of the raw stamps; each record then sits at its window centre (e.g. means stamped at the window start: `start` + `calendar_day`). FESOM 1.4 needs them only for files that do not say what their stamps mean |
 
 ### `time`
 
@@ -427,6 +427,13 @@ than guesses whenever those limits are exceeded. See the `nemo.py` notes in
 
 KELP is released under the BSD 3-Clause licence (`LICENSE`).
 
-If KELP contributes to work you publish, please cite it. `CITATION.cff` carries
-the machine-readable record that GitHub's "Cite this repository" button reads,
-and `CHANGELOG.md` records what changed in each release.
+If you use KELP in work you publish, please cite the article that describes it:
+
+> Kuznetsov, I., Androsov, A., Pantiukhin, D., Wekerle, C., Danilov, S., Jung, T.,
+> and Koldunov, N.: KELP v1.0: an agent-ready Lagrangian particle tracker for
+> unstructured meshes and HEALPix grids, arXiv [preprint], arXiv:2611.18528,
+> https://doi.org/10.48550/arXiv.2611.18528, 2026.
+
+`CITATION.cff` carries the same reference for GitHub's "Cite this repository"
+button, next to the record of the software release itself, and `CHANGELOG.md`
+records what changed in each release.

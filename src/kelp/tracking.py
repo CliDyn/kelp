@@ -36,10 +36,10 @@ from .core.release import (activate_released, mask_dormant_for_record,
 from .numerics.vertical_uv import (check_depth_linear_record,
                                    refuse_elem_cavities)
 from .readers import (get_reader, extract_time_info, time_axis_epoch,
-                      NO_EPOCH_NOTE, RESOLVED_BY_READER, _READER_RESOLVES_TIME,
-                      _apply_max_levels, _describe_record_times,
-                      _open_run_dataset, _prepare_dataset,
-                      _time_option_kwargs)
+                      NO_EPOCH_NOTE, _apply_max_levels,
+                      _describe_record_times, _open_run_dataset,
+                      _prepare_dataset, _record_time_mode,
+                      _time_metadata, _time_option_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -1656,7 +1656,13 @@ def run_single_realization(
     ----------
     mesh : Mesh
     ds : xr.Dataset (or similar)
-        Open velocity dataset.
+        Open velocity dataset.  One opened with ``reader.open_dataset``
+        carries the raw time stamps: with the stamp options
+        (``data.time_stamp`` / ``data.time_window``) of a reader that does
+        not resolve its record times, call
+        ``readers.apply_time_options(ds, config.data, config.mesh.type)``
+        once before (a second call shifts again); ``run_tracking`` and
+        ``readers._open_run_dataset`` do it.
     reader : reader class
         Must have ``read_velocities(ds, timestep, mesh, mode)``.
     init_state : ParticleState
@@ -2978,9 +2984,11 @@ def run_tracking(
         )
 
     reader = get_reader(config.mesh.type)
-    # the stamp options (and the time_averaging rule of a reader that
-    # resolves its record times), refused before anything is read;
-    # _open_run_dataset passes them on
+    # the stamp options and their rules (data.time_averaging next to them,
+    # the cycle refusal of calendar month and year windows), refused before
+    # anything is read; _open_run_dataset passes them to a reader that
+    # resolves its record times and applies them to the opened dataset of
+    # any other
     _time_option_kwargs(config)
 
     # Load mesh
@@ -3058,18 +3066,23 @@ def run_tracking(
     file_times, file_dt_detected = extract_time_info(ds)
 
     # -- time_averaging: warn if not set, apply midpoint shift --
-    # A reader that resolves its record times (fesom14) already placed each
-    # record at the centre of its window: no warning, no shift (a set
+    # A reader that resolves its record times (fesom14), or the stamp
+    # options applied at the open (any other reader), already placed each
+    # record at the time it represents: no warning, no shift (a set
     # data.time_averaging was refused by _time_option_kwargs).
     time_avg = config.data.time_averaging
-    if config.mesh.type in _READER_RESOLVES_TIME:
-        time_avg = RESOLVED_BY_READER
-        record_times = _describe_record_times(
-            ds, getattr(config.data, "time_offset", None))
+    resolved = _record_time_mode(config)
+    if resolved is not None:
+        time_avg = resolved
+        record_times = _describe_record_times(ds, config.data)
         if record_times is not None:
             print(f"  Record times:      {record_times}")
     elif time_avg is None:
         mesh_type = config.mesh.type.lower()
+        # the readers whose default is 'mean' point to the stamp options
+        stamp_hint = (" If the stamps are not the END of the averaging "
+                      "window, set data.time_stamp and data.time_window "
+                      "instead.")
         if "fesom2" in mesh_type:
             suggestion = "mean"
             hint = "FESOM2 typically writes time-averaged (monthly/daily mean) output"
@@ -3080,10 +3093,12 @@ def run_tracking(
         else:
             suggestion = "instant"
             hint = "FESOM-C typically writes instantaneous snapshots"
+            stamp_hint = ""
         warnings.warn(
             f"data.time_averaging is not set. {hint} — "
             f"assuming '{suggestion}'. Please set data.time_averaging "
-            f"explicitly to 'mean' or 'instant' in your config.",
+            f"explicitly to 'mean' or 'instant' in your config."
+            f"{stamp_hint}",
             UserWarning,
             stacklevel=2,
         )
@@ -3602,7 +3617,9 @@ def run_tracking(
                 "temporal_interp": int(bool(temporal_interp)),
                 "temporal_reconstruction": str(
                     config.numerics.temporal_reconstruction),
-                "time_averaging": str(time_avg),
+                # time_averaging, plus each stamp option that is set (a
+                # run without them writes what it wrote before)
+                **_time_metadata(config, str(time_avg)),
                 "kelp_version": _kelp_version(),
             }
             if getattr(config.mode, "Fdrift3D", False):
@@ -3839,6 +3856,12 @@ def track_particles(
     ----------
     mesh : Mesh
     ds : xr.Dataset
+        Open velocity dataset.  One opened with ``reader.open_dataset``
+        carries the raw time stamps: with the stamp options
+        (``data.time_stamp`` / ``data.time_window``) of a reader that does
+        not resolve its record times, call
+        ``readers.apply_time_options(ds, config.data, config.mesh.type)``
+        once before (a second call shifts again).
     reader : reader class
     lon0, lat0 : np.ndarray
         Initial particle positions.

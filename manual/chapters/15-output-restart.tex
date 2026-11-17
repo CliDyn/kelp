@@ -61,7 +61,8 @@ of live particles, sets the size, because the frozen particles occupy rows in th
 with several realizations writes one file per realization, with the suffix \code{\_r}$N$.
 
 \paragraph{The record time.} The time is stored in seconds since the first record of the forcing time axis
-as it appears in the file, and the attributes of the time variable name that record's date as the epoch and
+as it appears in the file --- with the FESOM~1.4 reader or the stamp keys, the first resolved record time ---
+and the attributes of the time variable name that record's date as the epoch and
 the forcing's calendar (for example \code{noleap} or \code{360\_day}), so that a reader such as xarray
 decodes the values to dates. The record written after global step $g$ holds
 \begin{equation}\label{eq:out-time}
@@ -74,7 +75,8 @@ $t_{\text{first}}$ the time at which the call's first step starts (the requested
 start snapshot); in the discrete mode $\tau_{\text{run}}$ is the time of the snapshot $g_{\text{s}}$ records before
 the call's start snapshot, the one the run started from. Under time-averaged forcing these
 are the shifted midpoints (\cref{sec:input-timeavg}), so the dates are window centres, while the epoch stays
-the first unshifted record. Because $\tau_g$ depends only on the global step and the start of the whole run,
+the first unshifted record. With the FESOM~1.4 reader or the stamp keys the forcing axis already holds the
+resolved instants, and the epoch is the first of them (the centre of its window for a mean). Because $\tau_g$ depends only on the global step and the start of the whole run,
 the segments of a resumed chain carry exactly the labels of an uninterrupted run. In the discrete mode the
 label advances by $\dt$ per step; the time-step check of \cref{sec:temp-modes} admits a small difference
 between $\dt$ and the record spacing, by which the label may drift from the stored stamps. When the forcing is
@@ -144,7 +146,11 @@ an earlier run. Two of them concern the additions of \cref{sec:vert-uvdepth,sec:
 the default layer mode has no such attribute, so its output is unchanged. The attribute is the proof that
 the option was on: a misspelled key is ignored silently, like every unknown key, and leaves no attribute
 behind. A FESOM~1.4 run, whose velocities are always depth-linear and which refuses the option, has no
-\code{uv\_vertical} attribute; its time averaging reads \code{"resolved\_by\_reader"}.
+\code{uv\_vertical} attribute; its time averaging reads \code{"resolved\_by\_reader"}. A run with the
+stamp options writes each of \conf{data.time\_stamp}, \conf{data.time\_window} and
+\conf{data.time\_offset} that is set as a string attribute without the \code{data.} prefix
+(\code{time\_stamp}, \code{time\_window}, \code{time\_offset}), and for a reader other than
+FESOM~1.4 its time averaging reads \code{"resolved\_from\_options"}.
 
 \section{Checkpoints and restart}\label{sec:out-restart}
 
@@ -164,8 +170,11 @@ Resuming is done by the calling program rather than by a configuration key. It l
 (\fn{load\_restart}), checks its frame against the mesh, and continues with the next step index, the saved
 counts of re-wetted steps and the forcing position; in the interpolated mode it also supplies the simulation
 time, which the checkpoint does not store. For the record times of the continuation to equal those of the
-uninterrupted run (\cref{eq:out-time}), the program passes the same forcing times as the first call ---
-under time-averaged forcing the shifted midpoints --- and, when a cycled forcing is read in the discrete
+uninterrupted run (\cref{eq:out-time}), the program opens the forcing the same way --- with the stamp keys
+through \fn{\_open\_run\_dataset} or \fn{apply\_time\_options}, so that the dataset itself holds the
+resolved times and the output keeps its epoch --- and passes the same forcing times as the first call ---
+under time-averaged forcing the shifted midpoints, with the FESOM~1.4 reader or the stamp keys the resolved
+times, unshifted --- and, when a cycled forcing is read in the discrete
 mode, the start index counted on without wrapping (in the discrete mode the forcing index stored in the
 checkpoint is that unwrapped index, so the index after it continues the run).
 The release positions need no step of their own: they come back with the particle state. A program that

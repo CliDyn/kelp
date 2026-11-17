@@ -72,30 +72,26 @@ import glob, inspect, os, re, sys, time, warnings
 import numpy as np
 from kelp.core.config import load_config
 from kelp.core.mesh import set_grid_hash_cell, set_exact_nearest, apply_grid_hash_cell_rule
-from kelp.readers import get_reader, extract_time_info, _time_option_kwargs, _dry_mask_kwargs, _prepare_dataset, _READER_RESOLVES_TIME
-from kelp.tracking import run_single_realization, _apply_max_levels, _shift_to_midpoints, _validate_restart_frame, _validate_restart_uv_vertical, _shared_fields_tag, _resolve_particle_offset, _resolve_start_date
+from kelp.readers import get_reader, extract_time_info, _time_option_kwargs, _open_run_dataset, _prepare_dataset, _record_time_mode, _time_metadata
+from kelp.tracking import run_single_realization, _shift_to_midpoints, _validate_restart_frame, _validate_restart_uv_vertical, _shared_fields_tag, _resolve_particle_offset, _resolve_start_date
 from kelp.writers import TrajectoryWriter, load_restart, write_restart_file
 cfg = load_config(sys.argv[1]); SEG, RDIR, EVERY, BUDGET = sys.argv[2], sys.argv[3], int(sys.argv[4]), float(sys.argv[5]); T0 = time.time()
 os.makedirs(SEG, exist_ok=True); os.makedirs(RDIR, exist_ok=True)   # a missing restart dir fails AFTER the first chunk, and the next leg re-runs it
 reader = get_reader(cfg.mesh.type)
-time_kw = _time_option_kwargs(cfg)   # the fesom14 stamp options; refuses data.time_averaging there (the reader resolves the record times)
+_time_option_kwargs(cfg)   # the stamp options, checked before anything is read
 poff = _resolve_particle_offset(cfg)   # the shard's place in the release: keys its random draws (header or data.particle_offset)
 mesh = reader.load_mesh(cfg.mesh, mode_cfg=cfg.mode) if "mode_cfg" in inspect.signature(reader.load_mesh).parameters else reader.load_mesh(cfg.mesh)   # healpix, fesom14
 # --- what run_tracking does after load_mesh; the CLI would do it for you, a driver must not skip it ---
 set_exact_nearest(mesh, bool(cfg.mesh.exact_nearest))                 # before the cell rule, whose mode depends on it
 if cfg.mesh.grid_hash_cell_size is not None: set_grid_hash_cell(mesh, cfg.mesh.grid_hash_cell_size); CELL_RULE = "explicit"
 else: CELL_RULE = apply_grid_hash_cell_rule(mesh, cfg.mesh.grid_hash_cell_rule)["rule"]   # the automatic cell, as run_tracking chooses it
-_apply_max_levels(mesh, cfg.mode)   # the level cut as run_tracking makes it (keeps the full table in metadata)
-d = cfg.numerics.diffusion; az_family = cfg.mesh.type == "fesom2" and d.enabled and d.az_enabled and d.var_az
-ds = reader.open_dataset(cfg.data.ncinput, v_path=cfg.data.ncinput_v or None, w_path=cfg.data.ncinput_w or None, mode_cfg=cfg.mode,
-                         **({"eta_path": cfg.data.ncinput_eta} if getattr(cfg.data, "ncinput_eta", "") else {}),
-                         **({"diffusion": d} if az_family else {}),   # multi-year FESOM2: assembles var_az too
-                         **time_kw, **_dry_mask_kwargs(cfg))          # fesom14: stamp options + the beaching dry mask (empty elsewhere)
+d = cfg.numerics.diffusion
+ds = _open_run_dataset(reader, mesh, cfg)   # the level cut and every open_dataset keyword of run_tracking; data.time_stamp / time_window are applied here
 _prepare_dataset(reader, mesh, ds)   # the reader's dataset check, before the writer exists (run_single_realization repeats it)
 user_sv = list(cfg.mode.sample_vars or []); b = cfg.numerics.beaching     # sampled variables + the internal dry mask
 read_sv = user_sv + ([b.dry_mask_var] if b.enabled and b.dry_mask_var and b.dry_mask_var not in user_sv else [])
 n_time_total = ds.sizes["time"]; ft, file_dt = extract_time_info(ds)
-ft = _shift_to_midpoints(ft) if cfg.mesh.type not in _READER_RESOLVES_TIME and cfg.data.time_averaging == "mean" else ft   # fesom14 records already sit at their window centres
+ft = _shift_to_midpoints(ft) if _record_time_mode(cfg) is None and cfg.data.time_averaging == "mean" else ft   # records already at their window centres when the reader or the stamp options resolved them
 shared = None
 if cfg.numerics.shared_fields_dir:                      # the node-local cache, exactly as run_tracking builds it
     from kelp.core.shared_fields import SharedFieldCache
@@ -132,7 +128,7 @@ while gstep < cfg.time.n_steps and time.time() - T0 < BUDGET:   # BUDGET = wall 
     chunk = min(EVERY, cfg.time.n_steps - gstep); seg = os.path.join(SEG, f"part_{gstep:08d}.zarr")
     fidx, sim_t = resume_point(gstep)
     meta = {"integrator": cfg.numerics.integrator, "dt": dt, "mode_3d": int(bool(cfg.mode.Fdrift3D)),
-            "time_averaging": cfg.data.time_averaging, "exact_nearest": int(bool(cfg.mesh.exact_nearest)),
+            **_time_metadata(cfg, cfg.data.time_averaging), "exact_nearest": int(bool(cfg.mesh.exact_nearest)),
             "grid_hash_cell": float(mesh._gh_cell_size), "grid_hash_cell_rule": CELL_RULE,
             **({"n_pulses": int(cfg.time.n_pulses)} if cfg.time.n_pulses > 1 else {}),   # lets the merge refuse pulsed shards
             **({"diffusion_enabled": 1, "diffusion_seed": int(d.seed)} if d.enabled else {}),   # lets the merge check seeds
@@ -165,7 +161,12 @@ The fresh-start branch is the seed loader + pulse replication + `_maybe_rotate_s
 `run_tracking` calls them — never re-implement the seed rotation by hand. Output format 2 needs no
 line here: the release positions ride in the state through `load_restart` → `write_restart_file`,
 so every segment writes the same `release_*`, and the `time` labels equal the uncut run's because
-every leg passes the same shifted `ft` and the global step. The per-leg `chain.sbatch`
+every leg passes the same `ft` (midpoint-shifted under `time_averaging: mean`, resolved at the open
+with `data.time_stamp` / `time_window` or `fesom14`) and the global step. A segment of a run with the
+stamp options writes the same time attributes as `run_tracking` (`_time_metadata`); one without them
+writes `time_averaging` as before. A leg driver copied from the 1.1.0 template opens the data with
+`reader.open_dataset` itself and never applies the stamp options (1.1.0 refused them outside `fesom14`;
+now they are accepted), so it would track on the raw stamps: copy this driver before setting them. The per-leg `chain.sbatch`
 calls `python -u leg_driver.py configs/shard_$K.yaml segments/p$K restarts/p$K $RESTART_EVERY $LEG_BUDGET_S`
 inside the `srun` block above, in place of `python -u -m kelp.cli.main run …`; `LEG_BUDGET_S`
 = the job's `--time` minus 20 minutes, in seconds. The resume point is computed from the GLOBAL
@@ -175,7 +176,8 @@ step: in discrete mode the record is `start_idx + gstep` (one record per step �
 `temporal_interp` the bracket of `sim_time = t_start + gstep·dt` by `searchsorted` (`dt < file_dt`
 has no one-record-per-step index). A stronger reader found the first version of this block lacked the grid-hash cell,
 the exact-anchor guard, `max_levels`, the shared cache and the budget stop — every one a
-silent divergence from the CLI run; keep those lines. What `run_tracking` does and this
+silent divergence from the CLI run; keep those lines (the `max_levels` cut now runs inside
+`_open_run_dataset`, with the stamp options). What `run_tracking` does and this
 driver does NOT: part of the writer metadata (`diffusion_*`, `beaching_*`, sampled-variable
 units; the driver writes the rest, and `run_single_realization` stamps `particle_offset`,
 `random_draws`, `kelp_version` and the time treatment itself) and the startup fail-fasts (`use_eta` without ssh, a missing sample variable) — run one
@@ -249,6 +251,9 @@ that decide the campaign live HERE, not in a comment of the config check):**
 import os, sys, yaml, numpy as np
 from kelp.readers import get_reader
 # START_IDX: the RAW record of START_DATE on the forcing axis, resolved once here
+# (with data.time_stamp / time_window in place of time_averaging, look START_DATE up on the axis the run sees:
+#  readers.apply_time_options(ds, DataConfig(time_stamp=..., time_window=...), "healpix"), the DataConfig from
+#  kelp.core.config — never the plain dict of the data block below: it is not read and the raw stamps stay)
 _ax = get_reader("healpix").open_dataset(STORE)["time"].values
 START_IDX = int(np.flatnonzero(_ax == np.datetime64(START_DATE))[0])   # IndexError = START_DATE is not a record
 NODE_TMPFS = sys.argv[1] if len(sys.argv) > 1 else ""       # the node-local in-memory root of the target partition, same path on every node
@@ -266,7 +271,7 @@ for k in range(N_SHARDS):
                "grid_hash_cell_size": CELL,                      # None = the automatic cell; a float only when check_grid_hash_cell.py chose one
                **({"levels": LEVELS} if IS_HEALPIX_3D else {})}, # aux3d path or inline list; extracts embed it
       "data": {"ncinput": STORE, "ncinput_eta": ETA_STORE, "inicloud": f"{SEEDS}/seeds_shard{k:03d}.dat",   # split_seeds.py names
-               "output_path": f"{OUT}/shard_{k:03d}.zarr", "time_averaging": "mean"},
+               "output_path": f"{OUT}/shard_{k:03d}.zarr", "time_averaging": "mean"},   # stamps at the window END; a store stamped at the window START: replace by "time_stamp": "start", "time_window": "calendar_day" (docs/healpix.md §2)
       "time": {"start_date": START_DATE, "n_steps": N_STEPS, "on_exhausted": "stop"},   # the leg driver and `kelp run` resolve it the same way
     }
     yaml.safe_dump(cfg, open(f"configs/shard_{k:03d}.yaml", "w"), sort_keys=False)
