@@ -13,9 +13,15 @@ Fixture: the FESOM 1.4 grid of ``tests/test_fesom14_tracking.py`` (level-wise
 files with cell polygons, the mesh recovered from them); monthly means with
 time bounds at the month edges and stamps at the window centres, calendar
 ``noleap``; ``uo = 2e-4 * (1 + k % n_months)`` m/s for record ``k``, uniform
-in space, ``vo = wo = 0``.  All data is synthetic, written in ``tmp_path``.
-The names of the exact period are imported inside the tests, so the file
-also runs on code that lacks them.
+in space, ``vo = wo = 0``.  The runs of a reader other than FESOM 1.4 use the
+FESOM2 fixture of ``tests/test_record_time_options_runs.py`` (17 x 17 nodes,
+six levels, node u, v constant in depth and varying in space and from record
+to record) with twelve monthly means given by ``data.time_stamp`` and
+``data.time_window: calendar_month``; snapshots on calendar windows stay
+refused, for every reader; and a ``cycle`` run on irregularly spaced records
+without known windows warns that its period is the legacy one.  All data is
+synthetic, written in ``tmp_path``.  The names of the exact period are
+imported inside the tests, so the file also runs on code that lacks them.
 """
 from __future__ import annotations
 
@@ -25,6 +31,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import xarray as xr
+import yaml
 
 pytest.importorskip("netCDF4")
 pytest.importorskip("cftime")
@@ -36,9 +43,18 @@ from kelp.core.particles import make_state  # noqa: E402
 from kelp.readers.fesom14 import Fesom14Reader  # noqa: E402
 from kelp.writers import load_trajectories  # noqa: E402
 
+from kelp.cli.main import main as cli_main  # noqa: E402
+
+from tests.test_depth_linear_analytic import (LEVELS_C, NC,  # noqa: E402
+                                              _col_beds, _const_field,
+                                              _elem_centres, _quadrant_beds,
+                                              _write_data, _write_mesh)
 from tests.test_fesom14_tracking import (DAY, LAT, LAT_B, LEVELS, LON,  # noqa: E402
                                          LON_B, SEEDS, WET, _cfg, _quiet,
                                          _run, _write_nc)
+from tests.test_record_time_options_runs import (_case, _restamp,  # noqa: E402
+                                                 _same_run, _world)
+from tests.test_uv_vertical_elements_run import _load_mesh  # noqa: E402
 
 #: month edges of one noleap year, days since 2001-01-01
 EDGES = np.array([0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365],
@@ -218,3 +234,166 @@ def test_discrete_cycle_on_unequal_windows_is_refused(tmp_path, n_months,
         assert str(info.value) == _m_d(90 * DAY, 31 * DAY)
     finally:
         ds.close()
+
+
+# ---------------------------------------------------------------------------
+# a reader other than FESOM 1.4: monthly means given by the stamp options
+# ---------------------------------------------------------------------------
+
+#: the month edges of one noleap year in days (the FESOM2 runs count them
+#: from 1958-01-01)
+MONTH_EDGES = EDGES
+
+
+def _year_world(tmp_path: Path, copies: int = 1):
+    """The FESOM2 world of ``_world`` with twelve records of a slower field
+    (at most ~7e-4 m/s, a quarter of a degree in 450 d), written ``copies``
+    times along time.  The mesh file is written once per ``tmp_path``."""
+    elem_bed = _quadrant_beds(*_elem_centres(NC, NC))
+    mesh_path = tmp_path / "fesom.mesh.diag.nc"
+    if not mesh_path.exists():
+        _write_mesh(mesh_path, NC, NC, LEVELS_C, elem_bed)
+    mesh = _load_mesh(mesh_path)
+    beds = _col_beds(mesh, "node", elem_bed)
+    u, v = (0.01 * a for a in _const_field(mesh, "node", beds, 12))
+    if copies == 2:
+        u, v = np.concatenate([u, u]), np.concatenate([v, v])
+    return mesh_path, mesh, u, v
+
+
+def _month_stamps(stamp: str, copies: int = 1) -> np.ndarray:
+    """Seconds since 1958-01-01 (``noleap``) of the twelve months stamped at
+    their ``start``, ``centre`` or ``end``; each further copy 365 d later."""
+    lo, hi = MONTH_EDGES[:-1], MONTH_EDGES[1:]
+    one = {"start": lo, "centre": (lo + hi) / 2.0, "end": hi}[stamp]
+    return np.concatenate([one + 365.0 * c for c in range(copies)]) * DAY
+
+
+def _last_interval(caught):
+    return [w for w in caught if "last interval" in str(w.message)]
+
+
+def _m_w(dmin: float, dmax: float, period: float) -> str:
+    return (f"time.on_exhausted: cycle on irregularly spaced records "
+            f"({dmin / DAY:g}..{dmax / DAY:g} d between records): the forcing "
+            "period is taken as the span of the records plus the last "
+            f"interval ({period / DAY:g} d), which is exact only for equally "
+            "spaced records. For means over calendar months or years set "
+            "data.time_stamp and data.time_window, so that the period is the "
+            "sum of the averaging windows (the FESOM 1.4 reader resolves its "
+            "windows from the files)")
+
+
+def test_monthly_means_cycle_for_each_stamp_convention(tmp_path):
+    """Twelve monthly means stamped at the start, the centre or the end of
+    their month, each read with the matching options and ``cycle``: the same
+    run bit for bit, 450 daily steps through the seam December -> January,
+    equal to the doubled reference; the period is 365 d (the legacy rule:
+    364.5 d) and no legacy-period warning is given."""
+    world = _year_world(tmp_path)
+    twice = _year_world(tmp_path, copies=2)
+    num = {"dt": DAY, "n_steps": 450}
+    out = {}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for stamp in ("start", "centre", "end"):
+            cfg, _ = _case(tmp_path, world, f"m_{stamp}",
+                           _month_stamps(stamp), calendar="noleap", n_rec=12,
+                           time={"on_exhausted": "cycle"}, numerics=num,
+                           time_stamp=stamp, time_window="calendar_month")
+            out[stamp] = cfg.data.output_path
+    ref, _ = _case(tmp_path, twice, "m_ref", _month_stamps("centre", 2),
+                   calendar="noleap", n_rec=24, numerics=num,
+                   time_stamp="centre", time_window="calendar_month")
+    for stamp in ("start", "end"):
+        _same_run(out[stamp], out["centre"])
+    got = load_trajectories(out["centre"])
+    want = load_trajectories(ref.data.output_path)
+    _assert_doubled_reference(got, want)
+    assert np.array_equal(got["time"], want["time"])
+    assert np.ptp(got["lon"]) > 0.01                      # it moves
+    for stamp in out:
+        assert _period(out[stamp]) == 365 * DAY, stamp
+    assert not _last_interval(caught)
+
+
+def test_kelp_info_accepts_means_and_refuses_snapshots(tmp_path, capsys):
+    """``kelp info`` applies the run's cycle rule before the mesh is read:
+    monthly means (``start``) with ``cycle`` pass, snapshots (``instant``)
+    on calendar months are refused."""
+    mesh_path, mesh, u, v = _world(tmp_path)
+    data = _write_data(tmp_path / "data_info", mesh, "node", u, v)
+    _restamp(data, MONTH_EDGES[:6] * DAY, "noleap")
+    for stamp, rc_want in (("start", 0), ("instant", 1)):
+        cfg = {"mode": {"Fdrift2D": False, "Fdrift3D": True, "var_u": "u",
+                        "var_v": "v", "var_w": "w", "var_eta": "ssh"},
+               "numerics": {"uv_interp": "barycentric"},
+               "time": {"n_steps": 1, "on_exhausted": "cycle"},
+               "mesh": {"type": "fesom2", "meshpath": str(mesh_path)},
+               "data": {"ncinput": str(data), "time_stamp": stamp,
+                        "time_window": "calendar_month"}}
+        path = tmp_path / f"info_{stamp}.yaml"
+        path.write_text(yaml.safe_dump(cfg))
+        capsys.readouterr()
+        rc = cli_main(["info", str(path)])
+        cap = capsys.readouterr()
+        assert rc == rc_want, (stamp, cap.out, cap.err)
+        if stamp == "instant":
+            assert "data.time_stamp: instant" in cap.err, cap.err
+
+
+def test_irregular_legacy_axis_cycle_warns(tmp_path):
+    """A ``cycle`` run on irregularly spaced records without known windows
+    keeps the legacy period (span plus the last interval) and warns once,
+    pointing to ``data.time_stamp`` / ``data.time_window``: (i) twelve
+    monthly means stamped at the month ends under ``time_averaging: mean``
+    (period 363 d), (ii) five snapshots on 1 January 1959-1963 (1826 d).
+    No warning for (iii) six equally spaced daily records, (iv) case (i)
+    under ``stop``, (v) two records (one interval is always regular)."""
+    days = _world(tmp_path)
+    year = _year_world(tmp_path)          # reuses the mesh file of _world
+    cyc = {"on_exhausted": "cycle"}
+    num = {"dt": DAY, "n_steps": 4}
+
+    def _warned(name, world, seconds, **kw):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg, _ = _case(tmp_path, world, name, seconds, **kw)
+        return cfg, _last_interval(caught)
+
+    # (i) monthly END stamps shifted to midpoints: 28..31 d apart
+    cfg, got = _warned("i_end", year, MONTH_EDGES[1:] * DAY,
+                       calendar="noleap", n_rec=12, time=cyc, numerics=num,
+                       time_averaging="mean")
+    assert len(got) == 1, [str(w.message) for w in got]
+    assert issubclass(got[0].category, UserWarning)
+    msg = str(got[0].message)
+    for part in ("plus the last interval (363 d)", "data.time_stamp",
+                 "data.time_window"):
+        assert part in msg, (part, msg)
+    assert msg == _m_w(28 * DAY, 31 * DAY, 363 * DAY)
+    assert _period(cfg.data.output_path) == 363 * DAY
+
+    # (ii) yearly snapshots across the leap year 1960: 365..366 d apart
+    years = np.array([365.0, 730.0, 1096.0, 1461.0, 1826.0]) * DAY
+    cfg, got = _warned("ii_years", days, years, calendar="standard", n_rec=5,
+                       time=cyc, time_averaging="instant")
+    assert len(got) == 1, [str(w.message) for w in got]
+    assert "(1826 d)" in str(got[0].message), str(got[0].message)
+    assert str(got[0].message) == _m_w(365 * DAY, 366 * DAY, 1826 * DAY)
+
+    # (iii) six equally spaced daily records
+    _, got = _warned("iii_daily", days, np.arange(6.0) * DAY, n_rec=6,
+                     time=cyc, time_averaging="instant")
+    assert not got, [str(w.message) for w in got]
+
+    # (iv) case (i) under stop
+    _, got = _warned("iv_stop", year, MONTH_EDGES[1:] * DAY,
+                     calendar="noleap", n_rec=12, numerics=num,
+                     time_averaging="mean")
+    assert not got, [str(w.message) for w in got]
+
+    # (v) two records 31 d apart
+    _, got = _warned("v_two", days, np.array([0.0, 31.0]) * DAY, n_rec=2,
+                     time=cyc, time_averaging="instant")
+    assert not got, [str(w.message) for w in got]

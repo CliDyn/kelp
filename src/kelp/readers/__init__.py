@@ -441,7 +441,10 @@ RESOLVED_BY_READER = "resolved_by_reader"
 #: times were resolved from the stamp options (:func:`apply_time_options`)
 RESOLVED_FROM_OPTIONS = "resolved_from_options"
 
-#: windows of unequal length: the cycle period assumes equally spaced records
+#: windows of unequal length: means over them cycle with the sum of their
+#: windows (:func:`exact_cycle`); snapshots at that cadence carry no window,
+#: so the period after which they repeat is not known and ``cycle`` is
+#: refused for them (:func:`_check_cycle_window`)
 _UNEQUAL_WINDOWS = ("calendar_month", "calendar_year")
 
 #: what resolved the record times, by ``ds.attrs["fesom14_time_source"]``
@@ -459,9 +462,10 @@ def _time_option_kwargs(config) -> Dict[str, str]:
     Only a reader that resolves its record times takes them (``mesh.type:
     fesom14``); it also takes the place of ``data.time_averaging``.  For
     any other mesh type the options are validated here
-    (:func:`_check_time_options`, :func:`_check_cycle_window`) and no
-    keyword is returned: :func:`_open_run_dataset` applies them to the
-    opened dataset (:func:`apply_time_options`).
+    (:func:`_check_time_options`) and no keyword is returned:
+    :func:`_open_run_dataset` applies them to the opened dataset
+    (:func:`apply_time_options`).  The cycle rule of snapshots
+    (:func:`_check_cycle_window`) is checked for every mesh type.
 
     Parameters
     ----------
@@ -481,8 +485,9 @@ def _time_option_kwargs(config) -> Dict[str, str]:
         is set; the message points to the stamp options.  For any other: the
         rules of :func:`_check_time_options` (an invalid key,
         ``data.time_averaging`` next to a key, ``data.time_offset`` without
-        ``data.time_stamp`` and ``data.time_window``) and the refusal of
-        ``time.on_exhausted: cycle`` with a calendar month or year window
+        ``data.time_stamp`` and ``data.time_window``).  For every mesh type:
+        the refusal of ``time.on_exhausted: cycle`` for snapshots
+        (``data.time_stamp: instant``) with a calendar month or year window
         (:func:`_check_cycle_window`).
     """
     data = config.data
@@ -503,6 +508,7 @@ def _time_option_kwargs(config) -> Dict[str, str]:
             "centre | end | instant) and data.time_window (the averaging "
             "window or the snapshot cadence), and data.time_offset for "
             "stamps that sit early or late")
+    _check_cycle_window(config)
     return kw
 
 
@@ -640,13 +646,16 @@ def _check_time_options(data_cfg,
 
 
 def _check_cycle_window(config) -> None:
-    """Refuse ``time.on_exhausted: cycle`` with a calendar month or year
-    window for a reader that does not resolve its record times itself.
+    """Refuse ``time.on_exhausted: cycle`` for snapshots
+    (``data.time_stamp: instant``) with a calendar month or year window, for
+    every mesh type (the FESOM 1.4 reader included).
 
-    The cycle period (span between the first and last record plus the last
-    interval) is computed for equally spaced records; month and year windows
-    differ in length.  Fixed-duration and ``calendar_day`` windows cycle
-    exactly.
+    Means over calendar months or years cycle with the sum of their
+    averaging windows, which the places that resolve record times attach to
+    the dataset (:func:`exact_cycle`).  Snapshots carry no averaging window,
+    and calendar months and years differ in length, so the period after
+    which such records repeat is not known.  Fixed-duration and
+    ``calendar_day`` windows cycle exactly with the legacy rule.
 
     Parameters
     ----------
@@ -657,19 +666,21 @@ def _check_cycle_window(config) -> None:
     ValueError
         Naming ``time.on_exhausted: stop`` as the alternative.
     """
-    if config.mesh.type in _READER_RESOLVES_TIME:
-        return None
     if getattr(config.time, "on_exhausted", None) != "cycle":
         return None
     window = getattr(config.data, "time_window", None)
     if window is None or window.strip() not in _UNEQUAL_WINDOWS:
         return None
+    stamp = getattr(config.data, "time_stamp", None)
+    if stamp is None or stamp.strip() != "instant":
+        return None
     raise ValueError(
-        f"time.on_exhausted: cycle with data.time_window: {window.strip()} is "
-        "refused: calendar months and years differ in length, and the cycle "
-        "period is computed for equally spaced records. Set "
+        "time.on_exhausted: cycle with data.time_stamp: instant and "
+        f"data.time_window: {window.strip()} is refused: snapshots carry no "
+        "averaging window, and calendar months and years differ in length, "
+        "so the period after which such records repeat is not known. Set "
         "time.on_exhausted: stop, or use a fixed-duration or calendar_day "
-        "window")
+        "cadence")
 
 
 def _record_time_mode(config) -> Optional[str]:

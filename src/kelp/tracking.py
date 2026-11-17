@@ -3062,7 +3062,8 @@ def run_tracking(
 
     reader = get_reader(config.mesh.type)
     # the stamp options and their rules (data.time_averaging next to them,
-    # the cycle refusal of calendar month and year windows), refused before
+    # the cycle refusal of snapshots on calendar month and year windows,
+    # for every reader), refused before
     # anything is read; _open_run_dataset passes them to a reader that
     # resolves its record times and applies them to the opened dataset of
     # any other
@@ -3247,6 +3248,31 @@ def run_tracking(
     # (run_single_realization repeats the check for direct callers).
     _check_discrete_dt(dt, temporal_interp, file_dt, file_times,
                        n_records=n_time_total)
+
+    # A cycle on irregularly spaced records without known averaging windows
+    # keeps the legacy period (the span of the records plus the last
+    # interval), which is exact only for equally spaced records: warn once.
+    if (config.time.on_exhausted == "cycle" and temporal_interp
+            and cyc is None and file_times is not None
+            and n_time_total >= 3):
+        ft = np.asarray(file_times, dtype=np.float64)
+        d = np.diff(ft[:n_time_total])
+        if not np.allclose(d, d[0], rtol=1e-3, atol=0.0):
+            dmin, dmax = d.min(), d.max()
+            period = ft[n_time_total - 1] - ft[0] + d[-1]
+            warnings.warn(
+                "time.on_exhausted: cycle on irregularly spaced records "
+                f"({dmin / 86400.0:g}..{dmax / 86400.0:g} d between "
+                "records): the forcing period is taken as the span of the "
+                f"records plus the last interval ({period / 86400.0:g} d), "
+                "which is exact only for equally spaced records. For means "
+                "over calendar months or years set data.time_stamp and "
+                "data.time_window, so that the period is the sum of the "
+                "averaging windows (the FESOM 1.4 reader resolves its "
+                "windows from the files)",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def _fmt_dt(s):
         if s >= 86400 and s % 86400 == 0:

@@ -376,17 +376,27 @@ def test_offset_alone_refused(mesh_type):
     assert "an offset alone" not in str(e.value)
 
 
+def _assert_snapshot_refusal(msg, window):
+    for part in ("time.on_exhausted", "stop", window,
+                 "data.time_stamp: instant"):
+        assert part in msg, (part, msg)
+
+
 @pytest.mark.parametrize("mesh_type", OTHERS)
-def test_cycle_with_a_calendar_month_or_year_window_refused(mesh_type):
+def test_cycle_with_snapshots_on_calendar_windows_refused(mesh_type):
+    """Snapshots on calendar month or year windows carry no averaging
+    window, so the period after which they repeat is not known: refused.
+    Means over those windows are accepted (their period is the sum of the
+    windows)."""
     for window in ("calendar_month", "calendar_year"):
-        for stamp in ("start", "instant"):
-            with pytest.raises(ValueError) as e:
-                _check_cycle_window(_cfg(mesh_type, "cycle", time_stamp=stamp,
-                                         time_window=window))
-            msg = str(e.value)
-            assert "time.on_exhausted" in msg
-            assert "stop" in msg
-            assert window in msg
+        with pytest.raises(ValueError) as e:
+            _check_cycle_window(_cfg(mesh_type, "cycle", time_stamp="instant",
+                                     time_window=window))
+        _assert_snapshot_refusal(str(e.value), window)
+        for stamp in ("start", "centre", "end"):
+            assert _check_cycle_window(_cfg(mesh_type, "cycle",
+                                            time_stamp=stamp,
+                                            time_window=window)) is None
     # equal windows cycle exactly; no cycle, no key or fesom14: nothing
     for window in ("calendar_day", "1 d"):
         assert _check_cycle_window(_cfg(mesh_type, "cycle", time_stamp="start",
@@ -396,6 +406,31 @@ def test_cycle_with_a_calendar_month_or_year_window_refused(mesh_type):
     assert _check_cycle_window(_cfg(mesh_type, "cycle")) is None
     assert _check_cycle_window(_cfg("fesom14", "cycle", time_stamp="start",
                                     time_window="calendar_month")) is None
+
+
+def test_fesom14_cycle_with_snapshots_on_calendar_windows_refused():
+    """The FESOM 1.4 reader resolves its record times itself, but snapshots
+    (``data.time_stamp: instant``) on calendar month or year windows are
+    refused there too, by the check and before anything is read (its
+    ``open_dataset`` keywords); ``stop``, or a fixed-duration cadence,
+    passes and returns the set keys."""
+    from kelp.readers import _time_option_kwargs
+    for window in ("calendar_month", "calendar_year"):
+        cfg = _cfg("fesom14", "cycle", time_stamp="instant",
+                   time_window=window)
+        for call in (_check_cycle_window, _time_option_kwargs):
+            with pytest.raises(ValueError) as e:
+                call(cfg)
+            _assert_snapshot_refusal(str(e.value), window)
+        stop = _cfg("fesom14", "stop", time_stamp="instant",
+                    time_window=window)
+        assert _check_cycle_window(stop) is None
+        assert _time_option_kwargs(stop) == {"time_stamp": "instant",
+                                             "time_window": window}
+    fixed = _cfg("fesom14", "cycle", time_stamp="instant", time_window="1 d")
+    assert _check_cycle_window(fixed) is None
+    assert _time_option_kwargs(fixed) == {"time_stamp": "instant",
+                                          "time_window": "1 d"}
 
 
 def test_record_time_mode():
@@ -453,7 +488,7 @@ _RUN_START_CASES = {
         dict(time_offset="+6 h"),
         "stop", lambda mt: ["data.time_offset", repr(mt)]),
     "cycle_month": (
-        dict(time_stamp="start", time_window="calendar_month"),
+        dict(time_stamp="instant", time_window="calendar_month"),
         "cycle", lambda mt: ["time.on_exhausted"]),
 }
 
