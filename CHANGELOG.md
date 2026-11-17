@@ -65,7 +65,10 @@ the tracker was developed privately from 2026-06.
   through `readers._open_run_dataset`, as `run_tracking` does, and applies its
   own midpoint shift only when the record times were not resolved at the open.
   A segment of a run with the keys writes the same time attributes as
-  `run_tracking`; a segment without them writes what it wrote before.
+  `run_tracking`; a segment without them writes what it wrote before. A leg
+  driver copied from the 1.1.0 template opens the data itself and does not
+  apply the keys, which 1.1.0 refused outside FESOM 1.4 and which are now
+  accepted: copy the new driver before using the keys in a chain.
 
 ## [1.1.0] - 2026-11-16
 

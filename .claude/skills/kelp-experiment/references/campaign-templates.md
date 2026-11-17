@@ -164,7 +164,9 @@ so every segment writes the same `release_*`, and the `time` labels equal the un
 every leg passes the same `ft` (midpoint-shifted under `time_averaging: mean`, resolved at the open
 with `data.time_stamp` / `time_window` or `fesom14`) and the global step. A segment of a run with the
 stamp options writes the same time attributes as `run_tracking` (`_time_metadata`); one without them
-writes `time_averaging` as before. The per-leg `chain.sbatch`
+writes `time_averaging` as before. A leg driver copied from the 1.1.0 template opens the data with
+`reader.open_dataset` itself and never applies the stamp options (1.1.0 refused them outside `fesom14`;
+now they are accepted), so it would track on the raw stamps: copy this driver before setting them. The per-leg `chain.sbatch`
 calls `python -u leg_driver.py configs/shard_$K.yaml segments/p$K restarts/p$K $RESTART_EVERY $LEG_BUDGET_S`
 inside the `srun` block above, in place of `python -u -m kelp.cli.main run …`; `LEG_BUDGET_S`
 = the job's `--time` minus 20 minutes, in seconds. The resume point is computed from the GLOBAL
@@ -266,7 +268,7 @@ for k in range(N_SHARDS):
                "grid_hash_cell_size": CELL,                      # None = the automatic cell; a float only when check_grid_hash_cell.py chose one
                **({"levels": LEVELS} if IS_HEALPIX_3D else {})}, # aux3d path or inline list; extracts embed it
       "data": {"ncinput": STORE, "ncinput_eta": ETA_STORE, "inicloud": f"{SEEDS}/seeds_shard{k:03d}.dat",   # split_seeds.py names
-               "output_path": f"{OUT}/shard_{k:03d}.zarr", "time_averaging": "mean"},
+               "output_path": f"{OUT}/shard_{k:03d}.zarr", "time_averaging": "mean"},   # stamps at the window END; a store stamped at the window START: replace by "time_stamp": "start", "time_window": "calendar_day" (docs/healpix.md §2)
       "time": {"start_date": START_DATE, "n_steps": N_STEPS, "on_exhausted": "stop"},   # the leg driver and `kelp run` resolve it the same way
     }
     yaml.safe_dump(cfg, open(f"configs/shard_{k:03d}.yaml", "w"), sort_keys=False)
