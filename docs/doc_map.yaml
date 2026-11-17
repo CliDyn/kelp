@@ -29,7 +29,7 @@ configuration:
   - src/kelp/readers/__init__.py:apply_time_options
   - src/kelp/readers/nemo.py:NemoReader
   doc: docs/configuration.md
-  verified_at: 5b73a05
+  verified_at: acaf93f
 coordinate_frame:
   code:
   - src/kelp/core/rotation.py:euler_matrix
@@ -122,7 +122,7 @@ dev_readers:
   - src/kelp/readers/nemo.py:detect_cgrid_layout
   - src/kelp/readers/nemo.py:_read_raster
   doc: docs/dev/readers.md
-  verified_at: 5b73a05
+  verified_at: acaf93f
 dev_tracking:
   code:
   - src/kelp/tracking.py:run_tracking
@@ -247,7 +247,7 @@ nemo:
   - src/kelp/numerics/cgrid3d.py:cgrid3d_step
   - src/kelp/tracking.py:_refuse_cgrid_unsupported
   doc: docs/nemo.md
-  verified_at: 5b73a05
+  verified_at: acaf93f
 performance:
   code:
   - src/kelp/tracking.py:run_single_realization
