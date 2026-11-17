@@ -110,13 +110,13 @@ def _wrap_ratio(xyz) -> float:
     return float(np.median(wrap[ok] / step[ok])) if ok.any() else np.inf
 
 
-def detect_cgrid_layout(tlon, tlat, flon, flat, flags=None):
+def detect_cgrid_layout(tlon, tlat, flon=None, flat=None, flags=None):
     """Classify the raw raster for ``mesh.nemo_grid: cgrid`` -> ``(CgridLayout, notes)``.
 
     The coordinates decide what the raster contains: the E-W halo columns, the
     north halo row and the fold are identities between points (the copies NEMO's
     ``lbc_lnk`` writes), checked exactly for the T points and the F points of
-    the real rows (the halo-row F is not reliable in ORCA05), no thresholds.
+    the real rows (the halo-row F is not reliable in ORCA05; F optional), no thresholds.
     The nine candidates ``{halo columns, none} x {no fold, T / F fold, with /
     without the halo row}`` are tried; the passing one with the most copies wins
     (no-halo and halo F-pivot share a fold centre, so the count is the
@@ -130,18 +130,20 @@ def detect_cgrid_layout(tlon, tlat, flon, flat, flags=None):
     Also refuses zero-filled tiles (land-processor elimination) and a pole row.
     """
     flags = flags or {}
-    tlon, tlat, flon, flat = (np.asarray(a, dtype=np.float64) for a in (tlon, tlat, flon, flat))
-    ny, nx = tlon.shape
-    raw = (ny, nx)
-    if flon.shape != raw or flat.shape != raw or tlat.shape != raw:
+    tlon, tlat = (np.asarray(a, dtype=np.float64) for a in (tlon, tlat))
+    ny, nx = raw = tlon.shape
+    have_f = flon is not None
+    if have_f:
+        flon, flat = (np.asarray(a, dtype=np.float64) for a in (flon, flat))
+    if tlat.shape != raw or (have_f and (flon.shape != raw or flat.shape != raw)):
         raise ValueError("glamt/gphit and glamf/gphif must share one (ny, nx) shape")
-    if ((tlon == 0) & (tlat == 0)).sum() + ((flon == 0) & (flat == 0)).sum() > 1:
+    if ((tlon == 0) & (tlat == 0)).sum() + (((flon == 0) & (flat == 0)).sum() if have_f else 0) > 1:
         raise ValueError(
             "the mesh file has zero-filled tiles (land-processor elimination when "
             "it was assembled): regenerate it without land elimination or use domain_cfg.nc")
     if flags.get("Jperio", 0) == 1:
         raise NotImplementedError("mesh.nemo_grid: cgrid: N-S periodic grids (Jperio = 1) are not supported")
-    xt, xf = _unit_xyz(tlon, tlat), _unit_xyz(flon, flat)
+    xt, xf = _unit_xyz(tlon, tlat), (_unit_xyz(flon, flat) if have_f else None)
     if np.linalg.norm(xt[-1] - xt[-1, :1], axis=-1).max() <= SAME_POINT_CHORD:
         raise ValueError("the top row of T points collapses to one point (a pole row): "
                          "crop below it")
@@ -153,6 +155,8 @@ def detect_cgrid_layout(tlon, tlat, flon, flat, flags=None):
         """Number of copy pairs compared, or None when one does not coincide."""
         n = 0
         for kind, xyz in (("T", xt), ("F", xf)):
+            if xyz is None:                                # no F coordinates (CMIP output)
+                continue
             dst, src, _s, present = _copy_sets(lay, kind)
             nc, pc = lay.shape[1], int(lay.pad_cols)
             k = present[dst]
