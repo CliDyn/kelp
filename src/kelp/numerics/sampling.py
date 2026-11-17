@@ -919,6 +919,7 @@ def sample_field(
 
 __all__ = [
     "sample_field",
+    "sample_field_cgrid",
     "S_NEAREST",
     "S_LEASTSQ",
     "S_BARYCENTRIC",

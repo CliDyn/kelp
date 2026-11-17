@@ -37,8 +37,10 @@ import xarray as xr
 from ..core.io import VelocityField
 from ..core.mesh import Mesh
 from . import register, _detect_engine
-from .structured import (CgridLayout, _copy_sets, cgrid_to_canonical, cgrid_w_from_continuity, cgrid_thickness, SAME_POINT_CHORD, _unit_xyz, build_cgrid_mesh,
-                         build_structured_mesh, c_grid_to_t, field_to_nodes)
+from .structured import (
+    SAME_POINT_CHORD, CgridLayout, _copy_sets, _unit_xyz, build_cgrid_mesh,
+    build_structured_mesh, c_grid_to_t, cgrid_thickness, cgrid_to_canonical,
+    cgrid_w_from_continuity, field_to_nodes)
 
 
 # Variable-name aliases (NEMO output naming varies by config / XIOS field defs).
@@ -99,6 +101,7 @@ def _open_nemo(spec) -> xr.Dataset:
         if not fixed:
             raw.close()
             return xr.open_dataset(files[0], engine=eng)
+        ds.set_close(raw.close)               # closing the dataset closes the raw handle
         return ds
     with xr.open_dataset(files[0], engine=eng, decode_times=False) as first:
         tname = next((d for d in first.dims if d.lower().startswith("time")), None)

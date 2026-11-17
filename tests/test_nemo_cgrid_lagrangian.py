@@ -104,7 +104,9 @@ time: {{start_time_idx: 0, n_steps: {n_steps}, on_exhausted: cycle}}
 """)
     run_tracking(load_config(str(d / f"{name}.yaml")))
     import xarray as xr
-    return xr.open_zarr(d / f"{name}.zarr", consolidated=False, decode_times=False)
+    out = xr.open_zarr(d / f"{name}.zarr", consolidated=False, decode_times=False)
+    assert not {"w_interp", "w_positive", "w_contract"} & set(out.attrs)     # W is recomputed here
+    return out
 
 
 # --- 1. transport --------------------------------------------------------------

@@ -2122,7 +2122,7 @@ def run_single_realization(
         writer.set_global_attr("temporal_interp", int(bool(temporal_interp)))
         writer.set_global_attr("temporal_reconstruction", str(
             getattr(numerics, "temporal_reconstruction", "linear")))
-        if getattr(mode, "Fdrift3D", False):
+        if getattr(mode, "Fdrift3D", False) and numerics.uv_interp != "cgrid":   # cgrid: W is recomputed
             writer.set_global_attr("w_interp", str(
                 getattr(numerics, "w_interp", "leastsq")))
             writer.set_global_attr("w_positive", str(
@@ -3415,7 +3415,7 @@ def run_tracking(
             if attrs:
                 sample_var_attrs[name] = attrs
         print(f"  Sampling:          {', '.join(user_sample_vars)} "
-              f"(method={sample_interp})")
+              f"(method={'cell value' if config.numerics.uv_interp == 'cgrid' else sample_interp})")
 
     # -- uv_interp x uv_layout fail-fast (pre-writer; spec 2026-06-06) --
     # The probe is metadata-only (dims/sizes).  Readers without it keep
@@ -3674,7 +3674,7 @@ def run_tracking(
             if getattr(mesh, "_cgrid_layout", None) is not None:
                 meta["cgrid_layout"] = mesh._cgrid_layout.label()    # incl. the open edges
                 meta["nemo_partial_cells"] = mesh._cgrid_partial
-            if getattr(config.mode, "Fdrift3D", False):
+            if getattr(config.mode, "Fdrift3D", False) and config.numerics.uv_interp != "cgrid":
                 meta["w_interp"] = str(config.numerics.w_interp)
                 # the file-side W convention and the 2026-09-23 reader
                 # contract (readers convert producer W to the internal
@@ -3740,7 +3740,7 @@ def run_tracking(
                 _pw = getattr(config.numerics, _pn, None)
                 if _pw is not None:
                     meta[_pn] = [float(_pw[0]), float(_pw[1])]
-            if user_sample_vars:
+            if user_sample_vars and config.numerics.uv_interp != "cgrid":   # cgrid: cell values
                 meta["sample_interp"] = sample_interp
             if config.numerics.uv_interp != "leastsq":
                 meta["uv_interp"] = config.numerics.uv_interp
