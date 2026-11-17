@@ -99,7 +99,7 @@ dev_numerics:
   - src/kelp/numerics/interpolate.py:_interp_bary_elem_core_dl
   - src/kelp/numerics/vertical_uv.py:uv_wet
   doc: docs/dev/numerics.md
-  verified_at: d2df57d
+  verified_at: a71bd9c
 dev_readers:
   code:
   - src/kelp/readers/__init__.py:get_reader
@@ -115,7 +115,7 @@ dev_readers:
   - src/kelp/readers/fesom2.py:_elem_level_metadata
   - src/kelp/readers/__init__.py:apply_time_options
   doc: docs/dev/readers.md
-  verified_at: 8165ac2
+  verified_at: a71bd9c
 dev_tracking:
   code:
   - src/kelp/tracking.py:run_tracking
