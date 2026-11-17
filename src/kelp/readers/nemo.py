@@ -53,6 +53,26 @@ def _engine(path):
     return _detect_engine(str(path))
 
 
+_CALENDAR_ALIASES = {"360d": "360_day", "365d": "noleap", "366d": "all_leap"}
+
+
+def _open_nemo(path) -> xr.Dataset:
+    """``xr.open_dataset`` that accepts NEMO/XIOS calendar spellings
+    (``360d`` -> ``360_day``, ``365d`` -> ``noleap``, ``366d`` -> ``all_leap``),
+    which cftime rejects.  Files without such an alias open exactly as before."""
+    path = str(path)
+    raw = xr.open_dataset(path, engine=_engine(path), decode_times=False)
+    fix = {n: _CALENDAR_ALIASES[str(v.attrs["calendar"]).lower()]
+           for n, v in raw.variables.items()
+           if str(v.attrs.get("calendar", "")).lower() in _CALENDAR_ALIASES}
+    if not fix:
+        raw.close()
+        return xr.open_dataset(path, engine=_engine(path))
+    for n, cal in fix.items():
+        raw[n].attrs["calendar"] = cal
+    return xr.decode_cf(raw)
+
+
 def _first(ds, aliases: Sequence[str], cfg_name: Optional[str] = None):
     """Return the variable name to use: an explicit ``cfg_name`` override if set,
     else the first present alias (``None`` if no alias matches).
@@ -197,7 +217,7 @@ class NemoReader:
                 "mesh.rotation is not supported by the NEMO reader "
                 "(no vector-rotation path yet); use rotation: null.")
         path = str(mesh_cfg.meshpath)
-        ds = xr.open_dataset(path, engine=_engine(path))
+        ds = _open_nemo(path)
         try:
             if getattr(mesh_cfg, "nemo_grid", "tpoint") == "cgrid":
                 return NemoReader._load_cgrid_mesh(ds, path, mesh_cfg)
@@ -272,7 +292,7 @@ class NemoReader:
         y, x) — so the per-step reader and the prefetch ``isel(time=slice)`` work.
         """
         _refuse_unsupported_mode(mode_cfg, "open_dataset")
-        dsT = xr.open_dataset(str(path), engine=_engine(path))
+        dsT = _open_nemo(path)
         u_file = _sibling(path, "U")
         v_file = v_path or _sibling(path, "V")
         if u_file is None or v_file is None:
@@ -281,8 +301,8 @@ class NemoReader:
                 f"{path!r}. grid_U must be a name-sibling of grid_T (the "
                 "'grid_T' token swapped to 'grid_U'); grid_V likewise or via "
                 "data.ncinput_v. Point data.ncinput at the *_grid_T.nc file.")
-        dsU = xr.open_dataset(str(u_file), engine=_engine(u_file))
-        dsV = xr.open_dataset(str(v_file), engine=_engine(v_file))
+        dsU = _open_nemo(u_file)
+        dsV = _open_nemo(v_file)
 
         # The merge below takes the time axis from grid_T only and indexes every
         # variable by the same integer timestep, so grid_U / grid_V MUST share

@@ -279,3 +279,20 @@ def test_default_nemo_grid_is_tpoint():
         MeshConfig(type="nemo", nemo_grid="x")
     with pytest.raises(ValueError, match="nemo"):
         MeshConfig(type="fesom2", nemo_grid="cgrid")
+
+
+def test_nemo_360d_calendar_alias_decodes(tmp_path):
+    """XIOS writes calendar "360d"; cftime only knows "360_day"."""
+    import netCDF4
+    ny = nx = 5
+    (flon, flat), _ = _grid(ny, nx)
+    tmask = np.ones((ny, nx))
+    u, v = _faces(flon, flat, tmask, vx=0.1, vy=0.0)
+    gt, _mm = _write(tmp_path, ny, nx, 0.0, tmask, u, v)
+    for f in tmp_path.glob("EXP_grid_*.nc"):
+        with netCDF4.Dataset(f, "r+") as nc:
+            tv = nc["time_counter"]
+            tv.units, tv.calendar = "seconds since 0001-01-01 00:00:00", "360d"
+            tv[:] = np.arange(3) * 3600.0
+    ds = get_reader("nemo").open_dataset(gt, mode_cfg=ModeConfig(Fdrift2D=True, Fdrift3D=False))
+    assert ds["time"].dt.calendar == "360_day"
