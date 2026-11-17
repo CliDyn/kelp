@@ -219,16 +219,16 @@ def test_discrete_cycle_on_unequal_windows_is_refused(tmp_path, n_months,
         _run(cfg)
     assert str(info.value) == _m_d(period_days * DAY, 31 * DAY)
     assert not Path(cfg.data.output_path).exists()
-    if n_months != 3:
-        return
 
-    # the same records under stop: no cycle, no refusal
-    cfg = _year_cfg(tmp_path, data, "stop.nc", n_steps=2,
-                    on_exhausted="stop", numerics=num)
-    _run(cfg)
-    assert load_trajectories(cfg.data.output_path)["lon"].shape == (2, 2)
+    if n_months == 3:
+        # the same records under stop: no cycle, no refusal
+        cfg = _year_cfg(tmp_path, data, "stop.nc", n_steps=2,
+                        on_exhausted="stop", numerics=num)
+        _run(cfg)
+        assert load_trajectories(cfg.data.output_path)["lon"].shape == (2, 2)
 
-    # a direct caller without file_times meets the same refusal
+    # a direct caller without file_times meets the same refusal (on the
+    # year ahead of the refusal of irregular record times there too)
     mode = ModeConfig(Fdrift2D=False, Fdrift3D=True)
     mesh = _quiet(Fesom14Reader.load_mesh,
                   MeshConfig(type="fesom14", meshpath=str(data)), mode_cfg=mode)
@@ -247,7 +247,7 @@ def test_discrete_cycle_on_unequal_windows_is_refused(tmp_path, n_months,
                    start_time_idx=0, n_steps=2,
                    n_time_total=ds.sizes["time"], on_exhausted="cycle",
                    temporal_interp=False)
-        assert str(info.value) == _m_d(90 * DAY, 31 * DAY)
+        assert str(info.value) == _m_d(period_days * DAY, 31 * DAY)
     finally:
         ds.close()
 
