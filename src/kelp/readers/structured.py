@@ -407,7 +407,6 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         setattr(mesh, f"_cgrid_e3{nm}", np.empty(0))
     if zw is not None:
         mesh.sigma = mesh._cgrid_zw
-        mesh._cgrid_nlev_raster = nf          # every raster cell (halo copies too)
         mesh._cgrid_e3b = np.ascontiguousarray(eb).reshape(-1)
         for nm, e3 in (("u", e3u0), ("v", e3v0)):
             kb, th = _partial_level(mesh._cgrid_zw, e3, (ny, nx))

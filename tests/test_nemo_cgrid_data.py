@@ -31,7 +31,6 @@ def test_orca05_partial_cell_w_equals_model_w():
     K = wf.shape[0]
     w = vel.w.reshape(K + 1, ny, nx)[:-1].astype(float)
     wet = np.arange(K)[:, None, None] < mesh._cgrid_nlev_raster
-    wet[:, 0] = wet[:, :, 0] = False     # no cells of the mesh: their west / south face is outside the crop
     err = np.abs(w - wf)[wet].max()
     assert np.abs(wf).max() > 1e-5 and err < 5e-6 * np.abs(wf).max()
 
