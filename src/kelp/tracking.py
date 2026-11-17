@@ -3664,6 +3664,8 @@ def run_tracking(
                 **_time_metadata(config, str(time_avg)),
                 "kelp_version": _kelp_version(),
             }
+            if getattr(mesh, "_cgrid_layout", None) is not None:
+                meta["cgrid_layout"] = mesh._cgrid_layout.label()    # incl. the open edges
             if getattr(config.mode, "Fdrift3D", False):
                 meta["w_interp"] = str(config.numerics.w_interp)
                 # the file-side W convention and the 2026-09-23 reader

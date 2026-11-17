@@ -5,6 +5,7 @@ Grid frame: F(j,i) sits at (i, j) * d, T(j,i) at (i - 1/2, j - 1/2) * d, the
 frame is rotated by ``theta`` (and optionally sheared) and put at the equator,
 so the planar metric of the interpolator is accurate to ~1e-4.
 """
+import itertools
 from types import SimpleNamespace
 
 import numpy as np
@@ -18,6 +19,7 @@ from kelp.core.io import VelocityField
 from kelp.numerics.interpolate import interp_cgrid_single
 from kelp.readers import get_reader
 from kelp.readers.structured import build_cgrid_mesh
+from tests._cgrid_orca import NC, NY, orca_grid, strip
 
 D = 0.1          # cell size, degrees
 
@@ -373,67 +375,59 @@ def test_model_widths_carry_discrete_continuity(lat0):
     assert res[True] < 1e-10 and res[False] > 1e-4
 
 
-# --- global ORCA layout: east-west halo + F-pivot north fold -------------------
-# A tripolar-like synthetic grid in elliptic coordinates (x = A cosh(mu) cos(nu),
-# y = A sinh(mu) sin(nu), degrees at the equator): column k <-> nu = 2 pi k / NC,
-# F row j <-> mu = (ny - 2 - j) DMU, so the top F row is the fold segment
-# y = 0, |x| <= A, traversed out and back, with the pivots at x = +-A.  The halo
-# and fold copies are then written exactly as NEMO does: col 0 == col nx-2,
-# col nx-1 == col 1, T(ny-1, i) == T(ny-2, nx-1-i), F(ny-2, k) == F(ny-2, nx-2-k).
-NC, NY, A, DMU = 24, 10, 1.0, 0.15
-ONX = NC + 2
+# --- global ORCA layouts: E-W seam + T / F-pivot north fold, with / without the halo
+# (``tests/_cgrid_orca.py``: a tripolar-like elliptic grid; halo-free files carry
+# the NEMO 4.2 topology attributes).  The flow psi = vy * x (northward) has face
+# fluxes that are psi differences, canonicalised as vectors, so every copy of u
+# and v is what NEMO writes (v antisymmetric on the fold row, a sign across it).
+ORCA_LAYOUTS = [("F", True), ("T", True), ("F", False), ("T", False)]
+ORCA_IDS = ["F-halo", "T-halo", "F-free", "T-free"]
 
 
-def _orca_grid():
-    def pos(jj, ii):
-        mu = (NY - 2 - jj) * DMU
-        nu = 2 * np.pi * ii / NC
-        return A * np.cosh(mu) * np.cos(nu), A * np.sinh(mu) * np.sin(nu)
-    jj, ii = np.mgrid[0:NY, 0:ONX].astype(float)
-    (flon, flat), (tlon, tlat) = pos(jj, ii), pos(jj - 0.5, ii - 0.5)
-    i = np.arange(ONX)
-    for a in (flon, flat, tlon, tlat):          # exact halo copies
-        a[:, 0] = a[:, ONX - 2]
-        a[:, ONX - 1] = a[:, 1]
-    for a in (tlon, tlat):
-        a[NY - 1, 1:ONX - 1] = a[NY - 2, ONX - 1 - i[1:ONX - 1]]
-    for a in (flon, flat):
-        a[NY - 2] = a[NY - 2, (ONX - 2 - i) % (ONX - 2)]
-        a[NY - 1, :ONX - 1] = a[NY - 3, ONX - 2 - i[:ONX - 1]]
-    tmask = np.ones((NY, ONX))
-    tmask[0] = 0.0
-    tmask[NY - 2, [1, NC // 2, NC // 2 + 1, NC]] = 0.0   # cells at the pivots
-    return flon, flat, tlon, tlat, tmask
-
-
-def _orca_case(tmp_path, vy=0.5, n_steps=120, dt=1800.0, seeds=(), rotation=None):
-    """Mesh file + u/v of the flow psi = vy * x (northward, crosses the fold
-    and the seam): the face fluxes are psi differences, so the halo / fold
-    copies of u and v come out as NEMO writes them (v antisymmetric on the
-    fold row, u mirrored with a sign into the north halo row)."""
-    import pandas as pd
-    import xarray as xr
-    flon, flat, tlon, tlat, tmask = _orca_grid()
+def _orca_fields(fold, halo, vy=0.5):
+    """Canonical-form rasters: F coordinates, tmask, widths, u, v of psi = vy * x."""
+    from kelp.readers.structured import cgrid_to_canonical, fold_pivot_cells
+    g = orca_grid(fold, halo)
+    lay = g.canon
+    flon, flat = g.xy_c["F"]
     e2u, e1v = _widths(flon, flat)
+    e2u, e1v = cgrid_to_canonical(e2u, lay, "U"), cgrid_to_canonical(e1v, lay, "V")
     psi = vy * flon * METERS_PER_DEG_LAT
-    u = np.zeros((NY, ONX)); v = np.zeros((NY, ONX))
+    u = np.zeros(flon.shape); v = np.zeros(flon.shape)
     u[1:, :] = -(psi[1:, :] - psi[:-1, :]) / e2u[1:, :]
     v[:, 1:] = (psi[:, 1:] - psi[:, :-1]) / e1v[:, 1:]
-    v[:, 0] = v[:, ONX - 2]
+    u, v = (cgrid_to_canonical(a, lay, k, vector=True) for a, k in ((u, "U"), (v, "V")))
+    tmask = np.ones(flon.shape)
+    tmask[0] = 0.0
+    tmask[fold_pivot_cells(lay)] = 0.0                  # the fold's grid poles are land
+    return g, flon, flat, cgrid_to_canonical(tmask, lay, "T"), e2u, e1v, u, v
+
+
+def _orca_case(tmp_path, fold="F", halo=True, vy=0.5, n_steps=120, dt=1800.0, seeds=(), rotation=None):
+    """Mesh file + u/v files of the layout; returns ``cfg, out, u, v`` (canonical)."""
+    import pandas as pd
+    import xarray as xr
+    g, flon, flat, tmask, e2u, e1v, u, v = _orca_fields(fold, halo, vy)
     e2u[0] = np.nan                                     # unused faces may be junk
+    raw = {k: strip(a, halo) for k, a in dict(
+        e2u=e2u, e1v=e1v, tmask=tmask, glamf=flon, gphif=flat, u=u, v=v).items()}
     t = pd.date_range("2020-01-01", periods=1, freq="h")
     tc = {"time_counter": t}
-    xr.Dataset({"ssh": (("time_counter", "y", "x"), np.zeros((1, NY, ONX)))},
+    ny, nx = g.raw.raw_shape
+    xr.Dataset({"ssh": (("time_counter", "y", "x"), np.zeros((1, ny, nx)))},
                coords=tc).to_netcdf(tmp_path / "EXP_grid_T.nc")
-    xr.Dataset({"uo": (("time_counter", "depthu", "y", "x"), u[None, None])},
+    xr.Dataset({"uo": (("time_counter", "depthu", "y", "x"), raw["u"][None, None])},
                coords=tc).to_netcdf(tmp_path / "EXP_grid_U.nc")
-    xr.Dataset({"vo": (("time_counter", "depthv", "y", "x"), v[None, None])},
+    xr.Dataset({"vo": (("time_counter", "depthv", "y", "x"), raw["v"][None, None])},
                coords=tc).to_netcdf(tmp_path / "EXP_grid_V.nc")
-    xr.Dataset({"tmask": (("z", "y", "x"), tmask[None]),
-                "nav_lon": (("y", "x"), tlon), "nav_lat": (("y", "x"), tlat),
-                "glamf": (("y", "x"), flon), "gphif": (("y", "x"), flat),
-                "e2u": (("y", "x"), e2u), "e1v": (("y", "x"), e1v)}
-               ).to_netcdf(tmp_path / "mesh_mask.nc")
+    mesh_mask = xr.Dataset(
+        {"tmask": (("z", "y", "x"), raw["tmask"][None]),
+         "nav_lon": (("y", "x"), g.xy["T"][0]), "nav_lat": (("y", "x"), g.xy["T"][1]),
+         "glamf": (("y", "x"), raw["glamf"]), "gphif": (("y", "x"), raw["gphif"]),
+         "e2u": (("y", "x"), raw["e2u"]), "e1v": (("y", "x"), raw["e1v"])})
+    if not halo:                                        # NEMO >= 4.2 writes the topology flags
+        mesh_mask.attrs.update(Iperio=1, Jperio=0, NFold=1, NFtype=fold)
+    mesh_mask.to_netcdf(tmp_path / "mesh_mask.nc")
     gt, mm = str(tmp_path / "EXP_grid_T.nc"), str(tmp_path / "mesh_mask.nc")
     cfg, out = _cfg(tmp_path, gt, mm, list(seeds), n_steps, dt=dt)
     cfg.time.on_exhausted = "cycle"                     # one record, held
@@ -441,22 +435,32 @@ def _orca_case(tmp_path, vy=0.5, n_steps=120, dt=1800.0, seeds=(), rotation=None
     return cfg, out, u, v
 
 
-def test_orca_mesh_topology_and_flux_continuity(tmp_path):
+@pytest.mark.parametrize("fold,halo", ORCA_LAYOUTS, ids=ORCA_IDS)
+def test_orca_mesh_topology_and_flux_continuity(tmp_path, fold, halo):
     from kelp.core.mesh import build_elem_neighbors
-    cfg, _out, u, v = _orca_case(tmp_path)
+    from kelp.readers.structured import cgrid_canonical
+    cfg, _out, u, v = _orca_case(tmp_path, fold, halo)
     mesh = get_reader("nemo").load_mesh(cfg.mesh)
-    assert mesh._cgrid_orca == "fpivot"
+    lay = mesh._cgrid_layout
+    assert (lay.fold, lay.halo_cols, lay.periodic) == (fold, halo, True)
+    ny, nx = lay.shape
+    assert mesh._structured_shape == (NY, NC + 2) and lay.J == NY - 2
     ji = mesh._cgrid_elem_ji
     nb = build_elem_neighbors(mesh)                       # raises if an edge has > 2 cells
     cell = {(int(a), int(b)): e for e, (a, b) in enumerate(ji)}
-    for j in range(2, NY - 2):                            # seam: W of i=1 is i=NC
+    for j in range(2, lay.J):                             # seam: W of i=1 is i=NC
         assert nb[cell[(j, 1)], 3] == cell[(j, NC)]
-    for i in range(2, NC):                                # fold: N of i is NC+1-i
-        if (NY - 2, i) in cell and (NY - 2, ONX - 1 - i) in cell:
-            assert nb[cell[(NY - 2, i)], 2] == cell[(NY - 2, ONX - 1 - i)]
+    n_fold = 0
+    for (j, i), e in cell.items():                        # fold: N of a fold-row cell is its mirror
+        if j == lay.J:
+            mj, mi, _ = cgrid_canonical("T", j + 1, i, lay)
+            if (int(mj), int(mi)) in cell:
+                assert nb[e, 2] == cell[(int(mj), int(mi))]
+                n_fold += 1
+    assert n_fold > 5
     # model normal flux balances on every shared edge (slots S, E, N, W)
     j, i = ji[:, 0], ji[:, 1]
-    fi = np.stack([(j - 1) * ONX + i, j * ONX + i, j * ONX + i, j * ONX + i - 1], 1)
+    fi = np.stack([(j - 1) * nx + i, j * nx + i, j * nx + i, j * nx + i - 1], 1)
     uf, vf = u.ravel(), v.ravel()
     e2u, e1v = mesh._cgrid_e2u, mesh._cgrid_e1v
     out = np.stack([-vf[fi[:, 0]] * e1v[fi[:, 0]], uf[fi[:, 1]] * e2u[fi[:, 1]],
@@ -468,7 +472,7 @@ def test_orca_mesh_topology_and_flux_continuity(tmp_path):
     # ...and so does the interpolated normal velocity at seam / fold edge midpoints
     vel = VelocityField(u=uf, v=vf, eta=np.zeros(mesh.n_nodes), uv_layout="cgrid")
     c, lo, la = mesh._cgrid_corners, mesh.nodes_lon, mesh.nodes_lat
-    special = (np.abs(i[e] - i[n]) > 1)
+    special = (np.abs(i[e] - i[n]) > 1) | (np.abs(j[e] - j[n]) > 1)
     assert special.sum() > 10
     for a, s, b, t in zip(e[special], k[special], n[special], k2[special]):
         p, q = c[a, s], c[a, (s + 1) % 4]
@@ -479,60 +483,87 @@ def test_orca_mesh_topology_and_flux_continuity(tmp_path):
         assert abs((va - vb) @ nrm) <= 1e-9 * np.hypot(*nrm)
 
 
+def test_orca_layouts_give_one_mesh(tmp_path):
+    """Halo and halo-free files of a pivot give the same mesh (same canonical rasters)."""
+    for fold in "TF":
+        meshes = []
+        for halo in (True, False):
+            d = tmp_path / f"{fold}{halo}"
+            d.mkdir()
+            cfg, *_ = _orca_case(d, fold, halo)
+            meshes.append(get_reader("nemo").load_mesh(cfg.mesh))
+        a, b = meshes
+        assert a.n_nodes == b.n_nodes and a.n_elements == b.n_elements
+        np.testing.assert_array_equal(a._cgrid_corners, b._cgrid_corners)
+        np.testing.assert_array_equal(a._cgrid_e2u[np.isfinite(a._cgrid_e2u)],
+                                      b._cgrid_e2u[np.isfinite(b._cgrid_e2u)])
+
+
 def test_orca_particles_cross_seam_and_fold_rotation_invariant(tmp_path):
     """Northward flow: two particles cross the fold segment (|x| < A), one the
-    seam (x > A); all stay ALIVE on their streamline
-    x = const, in the geographic and in the rotated frame alike."""
+    seam (x > A); all stay ALIVE on their streamline x = const, in the
+    geographic and in the rotated frame alike, and halo-free input of a pivot
+    gives the halo input's trajectories bit for bit."""
     from kelp.tracking import run_tracking
     from kelp.writers import load_trajectories
     from kelp.core.particles import ParticleStatus
     seeds = [(0.3, -0.45), (1.4, -0.45), (-0.5, -0.45)]
-    tracks = []
-    for rotation in (None, "fesom2"):
-        d = tmp_path / str(rotation)
+    tracks = {}
+    for (fold, halo), rotation in itertools.product(ORCA_LAYOUTS, (None, "fesom2")):
+        d = tmp_path / f"{fold}{halo}{rotation}"
         d.mkdir()
-        cfg, out, _u, _v = _orca_case(d, seeds=seeds, rotation=rotation)
+        cfg, out, _u, _v = _orca_case(d, fold, halo, seeds=seeds, rotation=rotation)
         run_tracking(cfg, temporal_interp=False)
         tr = load_trajectories(str(out))
         assert (tr["status"] == int(ParticleStatus.ALIVE)).all()
         assert (tr["lat"][:, -1] > 0.4).all()                 # crossed y = 0
         assert np.abs(tr["lon"] - np.array(seeds)[:, :1]).max() < 2e-3
-        tracks.append(np.stack([tr["lon"], tr["lat"]]))
-    np.testing.assert_allclose(tracks[1], tracks[0], atol=1e-4)
+        tracks[fold, halo, rotation] = np.stack([tr["lon"], tr["lat"]])
+        import xarray as xr
+        with xr.open_dataset(out) as ds:                      # the layout, open edges included
+            assert f"{fold}-pivot north fold" in ds.attrs["cgrid_layout"]
+            assert "open to the outside: S" in ds.attrs["cgrid_layout"]
+    for fold in "TF":
+        np.testing.assert_array_equal(tracks[fold, False, None], tracks[fold, True, None])
+        np.testing.assert_allclose(tracks[fold, True, "fesom2"], tracks[fold, True, None], atol=1e-4)
 
 
-def _global_latlon(ny=12, nc=20, halo=True):
-    lat1 = np.linspace(-60.0, 80.0, ny)
-    if halo:
-        lon1 = (np.arange(nc + 2) - 1) * 360.0 / nc
-    else:
-        lon1 = (np.arange(nc) + 0.5) * 360.0 / nc
-    lon, lat = np.meshgrid(lon1, lat1)
-    return ((lon + 180.0) % 360.0) - 180.0, lat
+def test_orca_mismatched_copies_refuse(tmp_path):
+    """A stale halo column in the u of any record refuses (it would be repaired
+    silently otherwise); stale e2u copies refuse at the mesh load."""
+    import xarray as xr
+    cfg, *_ = _orca_case(tmp_path, "F", True)
+    rd = get_reader("nemo")
+    mesh = rd.load_mesh(cfg.mesh)
+    ds = rd.open_dataset(cfg.data.ncinput, mode_cfg=cfg.mode)
+    rd.read_velocities(ds, 0, mesh, mode_cfg=cfg.mode)    # consistent: fine
+    ds.close()
+    f = tmp_path / "EXP_grid_U.nc"
+    with xr.open_dataset(f) as d:
+        d = d.load()
+    d["uo"][0, 0, 3, 0] += 1e-3                           # the E-W halo column of one face
+    d.to_netcdf(tmp_path / "bad_grid_U.nc")
+    (tmp_path / "EXP_grid_U.nc").rename(tmp_path / "good_grid_U.nc")
+    (tmp_path / "bad_grid_U.nc").rename(f)
+    ds = rd.open_dataset(cfg.data.ncinput, mode_cfg=cfg.mode)
+    with pytest.raises(ValueError, match="u: 1 halo / fold copies differ"):
+        rd.read_velocities(ds, 0, mesh, mode_cfg=cfg.mode)
+    ds.close()
+    mm = tmp_path / "mesh_mask.nc"
+    with xr.open_dataset(mm) as d:
+        d = d.load()
+    d["e2u"][5, 0] *= 1.001
+    d.to_netcdf(tmp_path / "bad_mesh.nc")
+    cfg.mesh.meshpath = str(tmp_path / "bad_mesh.nc")
+    with pytest.raises(ValueError, match="e2u: 1 halo / fold copies differ"):
+        rd.load_mesh(cfg.mesh)
 
 
-def test_orca_layout_detector():
-    from kelp.readers.nemo import _detect_orca_layout
-    _f, _g, tlon, tlat, _m = _orca_grid()
-    assert _detect_orca_layout(tlon, tlat) == "fpivot"
-    lon, lat = _global_latlon()
-    assert _detect_orca_layout(lon, lat) == "ew"               # halo, no fold
-    (_, _), (rlon, rlat) = _grid(8, 10)
-    assert _detect_orca_layout(rlon, rlat) is None              # regional
-    lon, lat = _global_latlon(halo=False)                       # NEMO >= 4.2
-    with pytest.raises(NotImplementedError, match="without halo"):
-        _detect_orca_layout(lon, lat)
-    lon, lat = _global_latlon()                                 # T-point pivot
-    nx = lon.shape[1]
-    i = np.arange(2, nx - 1)
-    for a in (lon, lat):
-        a[-1, i] = a[-3, nx - i]
-        a[:, 0], a[:, nx - 1] = a[:, nx - 2], a[:, 1]
-    with pytest.raises(NotImplementedError, match="T-point-pivot"):
-        _detect_orca_layout(lon, lat)
-    lon, lat = tlon[:, 1:-1], tlat[:, 1:-1]                     # fold, no halo
-    with pytest.raises(NotImplementedError, match="halo"):
-        _detect_orca_layout(lon, lat)
+def test_orca_layout_in_the_log_and_the_mesh(tmp_path, capsys):
+    cfg, *_ = _orca_case(tmp_path, "T", False)
+    mesh = get_reader("nemo").load_mesh(cfg.mesh)
+    assert "T-pivot north fold (halo-free, padded)" in capsys.readouterr().out
+    assert "raster edges open to the outside: S" in mesh._cgrid_layout.label()
 
 
 # --- dry ring (one ring of zero-velocity cells around the wet region) --------
@@ -558,20 +589,24 @@ def test_ring_cells_8_neighbourhood():
     assert _ring_ji(m1) == expect and len(_ring_ji(m1)) == m1.n_elements - 3
 
 
-def test_ring_across_seam_and_fold():
+@pytest.mark.parametrize("fold", "TF")
+def test_ring_across_seam_and_fold(fold):
     from kelp.core.mesh import build_elem_neighbors
-    flon, flat, _tlon, _tlat, tmask = _orca_grid()
+    from kelp.readers.structured import cgrid_to_canonical, fold_pivot_cells
+    g, flon, flat, tmask, _e2u, _e1v, _u, _v = _orca_fields(fold, True)
+    J = g.canon.J
     tmask[4, NC] = 0.0                  # dry cell at the seam (col 0 is its halo copy)
     tmask[0, NC] = 0.0
-    tmask[NY - 2, 4] = 0.0              # dry cell on the fold row (mirrored in the halo row)
-    mesh = build_cgrid_mesh(flon, flat, tmask, orca="fpivot")
+    tmask[J, 4] = 0.0                   # dry cell on the fold row (mirrored in the halo row)
+    tmask = cgrid_to_canonical(tmask, g.canon, "T")
+    mesh = build_cgrid_mesh(flon, flat, tmask, layout=g.canon)
     ring = [tuple(x) for x in mesh._cgrid_elem_ji[mesh._cgrid_n_wet:].tolist()]
     assert len(ring) == len(set(ring))                   # each canonical cell once
-    assert (4, NC) in ring and (NY - 2, 4) in ring
-    assert all(1 <= i <= NC for _j, i in ring) and all(1 <= j <= NY - 2 for j, _i in ring)
-    piv = {(NY - 2, i) for i in (1, NC // 2, NC // 2 + 1, NC)}
-    assert not piv & set(ring)
-    assert mesh._cgrid_ring_dropped["pivot"] == 4
+    assert (4, NC) in ring and (J, 4) in ring
+    assert all(1 <= i <= NC for _j, i in ring) and all(1 <= j <= J for j, _i in ring)
+    piv = fold_pivot_cells(g.canon)
+    assert not {(j, i) for j, i in ring if piv[j, i]}
+    assert mesh._cgrid_ring_dropped["pivot"] == piv.sum() == (4 if fold == "F" else 2)
     build_elem_neighbors(mesh)                           # raises if an edge has > 2 cells
     # the wet cell east of the seam dry cell reaches it across the halo
     ji = [tuple(x) for x in mesh._cgrid_elem_ji.tolist()]

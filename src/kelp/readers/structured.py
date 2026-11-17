@@ -21,6 +21,7 @@ from functools import lru_cache
 from typing import Optional, Tuple
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from ..core.mesh import (Mesh, build_node_to_elems, build_search,
                          find_nonconvex_quads, validate_quad_convexity)
@@ -326,34 +327,13 @@ def _unit_xyz(lon_deg, lat_deg):
                      np.sin(la)], axis=-1)
 
 
-#: global layouts :func:`build_cgrid_mesh` handles (``orca=``)
-CGRID_ORCA_LAYOUTS = (None, "ew", "fpivot")
 #: chord distance (unit sphere, ~6 m) under which two raster points are the
 #: same physical point (the halo / fold copies are exact in model output)
 SAME_POINT_CHORD = 1e-6
 
 
-def _orca_canonical_f(ny, nx, orca):
-    """``(ny*nx,)`` map of every F raster index to its canonical copy.
-
-    ``"ew"``: east-west halo columns (``col 0 == col nx-2``, ``col nx-1 ==
-    col 1``): F column 0 -> nx-2.  ``"fpivot"`` adds the F-point-pivot north
-    fold (``T(ny-1, i) == T(ny-2, nx-1-i)``): on the fold row ``ny-2``,
-    ``F(ny-2, k) == F(ny-2, nx-2-k)`` -> ``min(k, nx-2-k)`` first, then the
-    halo map.  Only rows ``0..ny-2`` and columns ``0..nx-2`` are referenced
-    by the unique cells, so the map is complete for them.
-    """
-    jj, ii = np.mgrid[0:ny, 0:nx]
-    ii = ii.copy()
-    if orca == "fpivot":
-        row = jj == ny - 2
-        ii[row] = np.minimum(ii[row], np.maximum(nx - 2 - ii[row], 0))
-    ii[ii == 0] = nx - 2
-    return (jj * nx + ii).reshape(-1)
-
-
 def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
-                     orca: Optional[str] = None, ring: bool = True,
+                     layout: Optional[CgridLayout] = None, ring: bool = True,
                      nlev2d=None, zw=None, area=None, e3b=None, e3u0=None, e3v0=None,
                      name: str = "nemo",
                      r_earth: Optional[float] = None) -> Mesh:
@@ -366,13 +346,13 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
     corners ``SW=F(j-1,i-1)``, ``SE=F(j-1,i)``, ``NE=F(j,i)``, ``NW=F(j,i-1)``;
     nodes are the F-points referenced by at least one kept element.
 
-    Global ORCA (``orca``): the halo copies are dropped (cells ``i`` in
-    ``1..nx-2``; with ``"fpivot"`` also the north halo row, cells ``j <=
-    ny-2``) and the duplicated F-points are merged by index (verified against
-    the coordinates), so the seam and the fold become interior edges.  Every
-    cell still reads its OWN faces: the halo / fold copies of u and v equal
-    their partners (with the fold's sign flip built into the raster), so no
-    face needs a remap or a sign.
+    Global ORCA (``layout``): the rasters are in the CANONICAL form of
+    :class:`CgridLayout` (E-W halo columns, north halo row, every copy filled
+    from its canonical point, vectors with the fold sign).  Only the canonical
+    cells are kept (a halo column or the mirrored half of the fold row is the
+    same cell as its canonical point), and the corners are the canonical F
+    points, so the seam and the fold become interior edges; every cell reads its
+    OWN faces, which the filled copies make equal to their partners'.
 
     Parameters
     ----------
@@ -383,19 +363,19 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         Surface T-point land-sea mask (truthy = wet).
     depth2d : array_like (ny, nx) or None
         T-point bottom depth (m); a node takes the max over its wet neighbours
-        (and over its merged halo / fold copies).
+        (the copies are filled: canonical).
     e2u, e1v : array_like (ny, nx) or None
         Model widths of the u faces (e2u) and v faces (e1v), m.  Both given:
         the interpolator forms fluxes ``u*e2u`` / ``v*e1v`` (the model's own
         continuity); otherwise it uses plane edge lengths.  Only the faces of
         wet cells must be positive and finite.
-    orca : None, "ew" or "fpivot"
-        Global layout (``readers.nemo._detect_orca_layout``): ``None`` =
-        closed raster (edges are walls), ``"ew"`` = east-west halo columns,
-        ``"fpivot"`` = halo columns + F-point-pivot north fold.
+    layout : CgridLayout or None
+        The raster layout (``readers.nemo.detect_cgrid_layout``); the arrays
+        must have ``layout.shape``.  ``None`` = a closed regional raster (its
+        edges are walls or open water: nothing is merged).
     ring : bool
         Append ONE ring of dry cells (8-neighbourhood of the wet region,
-        across the ORCA halo / fold) as zero-velocity elements after the wet
+        across the seam and the fold) as zero-velocity elements after the wet
         ones (default; land = zero velocity, as in Parcels).  A stage or end
         point in the ring reads zero velocity (the particle stays ALIVE);
         beyond the ring a stage still fails.  ``ring=False`` = wet cells only.  Ring cells
@@ -420,15 +400,13 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
     -------
     Mesh
         Quad mesh; stashes ``_structured_shape=(ny, nx)``, ``_cgrid=True``,
-        ``_cgrid_orca``, ``_cgrid_elem_ji (E, 2)`` (the T-cell ``(j, i)`` of
+        ``_cgrid_layout``, ``_cgrid_elem_ji (E, 2)`` (the T-cell ``(j, i)`` of
         each element) and ``_cgrid_corners (E, 4)`` (node ids, SW/SE/NE/NW —
         the interpolator reads this, not ``elem_nodes``).  ``elem_nodes`` is
         the same quad (containment is winding-agnostic).  Also
         ``_cgrid_n_wet`` (the first ``n_wet`` elements are wet cells, the
         rest ring cells), ``_cgrid_nlev (E,) int32`` (1 wet / 0 ring).
     """
-    if orca not in CGRID_ORCA_LAYOUTS:
-        raise ValueError(f"orca must be one of {CGRID_ORCA_LAYOUTS}, got {orca!r}")
     lon2d = np.asarray(glamf, dtype=np.float64)
     lat2d = np.asarray(gphif, dtype=np.float64)
     if lon2d.ndim != 2 or lon2d.shape != lat2d.shape:
@@ -436,61 +414,45 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
             f"glamf/gphif must be 2-D (y, x) of equal shape, got "
             f"{lon2d.shape} and {lat2d.shape}")
     ny, nx = lon2d.shape
+    if layout is None:
+        layout = CgridLayout((ny, nx))
+    if layout.shape != (ny, nx):
+        raise ValueError(f"the rasters are {(ny, nx)}, the layout's canonical shape is {layout.shape}")
     wet = np.asarray(tmask2d) > 0.5
     if wet.shape != (ny, nx):
         raise ValueError(f"tmask shape {wet.shape} != grid {(ny, nx)}")
-    wet = wet.copy()
-    wet[0, :] = False                 # no F corners south / west of the raster
-    wet[:, 0] = False
-    if orca is not None:
-        wet[:, nx - 1] = False        # east halo column (copy of column 1)
-    if orca == "fpivot":
-        wet[ny - 1, :] = False        # north halo row (mirror of row ny-2)
-        piv = [(nx - 2) // 2, (nx - 2) // 2 + 1, 1, nx - 2]
-        if wet[ny - 2, piv].any():
-            raise ValueError(
-                "cgrid ORCA mesh: a wet T-cell touches a north-fold pivot "
-                f"(row {ny - 2}, columns {piv}); the fold's grid poles must "
-                "be on land")
+    # a cell is a canonical T point with an F corner south and west of it
+    jj, ii = np.mgrid[0:ny, 0:nx]
+    cj, ci, _ = cgrid_canonical("T", jj, ii, layout)
+    piv = fold_pivot_cells(layout)
+    own = (cj == jj) & (ci == ii) & (jj >= 1) & (ii >= 1)
+    if (wet & own & piv).any():
+        raise ValueError(
+            "cgrid mesh: a wet T-cell sits at a north-fold pivot "
+            f"(cells {np.argwhere(wet & piv).tolist()[:4]}); the fold's grid poles "
+            "must be on land")
+    wet = wet & own
     if not wet.any():
         raise ValueError("cgrid mesh has no wet T-cells")
-    ej, ei = np.nonzero(wet)
-    raster = np.arange(ny * nx, dtype=np.int64).reshape(ny, nx)
-    quad_raster = np.stack([raster[ej - 1, ei - 1], raster[ej - 1, ei],
-                            raster[ej, ei], raster[ej, ei - 1]], axis=1)
     flat_lon = lon2d.reshape(-1)
     flat_lat = lat2d.reshape(-1)
-    if orca is not None:
-        canon = _orca_canonical_f(ny, nx, orca)
-        used = np.unique(quad_raster)
-        chord = np.linalg.norm(_unit_xyz(flat_lon[used], flat_lat[used])
-                               - _unit_xyz(flat_lon[canon[used]],
-                                           flat_lat[canon[used]]), axis=-1)
-        if chord.max() > SAME_POINT_CHORD:
-            k = int(used[np.argmax(chord)])
-            raise ValueError(
-                f"cgrid ORCA mesh ({orca}): F{divmod(k, nx)} and its copy "
-                f"F{divmod(int(canon[k]), nx)} are {chord.max():.2e} apart "
-                "(unit sphere): not the halo / fold layout")
-        quad_raster = canon[quad_raster]
-    else:
-        canon = None
+
+    def quads(j, i):
+        """Canonical flat F indices of the corners SW, SE, NE, NW of cells (j, i)."""
+        out = []
+        for dj, di in ((-1, -1), (-1, 0), (0, 0), (0, -1)):
+            fj, fi, _ = cgrid_canonical("F", j + dj, i + di, layout)
+            out.append(fj * nx + fi)
+        return np.stack(out, axis=1)
+
+    ej, ei = np.nonzero(wet)
+    quad_raster = quads(ej, ei)
     n_wet = int(ej.size)
     n_ring = 0
-    ring_dropped = {"pivot": 0, "nonconvex": 0, "chord": 0}
+    ring_dropped = {"pivot": 0, "nonconvex": 0}
     if ring:
-        # wetness of every raster cell, halo / fold copies taking their
-        # canonical partner's value (so the seam / fold neighbourhoods are
-        # visible without index arithmetic)
-        jj, ii = np.mgrid[0:ny, 0:nx]
-        cj, ci = jj.copy(), ii.copy()
-        if orca == "fpivot":
-            top = cj == ny - 1
-            ci[top] = nx - 1 - ci[top]
-            cj[top] = ny - 2
-        if orca is not None:
-            ci[ci == 0] = nx - 2
-            ci[ci == nx - 1] = 1
+        # a raster point is wet when its canonical cell is (the seam / fold
+        # neighbourhoods are then seen without index arithmetic)
         wet_full = wet[cj, ci]
         pd_ = np.pad(wet_full, 1)
         dil = np.zeros_like(wet_full)
@@ -500,27 +462,11 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         rj, ri = np.nonzero(dil & ~wet_full)
         rj, ri = cj[rj, ri], ci[rj, ri]
         keep = (rj >= 1) & (ri >= 1)
-        if orca is not None:
-            keep &= ri <= nx - 2
-            if orca == "fpivot":
-                keep &= rj <= ny - 2
+        rj, ri = np.unique(np.stack([rj[keep], ri[keep]], 1), axis=0).T
+        keep = ~piv[rj, ri]
+        ring_dropped["pivot"] = int((~keep).sum())
         rj, ri = rj[keep], ri[keep]
-        rj, ri = np.unique(np.stack([rj, ri], 1), axis=0).T
-        if orca == "fpivot":
-            piv = [(nx - 2) // 2, (nx - 2) // 2 + 1, 1, nx - 2]
-            keep = ~((rj == ny - 2) & np.isin(ri, piv))
-            ring_dropped["pivot"] = int((~keep).sum())
-            rj, ri = rj[keep], ri[keep]
-        rq = np.stack([raster[rj - 1, ri - 1], raster[rj - 1, ri],
-                       raster[rj, ri], raster[rj, ri - 1]], axis=1)
-        if canon is not None:
-            ch = np.linalg.norm(
-                _unit_xyz(flat_lon[rq], flat_lat[rq])
-                - _unit_xyz(flat_lon[canon[rq]], flat_lat[canon[rq]]),
-                axis=-1).max(axis=1)
-            keep = ch <= SAME_POINT_CHORD
-            ring_dropped["chord"] = int((~keep).sum())
-            rj, ri, rq = rj[keep], ri[keep], canon[rq[keep]]
+        rq = quads(rj, ri)
         bad = find_nonconvex_quads(rq, flat_lon, flat_lat)
         keep = np.ones(rq.shape[0], dtype=bool)
         keep[bad] = False
@@ -552,10 +498,6 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         dp[:ny, :nx] = d                       # F(j,i): T(j,i)...T(j+1,i+1)
         dm = np.maximum.reduce([dp[:ny, :nx], dp[1:, :nx], dp[:ny, 1:], dp[1:, 1:]])
         dm = dm.reshape(-1)
-        if canon is not None:                  # max over merged copies
-            acc = np.zeros(ny * nx)
-            np.maximum.at(acc, canon, dm)
-            dm = acc
         depth = np.ascontiguousarray(dm[referenced])
 
     elon = nodes_lon[corners]
@@ -565,6 +507,13 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
     elem_center_lon = ((elon_unw.mean(axis=1) + 180.0) % 360.0) - 180.0
     elem_center_lat = elat.mean(axis=1)
 
+    pairs = cKDTree(_unit_xyz(nodes_lon, nodes_lat)).query_pairs(SAME_POINT_CHORD)
+    if pairs:
+        a_, b_ = min(pairs)
+        raise ValueError(
+            f"cgrid mesh: {len(pairs)} pairs of mesh nodes coincide (e.g. "
+            f"({nodes_lon[a_]:.4f}, {nodes_lat[a_]:.4f})): the layout does not merge them "
+            "(a crop through the fold that is not full width?)")
     validate_quad_convexity(corners, nodes_lon, nodes_lat,
                             source=f"cgrid mesh '{name}'")
     n2e, n2e_count = build_node_to_elems(n_nodes, corners)
@@ -578,7 +527,7 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         sigma=np.array([], dtype=np.float64), vertical_coord="zlevel", **kw)
     mesh._structured_shape = (ny, nx)
     mesh._cgrid = True
-    mesh._cgrid_orca = orca
+    mesh._cgrid_layout = layout
     mesh._cgrid_elem_ji = np.stack([ej, ei], axis=1).astype(np.int64)
     mesh._cgrid_corners = corners
     mesh._cgrid_n_wet = n_wet

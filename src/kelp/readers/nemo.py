@@ -13,8 +13,9 @@ from E/N is rejected (``NotImplementedError``).  Vector rotation (the gate for
 true curvilinear + global ORCA grids), global ORCA (north-fold seam + east-west
 periodicity), and 3-D (deptht / e3t / partial cells / W on interfaces) are staged
 follow-ups for this T-point path.  The exact C-grid path (``mesh.nemo_grid:
-cgrid``) already handles curvilinear grids, global ORCA with halo columns and an
-F-point-pivot fold (``_detect_orca_layout``) and ``mesh.rotation``.
+cgrid``) already handles curvilinear grids, global ORCA (E-W seam, T- and
+F-point-pivot north fold, with or without the halo: ``detect_cgrid_layout``)
+and ``mesh.rotation``.
 
 File layout: NEMO splits output by C-grid point into ``*_grid_T.nc`` (temp/salt/
 ssh), ``*_grid_U.nc`` (u), ``*_grid_V.nc`` (v), ``*_grid_W.nc`` (w).  Point
@@ -73,72 +74,6 @@ def _open_nemo(path) -> xr.Dataset:
     for n, cal in fix.items():
         raw[n].attrs["calendar"] = cal
     return xr.decode_cf(raw)
-
-
-def _detect_orca_layout(lon, lat) -> Optional[str]:
-    """Classify the T-point raster for ``mesh.nemo_grid: cgrid``.
-
-    Returns ``None`` (closed regional raster: its edges are walls), ``"ew"``
-    (east-west halo columns: ``col 0 == col nx-2``, ``col nx-1 == col 1``) or
-    ``"fpivot"`` (halo columns + F-point-pivot north fold, ``T(ny-1, i) ==
-    T(ny-2, nx-1-i)``; ORCA05 / ORCA1).  Points are "the same" within
-    :data:`SAME_POINT_CHORD` on the unit sphere (the copies are exact in
-    model output).  Raises ``NotImplementedError`` for the global layouts it
-    does not handle rather than letting them become walls: a T-point-pivot
-    fold (ORCA2 / ORCA025 / ORCA12), a fold without halo columns, and
-    halo-free periodic output (NEMO >= 4.2 without the halo columns: the
-    longitudes span 360 deg and the gap from the last column to the first is
-    about one grid spacing).
-    """
-    lon = np.asarray(lon, dtype=np.float64)
-    lat = np.asarray(lat, dtype=np.float64)
-    ny, nx = lon.shape
-    if ny < 4 or nx < 4:
-        return None
-    xyz = _unit_xyz(lon, lat)
-
-    def same(a, b):
-        return bool((np.linalg.norm(a - b, axis=-1) <= SAME_POINT_CHORD).all())
-
-    def gap(a, b):
-        return np.linalg.norm(a - b, axis=-1)
-
-    ew = same(xyz[:, 0], xyz[:, nx - 2]) and same(xyz[:, nx - 1], xyz[:, 1])
-    i = np.arange(1, nx - 1)
-    fpivot = same(xyz[ny - 1, i], xyz[ny - 2, nx - 1 - i])
-    i2 = np.arange(2, nx - 1)
-    tpivot = same(xyz[ny - 1, i2], xyz[ny - 3, nx - i2])
-    # a self-mirrored top row (halo-free fold: the pivot row is kept whole)
-    selfmirror = (same(xyz[ny - 1, i], xyz[ny - 1, nx - 1 - i])
-                  or same(xyz[ny - 1, i2], xyz[ny - 1, nx - i2]))
-    if not ew:
-        # periodic without halo: the wrap gap (last -> first column) is about
-        # one grid spacing on the rows below the fold region
-        rows = slice(0, max(1, ny - 3))
-        wrap = gap(xyz[rows, nx - 1], xyz[rows, 0])
-        step = np.median(gap(xyz[rows, 1:], xyz[rows, :-1]), axis=1)
-        ok = step > 0
-        periodic = ok.any() and np.median(wrap[ok] / step[ok]) < 1.5
-        if periodic or fpivot or tpivot or selfmirror:
-            what = ("east-west periodic without halo columns (the last column "
-                    "is one grid spacing from the first: NEMO >= 4.2 halo-free "
-                    "output?)" if periodic else
-                    "a north fold without east-west halo columns")
-            raise NotImplementedError(
-                f"mesh.nemo_grid: cgrid: the grid is {what}; supported global "
-                "layout: ORCA with east-west halo columns (col 0 == col nx-2, "
-                "col nx-1 == col 1) and an F-point-pivot north fold. Write the "
-                "output with the halo columns, or crop a closed regional "
-                "domain.")
-        return None
-    if fpivot:
-        return "fpivot"
-    if tpivot or selfmirror:
-        raise NotImplementedError(
-            "mesh.nemo_grid: cgrid: T-point-pivot north fold (ORCA2 / ORCA025 / "
-            "ORCA12 type) is not supported; the F-point-pivot fold (ORCA05 / "
-            "ORCA1) is.")
-    return "ew"
 
 
 def _read_layout_flags(ds) -> dict:
@@ -338,6 +273,22 @@ def _surface_2d(da: xr.DataArray) -> np.ndarray:
     return _squeeze_to_2d(da.values)
 
 
+def _read_raster(da, layout, kind, name, *, vector=False, check=False, surface=False):
+    """The ONLY way the cgrid path reads a raster: ``da`` (a DataArray or array,
+    trailing dims the raw ``(ny, nx)`` of ``layout``; ``surface`` takes the
+    surface level of a depth dimension) -> its canonical float64 form
+    (:func:`cgrid_to_canonical`), so no raw halo / fold array ever meets a
+    canonical-shape one.  ``kind`` is the C-grid point (``"T"``, ``"U"``,
+    ``"V"``), ``vector`` only for u and v.  ``check=True`` REFUSES when a halo /
+    fold copy of the raw raster differs from its canonical point: used for
+    every raster that defines the flux (u, v of every record, tmask, e1t / e2t,
+    e2u / e1v, e3t_0 / e3u_0 / e3v_0).  The T / S samples, bathymetry,
+    ``w_file`` and ``e3t_file`` are canonicalised silently (their stale copies
+    -- ``bathy_metry`` on the fold row, eddy-induced velocities -- are real)."""
+    a = _surface_2d(da) if surface else np.asarray(da)
+    return cgrid_to_canonical(a, layout, kind, vector=vector, check=check, name=name)
+
+
 def _max_axis_misalignment_deg(lon2d: np.ndarray, lat2d: np.ndarray) -> float:
     """Max deviation (deg) of the grid i-axis from EAST and j-axis from NORTH.
 
@@ -514,20 +465,26 @@ class NemoReader:
                 f"mesh.nemo_grid: cgrid needs the T-point coordinates "
                 f"(glamt/gphit or nav_lon/nav_lat) in {path!r} to classify the "
                 "grid (regional / global ORCA)")
-        orca = _detect_orca_layout(_squeeze_to_2d(ds[tl].values),
-                                   _squeeze_to_2d(ds[tp].values))
-        if orca is not None:
-            print(f"  NEMO cgrid: global ORCA layout ({orca}): east-west halo "
-                  "columns" + (" + F-pivot north fold" if orca == "fpivot"
-                               else "") + " merged")
+        layout, notes = detect_cgrid_layout(
+            _squeeze_to_2d(ds[tl].values), _squeeze_to_2d(ds[tp].values), glamf, gphif,
+            _read_layout_flags(ds))
+        print(f"  NEMO cgrid layout: {layout.label()}")
+        for n in notes:
+            print(f"    note: {n}")
+
+        def rd(nm, kind, check=True):
+            return _read_raster(ds[nm].squeeze(), layout, kind, nm, check=check)
+        glamf = cgrid_to_canonical(glamf, layout, "F", name="glamf")
+        gphif = cgrid_to_canonical(gphif, layout, "F", name="gphif")
         tmask_n = _first(ds, ("tmask",))
         if tmask_n is None:
             raise KeyError(
                 f"mesh.nemo_grid: cgrid needs tmask in the mesh file {path!r}")
-        wet = _surface_2d(ds[tmask_n]) > 0.5
+        tm = rd(tmask_n, "T")
+        tm3 = tm > 0.5
+        wet = tm3[0] if tm3.ndim == 3 else tm3
         depth2d = None
         vert = {}
-        tm3 = np.squeeze(ds[tmask_n].values) > 0.5
         if tm3.ndim == 3 and all(
                 v in ds.variables for v in ("e3t_1d", "e1t", "e2t")):
             # 3-D z-levels: interfaces from the 1-D e3t; partial (zps) bottom
@@ -542,27 +499,31 @@ class NemoReader:
                                  "(ice-shelf cavities are not supported)")
             e3b = e3u0 = e3v0 = None
             if all(v in ds.variables for v in ("e3t_0", "e3u_0", "e3v_0")):
-                e3t0, e3u0, e3v0 = (np.squeeze(ds[v].values).astype(np.float64)
-                                    for v in ("e3t_0", "e3u_0", "e3v_0"))
+                e3t0, e3u0, e3v0 = (rd(v, k) for v, k in
+                                    (("e3t_0", "T"), ("e3u_0", "U"), ("e3v_0", "V")))
                 jj, ii = np.nonzero(nlev > 0)
                 e3b = np.zeros(nlev.shape)
                 e3b[jj, ii] = e3t0[nlev[jj, ii] - 1, jj, ii]
                 _check_zps_rule(zw, nlev, e3b, e3u0, e3v0)
+            for nm in ("e1t", "e2t"):
+                if (np.asarray(ds[nm]) <= 0).any():
+                    raise ValueError(
+                        f"the mesh file's {nm} has non-positive entries: zero-filled "
+                        "tiles (land-processor elimination when it was assembled)? "
+                        "regenerate it without land elimination or use domain_cfg.nc")
             vert = dict(nlev2d=nlev, zw=zw, e3b=e3b, e3u0=e3u0, e3v0=e3v0,
-                        area=_squeeze_to_2d(ds["e1t"].values)
-                        * _squeeze_to_2d(ds["e2t"].values))
+                        area=rd("e1t", "T") * rd("e2t", "T"))
             print(f"  NEMO cgrid 3-D: {tm3.shape[0]} levels, "
                   + ("partial bottom cells (e3t_0, e3u_0, e3v_0)" if e3b is not None else
                      "full reference cells (no e3t_0 / e3u_0 / e3v_0 in the mesh file)"))
         for dn in (() if vert else ("hdept", "hdepw", "bathy_meter", "bathy_metry",
                                     "bathymetry", "Bathymetry")):
             if dn in ds.variables:
-                depth2d = _squeeze_to_2d(ds[dn].values)
+                depth2d = rd(dn, "T", check=False)
                 break
         widths = {}
         if "e2u" in ds.variables and "e1v" in ds.variables:
-            widths = dict(e2u=_squeeze_to_2d(ds["e2u"].values),
-                          e1v=_squeeze_to_2d(ds["e1v"].values))
+            widths = dict(e2u=rd("e2u", "U"), e1v=rd("e1v", "V"))
             print("  NEMO cgrid: fluxes use the model face widths e2u/e1v")
         else:
             print("  NEMO cgrid: e2u/e1v not in the mesh file; fluxes use plane "
@@ -587,7 +548,7 @@ class NemoReader:
             print(f"    rotated frame: alpha/beta/gamma = {tuple(angles)} "
                   "(pole-safe)")
         mesh = build_cgrid_mesh(glamf, gphif, wet, depth2d=depth2d, name="nemo",
-                                orca=orca,
+                                layout=layout,
                                 r_earth=getattr(mesh_cfg, "r_earth", None),
                                 **widths, **vert)
         mesh.rotation_angles = angles
@@ -724,20 +685,14 @@ class NemoReader:
                 "(em/m1 read spatial Kh fields, not yet mapped to T-points).")
         vd = np.float32 if velocity_float32 else np.float64
         if getattr(mesh, "_cgrid", False):
-            ny, nx = mesh._structured_shape
+            lay = mesh._cgrid_layout
             scal = (NemoReader.read_scalar_fields(ds, timestep, mesh, sample_vars,
                                                   mode_cfg) if sample_vars else None)
             if getattr(mode_cfg, "Fdrift3D", False):
                 return NemoReader._read_cgrid_3d(ds, timestep, mesh, vd, scal)
-            faces = []
-            for nm in ("u", "v"):
-                a = _surface_2d(ds[nm].isel(time=timestep))
-                if a.shape != (ny, nx):
-                    raise ValueError(
-                        f"NEMO {nm} shape {a.shape} != mesh grid {(ny, nx)}")
-                faces.append(np.nan_to_num(
-                    np.asarray(a, dtype=np.float64), nan=0.0, posinf=0.0,
-                    neginf=0.0).reshape(-1).astype(vd, copy=False))
+            faces = [_read_raster(ds[nm].isel(time=timestep), lay, k, nm, vector=True,
+                                  check=True, surface=True).reshape(-1).astype(vd, copy=False)
+                     for nm, k in (("u", "U"), ("v", "V"))]
             return VelocityField(
                 u=faces[0], v=faces[1], eta=np.zeros(mesh.n_nodes), w=None,
                 uv_layout="cgrid", scalars=scal)
@@ -779,8 +734,8 @@ class NemoReader:
         ref = cgrid_thickness(mesh._cgrid_zw, np.where(nlev > 0, nlev - 1, -1),
                               mesh._cgrid_e3b.reshape(ny, nx))
         wet = np.arange(ref.shape[0])[:, None, None] < nlev
-        dev = max(float(np.nanmax(np.abs(np.asarray(ds["e3t_file"].isel(time=r).values,
-                                                    dtype=np.float64) - ref)[wet] / ref[wet]))
+        dev = max(float(np.nanmax(np.abs(_read_raster(ds["e3t_file"].isel(time=r), mesh._cgrid_layout,
+                                                      "T", "e3t_file") - ref)[wet] / ref[wet]))
                   for r in (0, ds.sizes["time"] - 1))
         if dev > 1e-4:
             import warnings
@@ -800,10 +755,10 @@ class NemoReader:
         if zw.size == 0:
             raise ValueError("mode.Fdrift3D with mesh.nemo_grid: cgrid needs a "
                              "3-D mesh_mask (3-D tmask, e3t_1d, e1t, e2t)")
+        lay = mesh._cgrid_layout
         uv = []
-        for nm in ("u", "v"):
-            a = np.nan_to_num(np.asarray(ds[nm].isel(time=timestep).values,
-                                         dtype=np.float64))
+        for nm, k in (("u", "U"), ("v", "V")):
+            a = _read_raster(ds[nm].isel(time=timestep), lay, k, nm, vector=True, check=True)
             if a.shape != (zw.size - 1, ny, nx):
                 raise ValueError(f"NEMO {nm} shape {a.shape} != (K, ny, nx) "
                                  f"{(zw.size - 1, ny, nx)}")
@@ -821,8 +776,7 @@ class NemoReader:
             msg = (f"  NEMO cgrid 3-D: W from continuity, max |w(0)| = "
                    f"{np.abs(w[0]).max():.2e} m/s (surface residual)")
             if "w_file" in ds.variables:
-                wf = -np.nan_to_num(np.asarray(ds["w_file"].isel(time=timestep).values,
-                                               dtype=np.float64))
+                wf = -_read_raster(ds["w_file"].isel(time=timestep), lay, "T", "w_file")
                 if wf.shape == w[:-1].shape and wet.any():
                     msg += (f"; corr with the file's W = "
                             f"{np.corrcoef(w[:-1][wet], wf[wet])[0, 1]:.3f}")
@@ -845,13 +799,14 @@ class NemoReader:
                 if nm not in ds.variables:
                     raise ValueError(f"NEMO reader: sampled variable {nm!r} not "
                                      "in the dataset (grid_T, mode.sample_vars).")
-                a = np.asarray(ds[nm].isel(time=timestep).values, dtype=np.float64)
-                if getattr(mode_cfg, "Fdrift3D", False):
+                three = getattr(mode_cfg, "Fdrift3D", False)
+                a = _read_raster(ds[nm].isel(time=timestep), mesh._cgrid_layout, "T", nm,
+                                 surface=not three)
+                if three:
                     nl = mesh._cgrid_nlev_raster
                     a = np.where(np.arange(a.shape[0])[:, None, None] < nl, a, np.nan)
                     out[nm] = a.reshape(a.shape[0], -1)
                 else:
-                    a = _surface_2d(ds[nm].isel(time=timestep))
                     out[nm] = np.where(mesh._cgrid_nlev_raster > 0, a, np.nan).reshape(-1)
             return out
         node_id = mesh._structured_node_id
