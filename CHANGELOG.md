@@ -69,6 +69,9 @@ the tracker was developed privately from 2026-06.
   driver copied from the 1.1.0 template opens the data itself and does not
   apply the keys, which 1.1.0 refused outside FESOM 1.4 and which are now
   accepted: copy the new driver before using the keys in a chain.
+- `README.md` and `CITATION.cff` ask users to cite the article that describes
+  KELP (arXiv:2611.18528, https://doi.org/10.48550/arXiv.2611.18528);
+  `CITATION.cff` gives it as `preferred-citation`.
 
 ## [1.1.0] - 2026-11-16
 

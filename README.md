@@ -427,6 +427,13 @@ than guesses whenever those limits are exceeded. See the `nemo.py` notes in
 
 KELP is released under the BSD 3-Clause licence (`LICENSE`).
 
-If KELP contributes to work you publish, please cite it. `CITATION.cff` carries
-the machine-readable record that GitHub's "Cite this repository" button reads,
-and `CHANGELOG.md` records what changed in each release.
+If you use KELP in work you publish, please cite the article that describes it:
+
+> Kuznetsov, I., Androsov, A., Pantiukhin, D., Wekerle, C., Danilov, S., Jung, T.,
+> and Koldunov, N.: KELP v1.0: an agent-ready Lagrangian particle tracker for
+> unstructured meshes and HEALPix grids, arXiv [preprint], arXiv:2611.18528,
+> https://doi.org/10.48550/arXiv.2611.18528, 2026.
+
+`CITATION.cff` carries the same reference for GitHub's "Cite this repository"
+button, next to the record of the software release itself, and `CHANGELOG.md`
+records what changed in each release.
