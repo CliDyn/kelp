@@ -59,21 +59,67 @@ def _engine(path):
 _CALENDAR_ALIASES = {"360d": "360_day", "365d": "noleap", "366d": "all_leap"}
 
 
-def _open_nemo(path) -> xr.Dataset:
-    """``xr.open_dataset`` that accepts NEMO/XIOS calendar spellings
-    (``360d`` -> ``360_day``, ``365d`` -> ``noleap``, ``366d`` -> ``all_leap``),
-    which cftime rejects.  Files without such an alias open exactly as before."""
-    path = str(path)
-    raw = xr.open_dataset(path, engine=_engine(path), decode_times=False)
-    fix = {n: _CALENDAR_ALIASES[str(v.attrs["calendar"]).lower()]
-           for n, v in raw.variables.items()
-           if str(v.attrs.get("calendar", "")).lower() in _CALENDAR_ALIASES}
-    if not fix:
-        raw.close()
-        return xr.open_dataset(path, engine=_engine(path))
-    for n, cal in fix.items():
-        raw[n].attrs["calendar"] = cal
-    return xr.decode_cf(raw)
+def _expand(spec) -> list:
+    """One grid's files: a list/tuple as given, a string with glob characters
+    expanded (sorted; no match refuses), else the one path."""
+    if isinstance(spec, (list, tuple)):
+        files = [str(f) for f in spec]
+    elif any(c in str(spec) for c in "*?["):
+        import glob
+        files = sorted(glob.glob(str(spec)))
+        if not files:
+            raise FileNotFoundError(f"NEMO reader: no file matches {str(spec)!r}")
+    else:
+        files = [str(spec)]
+    if not files:
+        raise FileNotFoundError("NEMO reader: an empty file list")
+    return files
+
+
+def _open_nemo(spec) -> xr.Dataset:
+    """Open one grid's file(s); ``xr.open_dataset`` that accepts NEMO/XIOS
+    calendar spellings (``360d`` -> ``360_day``, ``365d`` -> ``noleap``,
+    ``366d`` -> ``all_leap``), which cftime rejects.  Several files (a list or
+    a glob) are joined along time with ``open_mfdataset`` (lazy, one chunk per
+    file) and must be in strictly increasing time order.  A single file
+    without such an alias opens exactly as before."""
+    files = _expand(spec)
+    eng = _engine(files[0])
+
+    def decode(raw):
+        fix = {n: _CALENDAR_ALIASES[str(v.attrs["calendar"]).lower()]
+               for n, v in raw.variables.items()
+               if str(v.attrs.get("calendar", "")).lower() in _CALENDAR_ALIASES}
+        for n, cal in fix.items():
+            raw[n].attrs["calendar"] = cal
+        return xr.decode_cf(raw), bool(fix)
+
+    if len(files) == 1:
+        raw = xr.open_dataset(files[0], engine=eng, decode_times=False)
+        ds, fixed = decode(raw)
+        if not fixed:
+            raw.close()
+            return xr.open_dataset(files[0], engine=eng)
+        return ds
+    with xr.open_dataset(files[0], engine=eng, decode_times=False) as first:
+        tname = next((d for d in first.dims if d.lower().startswith("time")), None)
+    if tname is None:
+        raise ValueError(f"NEMO reader: several files need a time dimension "
+                         f"to be joined along; {files[0]!r} has none")
+    # every file is decoded on its own (each carries its own time epoch)
+    ds = xr.open_mfdataset(files, engine=eng, decode_times=False, combine="nested",
+                           concat_dim=tname, data_vars="minimal", coords="minimal",
+                           compat="override", chunks={},
+                           preprocess=lambda d: decode(d)[0])
+    if tname in ds.indexes:
+        ix = ds.indexes[tname]
+        if not (ix.is_monotonic_increasing and ix.is_unique):
+            ds.close()
+            raise ValueError(
+                f"NEMO reader: the time axis of {len(files)} files (first "
+                f"{files[0]!r}) is not strictly increasing: overlapping, repeated "
+                "or out-of-order files")
+    return ds
 
 
 def _read_layout_flags(ds) -> dict:
@@ -348,6 +394,25 @@ def _sibling(path: str, letter: str) -> Optional[str]:
                 return cand
     return None
 
+def _siblings(files, letter):
+    """The grid_<letter> file of every grid_T file (``None`` when one is missing)."""
+    out = [_sibling(f, letter) for f in files]
+    return None if None in out else out
+
+
+def _grid_point(da) -> str:
+    """C-grid point of a field from its dimension / coordinate names
+    (``depthu``, ``nav_lon_grid_U``, ...); ``"T"`` when nothing says otherwise."""
+    import re
+    names = [str(n).lower() for n in (*da.dims, *da.coords)]
+    names += [str(da.attrs.get("coordinates", "")).lower()]
+    for n in names:
+        m = re.search(r"depth([uvwf])\b|grid_([uvwf])\b|_([uvwf])_(?:lon|lat)", n)
+        if m:
+            return next(g for g in m.groups() if g).upper()
+    return "T"
+
+
 def _refuse_unsupported_mode(mode_cfg, where):
     """Fail fast on mode settings the v1 reader cannot honour."""
     if mode_cfg is None:
@@ -363,6 +428,23 @@ def _refuse_unsupported_mode(mode_cfg, where):
         raise NotImplementedError(
             "the NEMO reader tracks the surface level only in v1; "
             f"mode.sigma_layer = {layer!r} is not supported (use 0 or null).")
+
+
+def _refuse_unsupported_vertical(ds, path) -> None:
+    """z-levels with partial bottom cells only: s-coordinates and ice-shelf
+    cavities are refused (the file's attributes, ``top_level``, ``misf``)."""
+    vc = ds.attrs.get("VertCoord")
+    if vc is not None and str(vc).strip().lower() not in ("zco", "zps"):
+        raise NotImplementedError(
+            f"mesh file {path!r}: VertCoord = {str(vc)!r}; only z-levels "
+            "(zco, zps) are supported, not s-coordinates")
+    if int(np.asarray(ds.attrs.get("IsfCav", 0)).reshape(-1)[0]) != 0 or (
+            "misf" in ds.variables and (np.asarray(ds["misf"]) > 0).any()) or (
+            "top_level" in ds.variables and (np.asarray(ds["top_level"]) > 1).any()):
+        raise NotImplementedError(
+            f"mesh file {path!r} has ice-shelf cavities (IsfCav / misf / "
+            "top_level > 1); they are not supported (levels must start at the "
+            "surface)")
 
 
 def _check_zps_rule(zw, nlev, e3b, e3u0, e3v0):
@@ -483,11 +565,19 @@ class NemoReader:
             return _read_raster(ds[nm].squeeze(), layout, kind, nm, check=check)
         glamf = cgrid_to_canonical(glamf, layout, "F", name="glamf")
         gphif = cgrid_to_canonical(gphif, layout, "F", name="gphif")
+        _refuse_unsupported_vertical(ds, path)
         tmask_n = _first(ds, ("tmask",))
-        if tmask_n is None:
+        if tmask_n is not None:
+            tm3 = rd(tmask_n, "T") > 0.5          # boolean: no float64 3-D copy kept
+        elif all(v in ds.variables for v in ("bottom_level", "top_level", "e3t_1d")):
+            # domain_cfg.nc (NEMO 4.x): no tmask; wet levels 1..bottom_level
+            bot = rd("bottom_level", "T")
+            tm3 = ((np.arange(1, ds["e3t_1d"].size + 1)[:, None, None] <= bot)
+                   & (bot > 0))
+        else:
             raise KeyError(
-                f"mesh.nemo_grid: cgrid needs tmask in the mesh file {path!r}")
-        tm3 = rd(tmask_n, "T") > 0.5          # boolean: no float64 3-D copy kept
+                f"mesh.nemo_grid: cgrid needs tmask (mesh_mask.nc) or top_level, "
+                f"bottom_level and e3t_1d (domain_cfg.nc) in the mesh file {path!r}")
         wet = tm3[0] if tm3.ndim == 3 else tm3
         depth2d = None
         vert = {}
@@ -510,6 +600,14 @@ class NemoReader:
                 jj, ii = np.nonzero(nlev > 0)
                 e3b = np.zeros(nlev.shape)
                 e3b[jj, ii] = e3t0[nlev[jj, ii] - 1, jj, ii]
+                above = np.arange(e3.size)[:, None, None] < nlev - 1     # not the bottom cell
+                ref = np.broadcast_to(e3[:, None, None], e3t0.shape)
+                if (np.abs(e3t0 - ref)[above] > 1e-3 * ref[above]).any():
+                    raise NotImplementedError(
+                        f"mesh file {path!r}: e3t_0 differs from e3t_1d above the "
+                        "bottom cell (s-coordinates / terrain-following levels); "
+                        "only z-levels with partial bottom cells (zco / zps) are "
+                        "supported")
                 _check_zps_rule(zw, nlev, e3b, e3u0, e3v0)
             for nm in ("e1t", "e2t"):
                 if (np.asarray(ds[nm]) <= 0).any():
@@ -562,23 +660,29 @@ class NemoReader:
         return mesh
 
     @staticmethod
-    def open_dataset(path, v_path=None, w_path=None, mode_cfg=None) -> xr.Dataset:
+    def open_dataset(path, v_path=None, w_path=None, mode_cfg=None, u_path=None) -> xr.Dataset:
         """Assemble grid_T (+ derived/overridden grid_U, grid_V[, grid_W]) into
         ONE dataset with vars u, v, [w], ssh, temp, salt sharing (time, [z],
         y, x) — so the per-step reader and the prefetch ``isel(time=slice)`` work.
+
+        Every path argument may be a glob or a list: the files of one grid are
+        joined along time.  grid_U/grid_V/grid_W default to the name-siblings of
+        each grid_T file (the ``grid_T`` token swapped); ``u_path`` / ``v_path`` /
+        ``w_path`` replace that for files without the token.
         """
         _refuse_unsupported_mode(mode_cfg, "open_dataset")
-        dsT = _open_nemo(path)
-        u_file = _sibling(path, "U")
-        v_file = v_path or _sibling(path, "V")
-        if u_file is None or v_file is None:
+        t_files = _expand(path)
+        u_files = _expand(u_path) if u_path else _siblings(t_files, "U")
+        v_files = _expand(v_path) if v_path else _siblings(t_files, "V")
+        if u_files is None or v_files is None:
             raise FileNotFoundError(
-                "NEMO reader: could not locate grid_U / grid_V siblings of "
-                f"{path!r}. grid_U must be a name-sibling of grid_T (the "
-                "'grid_T' token swapped to 'grid_U'); grid_V likewise or via "
-                "data.ncinput_v. Point data.ncinput at the *_grid_T.nc file.")
-        dsU = _open_nemo(u_file)
-        dsV = _open_nemo(v_file)
+                "NEMO reader: could not locate the grid_U / grid_V files of "
+                f"{path!r}. They must be name-siblings of the grid_T files (the "
+                "'grid_T' token swapped to 'grid_U'), or be given by "
+                "data.ncinput_u / data.ncinput_v.")
+        dsT = _open_nemo(t_files)
+        dsU = _open_nemo(u_files)
+        dsV = _open_nemo(v_files)
 
         # The merge below takes the time axis from grid_T only and indexes every
         # variable by the same integer timestep, so grid_U / grid_V MUST share
@@ -638,14 +742,23 @@ class NemoReader:
         # run_tracking startup probe (read_scalar_fields raises ValueError on an
         # absent var before any I/O), so it is never a silent wrong answer.
         for nm in (getattr(cfg, "sample_vars", None) or []):
-            if nm in dsT.variables:
-                data[nm] = _rename_tz(dsT[nm])
+            for ds_x, g in ((dsT, "T"), (dsU, "U"), (dsV, "V")):
+                if nm in ds_x.variables:
+                    pt = _grid_point(ds_x[nm])
+                    if g != "T" or pt != "T":
+                        raise ValueError(
+                            f"NEMO reader: sample_vars {nm!r} lives on the "
+                            f"{pt if g == 'T' else g}-points; only T-point fields "
+                            "(grid_T: temperature, salinity, ...) can be sampled")
+                    data[nm] = _rename_tz(dsT[nm])
+                    break
 
-        w_file = w_path or _sibling(path, "W")
-        if getattr(cfg, "Fdrift3D", False) and w_file is not None:
-            wn = _first(_open_nemo(w_file), ("vovecrtz", "w", "wo"))
+        w_files = _expand(w_path) if w_path else _siblings(t_files, "W")
+        if getattr(cfg, "Fdrift3D", False) and w_files is not None:
+            dsW = _open_nemo(w_files)
+            wn = _first(dsW, ("vovecrtz", "w", "wo"))
             if wn is not None:            # the file's W: only compared with the
-                data["w_file"] = _rename_tz(_open_nemo(w_file)[wn])   # continuity W
+                data["w_file"] = _rename_tz(dsW[wn])   # continuity W
         if getattr(cfg, "Fdrift3D", False) and "e3t" in dsT.variables:
             data["e3t_file"] = _rename_tz(dsT["e3t"])    # z*/vvl check only
         merged = xr.Dataset({k: v.variable for k, v in data.items()})
@@ -703,6 +816,10 @@ class NemoReader:
             return VelocityField(
                 u=faces[0], v=faces[1], eta=np.zeros(mesh.n_nodes), w=None,
                 uv_layout="cgrid", scalars=scal)
+        if getattr(mode_cfg, "Fdrift3D", False):
+            raise NotImplementedError(
+                "NEMO reader: mode.Fdrift3D needs mesh.nemo_grid: cgrid; the T-point "
+                "path is 2-D only. Use mesh.nemo_grid: cgrid or mode.Fdrift3D: false.")
         node_id = mesh._structured_node_id
 
         u2d = _surface_2d(ds["u"].isel(time=timestep))

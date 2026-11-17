@@ -852,8 +852,8 @@ def _shared_fields_tag(config) -> str:
         "mesh": asdict(config.mesh),
         "mode": asdict(config.mode),
         "data": {k: getattr(config.data, k, None)
-                 for k in ("ncinput", "ncinput_v", "ncinput_w",
-                           "ncinput_eta")},
+                 for k in ("ncinput", "ncinput_u", "ncinput_v",
+                           "ncinput_w", "ncinput_eta")},
         "velocity_float32": getattr(config.numerics,
                                     "velocity_float32", False),
         "diffusion": None,
@@ -882,7 +882,8 @@ def _shared_fields_tag(config) -> str:
         k: _path_fingerprint(v) for k, v in (
             ("mesh", getattr(config.mesh, "meshpath", None)),
             *((k, getattr(config.data, k, None))
-              for k in ("ncinput", "ncinput_v", "ncinput_w", "ncinput_eta")))
+              for k in ("ncinput", "ncinput_u", "ncinput_v", "ncinput_w",
+                        "ncinput_eta")))
         if v}
     ident["engine"] = _kelp_version()
     # The run GENERATION: stats cannot see an in-place rewrite of a nested
@@ -906,7 +907,11 @@ def _shared_fields_tag(config) -> str:
 def _path_fingerprint(path) -> list:
     """(name, size, mtime_ns) of a file, or of each top-level entry of a
     directory (a Zarr store, a multi-year directory); 'missing' otherwise."""
+    import glob
     import os
+    if any(c in str(path) for c in "*?["):      # a glob: its files, each stat'ed
+        return [[os.path.basename(f), os.stat(f).st_size, os.stat(f).st_mtime_ns]
+                for f in sorted(glob.glob(str(path)))] or ["missing"]
     try:
         st = os.stat(path)
     except OSError:

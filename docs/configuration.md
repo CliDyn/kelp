@@ -183,6 +183,7 @@ the remaining keys are not even validated.
 | Key | Default | Meaning |
 |---|---|---|
 | `ncinput` | `""` (required) | Velocity input: a single NetCDF file, a Zarr store, or (FESOM2 and FESOM 1.4) a **directory** of per-variable files; FESOM 1.4 also takes a glob pattern — see §5.1 for exactly what gets opened. |
+| `ncinput_u` | `""` | `nemo` only: the grid_U file(s) when their names lack the `grid_T` token (grid_V: `ncinput_v`, grid_W: `ncinput_w`). |
 | `ncinput_v` | `""` | Separate v-velocity file, for datasets where u and v live in different files. Empty = v is in `ncinput`. FESOM 1.4: more files, a directory or a glob, whose files simply join those of `ncinput`. |
 | `ncinput_w` | `""` | Separate vertical-velocity file (3-D). Empty = no W or W is in `ncinput`. FESOM 1.4: as `ncinput_v`. |
 | `ncinput_eta` | `""` | **healpix only** (other readers reject it). Separate ssh store for products whose velocity store carries no sea-surface height — the ng5 recipe: u/v from the 3-D store, `avg_zos` from the 2-D store. Empty = ssh is in `ncinput`, or a `3D`→`2D` filename sibling is auto-derived; if neither exists the run proceeds with eta = 0 (one warning). Both stores must share the exact same time axis (validated). |
@@ -215,6 +216,21 @@ it ends in `.zarr` or is a directory containing a `.zattrs` (Zarr v2) or
   NaN; since 2026-10-04).
 - Variables are then resolved by name inside the merged dataset (see
   `mode.var_*` in §2).
+
+**NEMO (`mesh.type: nemo`)** — no directory scanning. `ncinput`, `ncinput_u`,
+`ncinput_v`, `ncinput_w` each take a file, a glob or a list of files per grid;
+several files of one grid are joined along time (each decoded on its own epoch;
+the joined axis must be strictly increasing, else `ValueError`). Without
+`ncinput_u` / `_v` / `_w` the grid_U / grid_V / grid_W files are the
+`grid_T` -> `grid_U` ... token swap of each `ncinput` file (file by file);
+files without the token need the explicit keys. The existing pairing checks
+(record count, timestamps) run on the joined axes and `data.time_stamp` /
+`time_window` / `time_offset` apply to the joined one. `mesh.meshpath` may be a
+`mesh_mask.nc` or a `domain_cfg.nc` (cgrid: without `tmask` the 3-D mask comes
+from `top_level` / `bottom_level`). Refused with a clear message: s-coordinates
+(`VertCoord` other than zco/zps, or `e3t_0` differing from `e3t_1d` above the
+bottom cell), ice-shelf cavities (`IsfCav`, `misf`, `top_level > 1`),
+`sample_vars` that are U/V/W/F-point fields, `Fdrift3D` on `nemo_grid: tpoint`.
 
 **HEALPix (`mesh.type: healpix`)** — no directory scanning; three carriers,
 detected from the path:

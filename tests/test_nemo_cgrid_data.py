@@ -9,7 +9,8 @@ import pytest
 from kelp.core.config import MeshConfig, ModeConfig
 from kelp.readers import get_reader
 
-_d = os.environ.get("KELP_TEST_NEMO_DATA")
+# absolute: a relative value would break the symlinks made in tmp_path
+_d = os.path.abspath(os.environ["KELP_TEST_NEMO_DATA"]) if os.environ.get("KELP_TEST_NEMO_DATA") else None
 pytestmark = pytest.mark.skipif(not _d, reason="KELP_TEST_NEMO_DATA not set")
 
 
@@ -187,3 +188,39 @@ def test_orca2_cmip5_tpivot_with_halos_topology_only():
         a = ds[name.split("_")[0]].isel(time=0).values
         a = np.where(np.abs(a) > 1e10, np.nan, a)            # land fill
         cgrid_to_canonical(a, lay, kind, vector=vec, check=True, name=name)
+
+
+# --- input robustness: domain_cfg without tmask, files per grid, explicit grid paths ----
+def test_eorca025_domain_cfg_without_tmask_gives_the_same_mesh(tmp_path):
+    import xarray as xr
+    src = Path(_d) / "eorca025_equatorial_domain_cfg.nc"
+    with xr.open_dataset(src) as ds:
+        ds.drop_vars("tmask").to_netcdf(tmp_path / "domain_cfg.nc")
+    a, b = _mesh(src), _mesh(tmp_path / "domain_cfg.nc")
+    assert (a.n_nodes, a.n_elements) == (b.n_nodes, b.n_elements)
+    assert (a._cgrid_nlev_raster == b._cgrid_nlev_raster).all()
+
+
+def test_eorca025_files_split_in_time_join_along_time():
+    d = Path(_d)
+    sp = d / "eorca025_equatorial_split"
+    rd = get_reader("nemo")
+    mode = ModeConfig(Fdrift3D=True, var_u="uo", var_v="vo")
+    ds = rd.open_dataset(str(sp / "*_grid_T.nc"), mode_cfg=mode)
+    one = rd.open_dataset(str(d / "eorca025_equatorial_split" / "eorca025_1m_19760301_19760331_grid_T.nc"), mode_cfg=mode)
+    assert ds.sizes["time"] == 3 and (ds["time"].values[2:] == one["time"].values).all()
+    mesh = rd.load_mesh(MeshConfig(type="nemo", meshpath=str(d / "eorca025_equatorial_domain_cfg.nc"),
+                                   nemo_grid="cgrid"))
+    for t in (0, 2):
+        u = rd.read_velocities(ds, t, mesh, mode_cfg=mode).u
+        assert np.isfinite(u).all() and np.abs(u).max() > 0
+    assert (rd.read_velocities(ds, 2, mesh, mode_cfg=mode).u == rd.read_velocities(one, 0, mesh, mode_cfg=mode).u).all()
+
+
+def test_eorca025_crops_without_the_grid_token_via_explicit_paths():
+    d = Path(_d)
+    mode = ModeConfig(Fdrift3D=True, var_u="uo", var_v="vo")
+    ds = get_reader("nemo").open_dataset(
+        str(d / "eorca025_equatorial_T.nc"), u_path=str(d / "eorca025_equatorial_U.nc"),
+        v_path=str(d / "eorca025_equatorial_V.nc"), w_path=str(d / "eorca025_equatorial_W.nc"), mode_cfg=mode)
+    assert {"u", "v", "w_file"} <= set(ds.variables)

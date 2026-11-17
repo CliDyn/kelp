@@ -678,6 +678,7 @@ class DataConfig:
     alone.
     """
     ncinput: str = ""              # velocity NetCDF file or directory
+    ncinput_u: str = ""            # nemo only: grid_U file(s) when their names lack the grid_T token
     ncinput_v: str = ""            # separate v file (empty = u+v in same ncinput)
     ncinput_w: str = ""            # separate w file (empty = no w or w in ncinput)
     ncinput_eta: str = ""          # separate ssh store (healpix: the 2-D store; empty = ssh in ncinput or auto-derived sibling)
@@ -857,6 +858,7 @@ def _resolve_paths(cfg: AppConfig, config_dir: Path) -> None:
     if isinstance(cfg.mesh.levels, str):
         cfg.mesh.levels = _resolve(cfg.mesh.levels)
     cfg.data.ncinput = _resolve(cfg.data.ncinput)
+    cfg.data.ncinput_u = _resolve(cfg.data.ncinput_u)
     cfg.data.ncinput_v = _resolve(cfg.data.ncinput_v)
     cfg.data.ncinput_w = _resolve(cfg.data.ncinput_w)
     cfg.data.ncinput_eta = _resolve(cfg.data.ncinput_eta)
