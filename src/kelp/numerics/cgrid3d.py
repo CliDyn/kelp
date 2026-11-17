@@ -30,7 +30,7 @@ import numpy as np
 
 from ..core.geometry import METERS_PER_DEG_LAT, clamp_lat, wrap_lon
 from ..core.mesh import find_containing_elements, find_nearest_nodes
-from ..core.particles import FailureReason, ParticleStatus
+from ..core.particles import FailureReason, ParticleState, ParticleStatus
 from .interpolate import interp_cgrid3d
 
 # scheme -> (stage fractions a_n: stage n starts at x + a_n * dt * k_{n-1},
@@ -65,7 +65,42 @@ def _level_coord(mesh, e, ok, z=None, s=None):
     return k + (z - zw[k]) / e3 if s is None else zw[k] + (s - k) * e3
 
 
-def cgrid3d_step(state, vel, mesh, dt, time_dir, scheme, kwargs):
+def cgrid3d_step(state: ParticleState, vel, mesh, dt: float, time_dir: float,
+                 scheme: str, kwargs: dict) -> ParticleState:
+    """One Euler / RK2 / RK4 step of the exact 3-D C-grid path.
+
+    Parameters
+    ----------
+    state : ParticleState
+        Particles with ``z`` in metres (positive down).
+    vel : VelocityField
+        Face u / v and interface w of the current record.
+    mesh : Mesh
+        A 3-D ``build_cgrid_mesh`` mesh.
+    dt : float
+        Step (s), positive.
+    time_dir : float
+        ``+1`` forward, ``-1`` backward in time.
+    scheme : {"euler", "rk2", "rk4"}
+        Stage scheme.
+    kwargs : dict
+        Integrator options: ``vel_next`` / ``dt_to_next`` (temporal
+        interpolation between two records).  ``diffusion`` and ``recon``
+        (PCHIP) are refused.
+
+    Returns
+    -------
+    ParticleState
+        New state.  A stage or end point that leaves the mesh keeps the start
+        position and gets ``status = OUTSIDE`` with the matching
+        ``FailureReason``.  ``u``, ``v`` are the first stage's velocities (m/s)
+        and ``w`` is dz/dt (m/s) in the start cell.
+
+    Raises
+    ------
+    NotImplementedError
+        ``kwargs`` carries diffusion or PCHIP reconstruction.
+    """
     from . import integrators as I
     if kwargs.get("diffusion") is not None or kwargs.get("recon") is not None:
         raise NotImplementedError(

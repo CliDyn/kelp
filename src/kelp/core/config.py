@@ -677,11 +677,11 @@ class DataConfig:
     time bounds and output schedule, and the offset may also be given
     alone.
     """
-    ncinput: str = ""              # velocity NetCDF file or directory
-    ncinput_u: str = ""            # nemo only: grid_U file(s) when their names lack the grid_T token
-    ncinput_v: str = ""            # separate v file (empty = u+v in same ncinput)
-    ncinput_w: str = ""            # separate w file (empty = no w or w in ncinput)
-    ncinput_eta: str = ""          # separate ssh store (healpix: the 2-D store; empty = ssh in ncinput or auto-derived sibling)
+    ncinput: str | list[str] = ""              # velocity NetCDF file or directory
+    ncinput_u: str | list[str] = ""            # nemo only: grid_U file(s) when their names lack the grid_T token
+    ncinput_v: str | list[str] = ""            # separate v file (empty = u+v in same ncinput)
+    ncinput_w: str | list[str] = ""            # separate w file (empty = no w or w in ncinput)
+    ncinput_eta: str | list[str] = ""          # separate ssh store (healpix: the 2-D store; empty = ssh in ncinput or auto-derived sibling)
     inicloud: str = ""             # initial particle positions file
     output_path: str = ""          # trajectory NetCDF output (empty = in-memory only)
     time_averaging: Optional[str] = None  # "mean" or "instant" (None triggers warning)

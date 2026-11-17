@@ -100,7 +100,7 @@ def test_uniform_layer_flow_and_land_below_floor():
     assert out.status[1] == ParticleStatus.ALIVE and abs(out.lon[1] - lon0) < 1e-12
 
 
-def test_closed_overturning_cell_keeps_particles_inside():
+def _overturning_vel():
     mesh, e2u, e1v, nl = _box()
     n = NX - 2                                             # wet columns 1..n
     kk = np.arange(K + 1)[:, None]; ii = np.arange(NX)[None]
@@ -111,7 +111,11 @@ def test_closed_overturning_cell_keeps_particles_inside():
     v = np.zeros_like(u)
     w = _w(mesh, u, v, e2u, e1v)
     assert np.abs(w[0]).max() < 1e-12 * np.abs(w).max() + 1e-15        # closed at the lid
-    vel = _vel(mesh, u, v, w)
+    return mesh, _vel(mesh, u, v, w)
+
+
+def test_closed_overturning_cell_keeps_particles_inside():
+    mesh, vel = _overturning_vel()
     rng = np.random.default_rng(3)
     P = 40
     st = make_state(rng.uniform(1.1, 8.9, P) * D, rng.uniform(1.1, 4.9, P) * D,
@@ -126,6 +130,22 @@ def test_closed_overturning_cell_keeps_particles_inside():
     assert min(lo) >= 0.0 and max(hi) <= ZW[-1]
     assert st.lon.min() > D and st.lon.max() < (NX - 1) * D     # never leaves the wet box
     assert dz > 5.0                                                                    # and it really overturns
+
+
+def test_backward_tracking_returns_to_the_start():
+    mesh, vel = _overturning_vel()
+    rng = np.random.default_rng(4)
+    st = make_state(rng.uniform(1.5, 8.5, 20) * D, rng.uniform(1.5, 4.5, 20) * D,
+                    rng.uniform(5.0, 45.0, 20))
+    start = st
+    for _ in range(100):
+        st = cgrid3d_step(st, vel, mesh, 1.0e3, 1.0, "rk4", {})
+    moved = np.abs(st.lon - start.lon).max() / D
+    for _ in range(100):
+        st = cgrid3d_step(st, vel, mesh, 1.0e3, -1.0, "rk4", {})
+    assert moved > 0.1 and (st.status == ParticleStatus.ALIVE).all()
+    assert np.abs(st.lon - start.lon).max() < 1e-3 * moved * D
+    assert np.abs(st.z - start.z).max() < 1e-2
 
 
 def test_sample_returns_the_cell_value():

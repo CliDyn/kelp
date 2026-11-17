@@ -11,6 +11,8 @@ VelocityField from here).
 """
 from __future__ import annotations
 
+from typing import Tuple
+
 import numpy as np
 try:
     from numba import njit, prange
@@ -3545,31 +3547,84 @@ def _cgrid_args(mesh, vel):
             mesh._cgrid_kbv, mesh._cgrid_e3v)
 
 
-_NOW = np.empty(0)
+_ABSENT = np.empty(0)     # stands in for an absent w field
 
 
-def interp_cgrid_single(xp, yp, layer, mesh, vel, node_idx,
-                        time_dir=1.0, *, elem=-1):
-    """Single-point exact C-grid u/v (signature of ``interp_barycentric_single``)."""
+def interp_cgrid_single(xp: float, yp: float, layer: int, mesh, vel, node_idx: int,
+                        time_dir: float = 1.0, *, elem: int = -1
+                        ) -> Tuple[float, float, bool]:
+    """Exact C-grid u/v at one point (signature of ``interp_barycentric_single``).
+
+    Parameters
+    ----------
+    xp, yp : float
+        Position (deg).
+    layer : int
+        Unused (the 2-D path reads one layer).
+    mesh : Mesh
+        A ``build_cgrid_mesh`` mesh.
+    vel : VelocityField
+        ``u`` / ``v`` on the flattened face rasters.
+    node_idx : int
+        Nearest-node hint for the containment search.
+    time_dir : float
+        ``+1`` forward, ``-1`` backward in time (flips the velocity sign).
+    elem : int
+        Pre-validated containing element, ``-1`` = search.
+
+    Returns
+    -------
+    U, V : float
+        East / north velocity (m/s).
+    ok : bool
+        False outside every element.
+    """
     a = _cgrid_args(mesh, vel)
     U, V, _W, ok = _interp_cgrid_core(xp, yp, 0.0, int(node_idx), int(elem),
-                                      time_dir, *a, vel.u, vel.v, _NOW)
+                                      time_dir, *a, vel.u, vel.v, _ABSENT)
     return U, V, ok
 
 
 def interp_cgrid3d(lon, lat, z, mask, mesh, vel, nn_nodes, time_dir=1.0, *,
-                   elems=None):
-    """Exact C-grid u/v(/w) for the ``mask`` particles at ``(lon, lat, z)``
-    (``z`` ignored on a 2-D mesh, the fractional level on a 3-D one).
-    Returns ``(U, V, W, ok)``; ``W`` is zero in 2-D and ``ds/dt`` (levels/s) in 3-D; ``ok`` is False for a point outside every element (or below
-    the lateral ring)."""
+                   elems=None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Exact C-grid u/v(/w) for the ``mask`` particles (Delandmeter & van Sebille 2019).
+
+    Parameters
+    ----------
+    lon, lat : ndarray (P,)
+        Positions (deg).
+    z : ndarray (P,)
+        Fractional level ``s`` on a 3-D mesh; ignored on a 2-D one.
+    mask : ndarray of bool (P,)
+        Particles to evaluate.
+    mesh : Mesh
+        A ``build_cgrid_mesh`` mesh.
+    vel : VelocityField
+        Face velocities ``u`` / ``v`` (and ``w`` on the level interfaces in 3-D)
+        on the flattened rasters.
+    nn_nodes : ndarray of int (P,)
+        Nearest-node hints for the containment search.
+    time_dir : float
+        ``+1`` forward, ``-1`` backward in time.
+    elems : ndarray of int (P,) or None
+        Pre-validated containing elements (edge-walk tracker), ``-1`` = search.
+
+    Returns
+    -------
+    U, V : ndarray (P,)
+        East / north velocity (m/s).
+    W : ndarray (P,)
+        Zero in 2-D; ``ds/dt`` (levels per second) in 3-D.
+    ok : ndarray of bool (P,)
+        False for a point outside every element, or beyond the dry ring.
+    """
     a = _cgrid_args(mesh, vel)
     P = lon.shape[0]
     U = np.zeros(P); V = np.zeros(P); W = np.zeros(P)
     ok = np.zeros(P, dtype=bool)
     el = (np.full(P, -1, dtype=np.int32) if elems is None
           else np.asarray(elems, dtype=np.int32))
-    w_f = _NOW if vel.w is None else np.ascontiguousarray(vel.w).reshape(-1)
+    w_f = _ABSENT if vel.w is None else np.ascontiguousarray(vel.w).reshape(-1)
     uf = np.ascontiguousarray(vel.u).reshape(-1)
     vf = np.ascontiguousarray(vel.v).reshape(-1)
     args = (P, mask, lon, lat, np.asarray(z, dtype=np.float64), nn_nodes, el,
@@ -3579,12 +3634,24 @@ def interp_cgrid3d(lon, lat, z, mask, mesh, vel, nn_nodes, time_dir=1.0, *,
 
 
 def interp_cgrid(state, mesh, vel, nn_nodes, time_dir=1.0, layer=0, *,
-                 elems=None):
+                 elems=None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Exact Arakawa C-grid u/v for all active particles (2-D, NEMO).
 
-    Returns ``(U, V, ok)`` (east/north m/s); ``ok`` is False for a particle
-    outside every element.  ``elems`` are optional pre-validated containing
-    elements (edge-walk tracker).
+    Parameters
+    ----------
+    state : ParticleState
+        Particles; the alive ones are evaluated.
+    mesh, vel, nn_nodes, time_dir, elems
+        As for :func:`interp_cgrid3d`.
+    layer : int
+        Unused (the 2-D path reads one layer).
+
+    Returns
+    -------
+    U, V : ndarray (P,)
+        East / north velocity (m/s).
+    ok : ndarray of bool (P,)
+        False for a particle outside every element.
     """
     U, V, _W, ok = interp_cgrid3d(state.lon, state.lat, np.zeros(state.n_particles),
                                   state.alive_mask, mesh, vel, nn_nodes,

@@ -917,29 +917,32 @@ def sample_field(
     )
 
 
-__all__ = [
-    "sample_field",
-    "sample_field_cgrid",
-    "S_NEAREST",
-    "S_LEASTSQ",
-    "S_BARYCENTRIC",
-    "S_IDW",
-    "_METHOD_CODES",
-    "_combine_horizontal",
-    "_loop_sample_2d",
-    "_interp_mid_linear_single",
-    "_loop_sample_mid_3d",
-    "_loop_sample_mid_sigma",
-    "_sample_sigma_3d",
-]
-
-
 def sample_field_cgrid(values, mesh, lons, lats, zs=None, *, alive=None,
-                       nearest=None):
-    """Cell value of a T-point scalar on the exact C-grid layout (Parcels'
-    ``cgrid_tracer``): ``values`` is the flattened T raster ``(ny*nx,)`` or
-    ``(K, ny*nx)`` (land NaN); a particle gets the value of the wet cell
-    (and layer, from ``zs``) containing it, NaN elsewhere or when dead."""
+                       nearest=None) -> np.ndarray:
+    """Cell value of a T-point scalar on the exact C-grid layout.
+
+    Parameters
+    ----------
+    values : ndarray (ny*nx,) or (K, ny*nx)
+        Flattened T raster (land NaN), 2-D or layer-wise.
+    mesh : Mesh
+        A ``build_cgrid_mesh`` mesh.
+    lons, lats : ndarray (P,)
+        Particle positions (deg).
+    zs : ndarray (P,) or None
+        Depths (m); required for layer-wise ``values``, the layer is the one
+        containing the depth.
+    alive : ndarray of bool (P,) or None
+        Particles to sample (default: all).
+    nearest : ndarray of int (P,) or None
+        Nearest-node hints for the containment search.
+
+    Returns
+    -------
+    ndarray (P,)
+        The value of the wet cell (and layer) containing the particle; NaN
+        outside every cell, for a dry-ring cell, or for a dead particle.
+    """
     from ..core.mesh import find_containing_elements, find_nearest_nodes
     P = len(lons)
     alive = np.ones(P, dtype=bool) if alive is None else np.asarray(alive)
@@ -961,3 +964,20 @@ def sample_field_cgrid(values, mesh, lons, lats, zs=None, *, alive=None,
         out[idx] = values[flat]
     out[idx[~ok]] = np.nan
     return out
+
+
+__all__ = [
+    "sample_field",
+    "sample_field_cgrid",
+    "S_NEAREST",
+    "S_LEASTSQ",
+    "S_BARYCENTRIC",
+    "S_IDW",
+    "_METHOD_CODES",
+    "_combine_horizontal",
+    "_loop_sample_2d",
+    "_interp_mid_linear_single",
+    "_loop_sample_mid_3d",
+    "_loop_sample_mid_sigma",
+    "_sample_sigma_3d",
+]

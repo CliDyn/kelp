@@ -702,3 +702,41 @@ time: {{n_steps: 1}}
     else:
         with pytest.raises(ValueError, match="uv_interp: cgrid"):
             load_config(str(p))
+
+
+def test_checkpoint_restart_chain_equals_the_uncut_run(tmp_path):
+    from kelp.core.particles import make_state
+    from kelp.readers import get_reader
+    from kelp.tracking import run_single_realization
+    from kelp.writers import TrajectoryWriter, load_restart, load_trajectories
+    n = 9
+    tmask = np.zeros((n, n)); tmask[2:n - 1, 2:n - 1] = 1.0
+    (flon, flat), _ = _grid(n, n)
+    psi = np.zeros((n, n))
+    s = np.sin(np.pi * (np.arange(1, n - 1) - 1) / (n - 3))
+    psi[1:n - 1, 1:n - 1] = 1.5e4 * np.outer(s, s)
+    u, v = _faces(flon, flat, tmask, psi=psi)
+    gt, mm = _write(tmp_path, n, n, 0.0, tmask, u, v, n_time=10)
+    mode = ModeConfig(Fdrift2D=True, Fdrift3D=False, time_dir=1.0)
+    rd = get_reader("nemo")
+    mesh = rd.load_mesh(MeshConfig(type="nemo", meshpath=mm, nemo_grid="cgrid"))
+    ds = rd.open_dataset(gt, mode_cfg=mode)
+    num = NumericsConfig(dt=3600.0, integrator="rk4", output_freq=1, uv_interp="cgrid")
+    seeds = make_state(np.array([3.3, 4.6, 5.1]) * D, np.array([3.2, 5.2, 4.1]) * D)
+
+    def run(name, state, n_steps, step0=0, checkpoint_freq=0):
+        path = str(tmp_path / f"{name}.zarr")
+        w = TrajectoryWriter(path, state.n_particles).open()
+        run_single_realization(mesh, ds, rd, state, mode, num, start_time_idx=step0,
+                               n_steps=n_steps, n_time_total=ds.sizes["time"], writer=w,
+                               start_step_i=step0, checkpoint_freq=checkpoint_freq)
+        w.close()
+        return path
+    whole = load_trajectories(run("whole", seeds, 6))
+    p1 = run("a", seeds, 2, checkpoint_freq=2)
+    r = load_restart(p1)
+    p2 = run("b", r["state"], 4, step0=r["step_i"] + 1)
+    a, b = load_trajectories(p1), load_trajectories(p2)
+    np.testing.assert_array_equal(np.concatenate([a["lon"], b["lon"]], axis=1), whole["lon"])
+    np.testing.assert_array_equal(np.concatenate([a["lat"], b["lat"]], axis=1), whole["lat"])
+    assert np.ptp(whole["lon"]) > 0

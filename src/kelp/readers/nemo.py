@@ -29,7 +29,7 @@ grid_T file's ``nav_lon``/``nav_lat`` with an all-wet mask.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import xarray as xr
@@ -158,8 +158,9 @@ def _wrap_ratio(xyz) -> float:
     return float(np.median(wrap[ok] / step[ok])) if ok.any() else np.inf
 
 
-def detect_cgrid_layout(tlon, tlat, flon=None, flat=None, flags=None):
-    """Classify the raw raster for ``mesh.nemo_grid: cgrid`` -> ``(CgridLayout, notes)``.
+def detect_cgrid_layout(tlon, tlat, flon=None, flat=None, flags=None
+                        ) -> Tuple[CgridLayout, List[str]]:
+    """Classify the raw raster for ``mesh.nemo_grid: cgrid``.
 
     The coordinates decide what the raster contains: the E-W halo columns, the
     north halo row and the fold are identities between points (the copies NEMO's
@@ -176,6 +177,30 @@ def detect_cgrid_layout(tlon, tlat, flon=None, flat=None, flags=None):
     (last -> first column within 1.5 median spacings): fold identities on a
     partial-width crop symmetric about a pivot would otherwise join its edges.
     Also refuses zero-filled tiles (land-processor elimination) and a pole row.
+
+    Parameters
+    ----------
+    tlon, tlat : array_like (ny, nx)
+        T-point longitude / latitude (deg) of the raw raster.
+    flon, flat : array_like (ny, nx) or None
+        F-point coordinates (optional; they sharpen the fold test).
+    flags : dict or None
+        The file's NEMO 4.2 attributes ``Iperio`` / ``NFold`` / ``NFtype``.
+
+    Returns
+    -------
+    layout : CgridLayout
+        Halo columns, fold type and the open edges of the raster.
+    notes : list of str
+        Messages for the load log (e.g. flags that claim more than the raster
+        shows).
+
+    Raises
+    ------
+    ValueError
+        Zero-filled tiles, a pole row, ambiguous candidates, a partial-width
+        raster whose fold identities hold, or flags that contradict the
+        coordinates.
     """
     flags = flags or {}
     tlon, tlat = (np.asarray(a, dtype=np.float64) for a in (tlon, tlat))
@@ -779,12 +804,11 @@ class NemoReader:
             raise KeyError("NEMO reader: u/v variable not found in grid_U/grid_V "
                            f"(looked for {_U_ALIASES} / {_V_ALIASES}).")
 
-        _rename_tz = _rename_tz_da
 
-        data = {"u": _rename_tz(dsU[u_n]), "v": _rename_tz(dsV[v_n])}
+        data = {"u": _rename_tz_da(dsU[u_n]), "v": _rename_tz_da(dsV[v_n])}
         ssh_n = _first(dsT, _SSH_ALIASES, getattr(cfg, "var_eta", None) if cfg else None)
         if ssh_n is not None:
-            data["ssh"] = _rename_tz(dsT[ssh_n])
+            data["ssh"] = _rename_tz_da(dsT[ssh_n])
         # carry sampled T-point scalars (temp/salt/any) through under their names.
         # A missing/typoed sample_var is dropped silently HERE but caught at the
         # run_tracking startup probe (read_scalar_fields raises ValueError on an
@@ -798,7 +822,7 @@ class NemoReader:
                             f"NEMO reader: sample_vars {nm!r} lives on the "
                             f"{pt if g == 'T' else g}-points; only T-point fields "
                             "(grid_T: temperature, salinity, ...) can be sampled")
-                    data[nm] = _rename_tz(dsT[nm])
+                    data[nm] = _rename_tz_da(dsT[nm])
                     break
 
         merged = xr.Dataset({k: v.variable for k, v in data.items()})
@@ -897,15 +921,19 @@ class NemoReader:
         if not (getattr(mesh, "_cgrid", False) and mesh._cgrid_zw.size
                 and "nemo_t_files" in ds.attrs):
             return
-        e3t = _rename_tz_da(_open_nemo(ds.attrs["nemo_t_files"])["e3t"])
         ny, nx = mesh._structured_shape
         nlev = mesh._cgrid_nlev_raster
         ref = cgrid_thickness(mesh._cgrid_zw, np.where(nlev > 0, nlev - 1, -1),
                               mesh._cgrid_e3b.reshape(ny, nx))
         wet = np.arange(ref.shape[0])[:, None, None] < nlev
-        dev = max(float(np.nanmax(np.abs(_read_raster(e3t.isel(time=r), mesh._cgrid_layout,
-                                                      "T", "e3t") - ref)[wet] / ref[wet]))
-                  for r in (0, e3t.sizes["time"] - 1))
+        raw = _open_nemo(ds.attrs["nemo_t_files"])
+        try:
+            e3t = _rename_tz_da(raw["e3t"])
+            dev = max(float(np.nanmax(np.abs(_read_raster(e3t.isel(time=r), mesh._cgrid_layout,
+                                                          "T", "e3t") - ref)[wet] / ref[wet]))
+                      for r in (0, e3t.sizes["time"] - 1))
+        finally:
+            raw.close()
         if dev > 1e-4:
             import warnings
             warnings.warn(

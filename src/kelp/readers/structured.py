@@ -222,11 +222,30 @@ def _mirror(kind: str, j, i, layout: CgridLayout):
     return Y2 - j - oy, c0 + ((X2 - i - ox) - c0) % ni
 
 
-def cgrid_canonical(kind: str, j, i, layout: CgridLayout):
-    """Canonical ``(j, i, sign)`` of the canonical-raster points ``(j, i)`` of
-    ``kind`` (``"T"``, ``"U"``, ``"V"``, ``"F"``): the E-W wrap, then the fold
-    (a point beyond the fold line, or on it with the larger column, maps to its
-    mirror image, ``sign = -1``: vectors flip there).  Idempotent."""
+def cgrid_canonical(kind: str, j, i, layout: CgridLayout
+                    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Canonical point of canonical-raster points.
+
+    The E-W wrap is applied first, then the fold: a point beyond the fold line,
+    or on it with the larger column, maps to its mirror image.  Idempotent.
+
+    Parameters
+    ----------
+    kind : {"T", "U", "V", "F"}
+        Grid point type of the indices.
+    j, i : array_like of int
+        Row / column indices in the canonical (halo) raster of ``layout``.
+    layout : CgridLayout
+        The raster layout.
+
+    Returns
+    -------
+    j, i : ndarray of int64
+        Indices of the canonical points.
+    sign : ndarray of float
+        ``-1`` where the point was mirrored at the fold (vector components flip
+        there), else ``+1``.
+    """
     j = np.asarray(j, dtype=np.int64)
     i = np.asarray(i, dtype=np.int64)
     sign = np.ones(j.shape)
@@ -268,12 +287,39 @@ def _copy_sets(layout: CgridLayout, kind: str):
 
 def cgrid_to_canonical(a, layout: CgridLayout, kind: str, *, vector: bool = False,
                        check: bool = False, name: str = "raster") -> np.ndarray:
-    """Canonical float64 raster of ``a (..., ny, nx)`` (NaN / inf -> 0): padded
-    to the halo form, every copy overwritten from its canonical point (``vector``:
-    times the fold sign -- only u and v).  ``check=True`` first compares the
-    copies the raw raster carries with their canonical points (exact: NEMO
-    writes bit copies) and raises ``ValueError`` naming ``name`` on a mismatch
-    -- a stale halo, a wrong layout or the wrong grid file."""
+    """Bring a raw raster to the canonical (halo) form of ``layout``.
+
+    The raster is padded to ``layout.shape``, NaN / inf become 0, and every
+    halo / fold copy is overwritten from its canonical point.
+
+    Parameters
+    ----------
+    a : array_like (..., ny, nx)
+        Raw raster of ``layout.raw_shape`` on the trailing axes.
+    layout : CgridLayout
+        The raster layout.
+    kind : {"T", "U", "V", "F"}
+        Grid point type of ``a``.
+    vector : bool
+        Multiply the copies by the fold sign (u and v components only).
+    check : bool
+        First compare the copies the raw raster carries with their canonical
+        points (exact: NEMO writes bit copies).
+    name : str
+        Name used in error messages.
+
+    Returns
+    -------
+    ndarray (..., nr, nc), float64
+        The canonical raster.
+
+    Raises
+    ------
+    ValueError
+        The trailing shape is not ``layout.raw_shape``, or (``check``) a copy
+        differs from its canonical point: a stale halo, a wrong layout or a
+        field from another grid file.
+    """
     a = np.asarray(a)
     ny, nx = layout.raw_shape
     if a.ndim < 2 or a.shape[-2:] != (ny, nx):
@@ -373,13 +419,6 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         The raster layout (``readers.nemo.detect_cgrid_layout``); the arrays
         must have ``layout.shape``.  ``None`` = a closed regional raster (its
         edges are walls or open water: nothing is merged).
-    The mesh always carries ONE ring of dry cells (8-neighbourhood of the wet
-    region, across the seam and the fold) as zero-velocity elements after the
-    wet ones (land = zero velocity, as in Parcels): a stage or end point in the
-    ring reads zero velocity (the particle stays ALIVE); beyond the ring a
-    stage still fails.  Ring cells that are non-convex or sit at a fold pivot
-    are dropped.
-
     nlev2d, zw, area, e3b, e3u0, e3v0 : array_like or None
         3-D (z-level, partial bottom cells): ``nlev2d (ny, nx)`` wet levels per
         column, ``zw (K+1,)`` the reference layer interfaces (positive down),
@@ -404,6 +443,15 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         the same quad (containment is winding-agnostic).  Also
         ``_cgrid_nlev (E,) int32`` (the wet levels: 1 for a wet 2-D cell; the
         wet elements come first, the ring cells (0) after them).
+
+    Notes
+    -----
+    The mesh always carries ONE ring of dry cells (8-neighbourhood of the wet
+    region, across the seam and the fold) as zero-velocity elements after the
+    wet ones (land = zero velocity, as in Parcels): a stage or end point in the
+    ring reads zero velocity (the particle stays ALIVE); beyond the ring a
+    stage still fails.  Ring cells that are non-convex or sit at a fold pivot
+    are dropped.
     """
     lon2d = np.asarray(glamf, dtype=np.float64)
     lat2d = np.asarray(gphif, dtype=np.float64)
@@ -446,7 +494,6 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
     ej, ei = np.nonzero(wet)
     quad_raster = quads(ej, ei)
     n_wet = int(ej.size)
-    n_ring = 0
     # a raster point is wet when its canonical cell is (the seam / fold
     # neighbourhoods are then seen without index arithmetic)
     wet_full = wet[cj, ci]
@@ -597,10 +644,26 @@ def _partial_level(zw, e3, shape):
     return kb.astype(np.int32).reshape(-1), np.where(kb >= 0, th, 0.0).reshape(-1)
 
 
-def cgrid_thickness(zw, kb, e3):
-    """Thickness field ``(K, ny, nx)``: the reference layers, level ``kb[j, i]``
-    replaced by ``e3[j, i]`` where ``kb >= 0`` (cells: ``kb = nlev - 1`` and the
-    bottom thickness; faces: the mesh's ``_cgrid_kbu/_e3u`` or ``_kbv/_e3v``)."""
+def cgrid_thickness(zw, kb, e3) -> np.ndarray:
+    """Layer thicknesses with partial levels.
+
+    Parameters
+    ----------
+    zw : array_like (K+1,)
+        Reference layer interfaces (m, positive down).
+    kb : ndarray of int (ny, nx)
+        The one partial level per point, ``-1`` = none (cells: ``nlev - 1``;
+        faces: the mesh's ``_cgrid_kbu`` / ``_cgrid_kbv``).
+    e3 : ndarray (ny, nx)
+        Thickness of that level (cells: the bottom thickness; faces:
+        ``_cgrid_e3u`` / ``_cgrid_e3v``).
+
+    Returns
+    -------
+    ndarray (K, ny, nx)
+        The reference layers, with level ``kb[j, i]`` replaced by ``e3[j, i]``
+        where ``kb >= 0``.
+    """
     K = len(zw) - 1
     out = np.broadcast_to(np.diff(zw)[:, None, None], (K,) + kb.shape).copy()
     jj, ii = np.nonzero(kb >= 0)
@@ -608,15 +671,30 @@ def cgrid_thickness(zw, kb, e3):
     return out
 
 
-def cgrid_w_from_continuity(u, v, e2u, e1v, e3u, e3v, area, nlev):
-    """Vertical velocity (positive down) from the continuity of the face
-    fluxes ``u*e2u*e3u`` and ``v*e1v*e3v`` (``e3u``/``e3v`` ``(K, ny, nx)``
-    from :func:`cgrid_thickness`),
-    integrated upward from ``w = 0`` at the sea floor.
+def cgrid_w_from_continuity(u, v, e2u, e1v, e3u, e3v, area, nlev) -> np.ndarray:
+    """Vertical velocity (positive down) from the continuity of the face fluxes.
 
-    ``u``, ``v`` ``(K, ny, nx)`` (land 0); ``nlev (ny, nx)`` wet levels.
-    Returns ``(K+1, ny, nx)``: the discrete field is exactly non-divergent in
-    every cell (surface ``w`` is the residual).
+    The fluxes ``u*e2u*e3u`` and ``v*e1v*e3v`` are integrated upward from
+    ``w = 0`` at the sea floor.
+
+    Parameters
+    ----------
+    u, v : ndarray (K, ny, nx)
+        Face velocities (m/s, land 0) on the east / north faces of each cell.
+    e2u, e1v : ndarray (ny, nx)
+        Face widths (m).
+    e3u, e3v : ndarray (K, ny, nx)
+        Face thicknesses (m), from :func:`cgrid_thickness`.
+    area : ndarray (ny, nx)
+        T-cell area ``e1t*e2t`` (m^2).
+    nlev : ndarray of int (ny, nx)
+        Wet levels per column.
+
+    Returns
+    -------
+    ndarray (K+1, ny, nx)
+        ``w`` (m/s) on the layer interfaces; the discrete field is exactly
+        non-divergent in every cell (the surface value is the residual).
     """
     fu = u * e2u * e3u
     fv = v * e1v * e3v
