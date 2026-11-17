@@ -820,10 +820,14 @@ def apply_time_options(ds, data_cfg, mesh_type: str) -> xr.Dataset:
                                               t.microsecond), "us")
                        for t in ax.instants], dtype="datetime64[us]")
         # ns only while every instant fits its range (1677-09-21 ..
-        # 2262-04-11): a window centre can cross it, and numpy wraps on
-        # overflow without an error — the round trip shows it
-        fits_ns = bool((us.astype("datetime64[ns]")
-                        .astype("datetime64[us]") == us).all())
+        # 2262-04-11): a window centre can cross it.  numpy < 2.5 wraps on
+        # overflow without an error (the round trip shows it), numpy >= 2.5
+        # raises OverflowError
+        try:
+            fits_ns = bool((us.astype("datetime64[ns]")
+                            .astype("datetime64[us]") == us).all())
+        except OverflowError:
+            fits_ns = False
         unit = ("ns" if np.datetime_data(vals.dtype)[0] == "ns" and fits_ns
                 else "us")
         new = us.astype(f"datetime64[{unit}]")
