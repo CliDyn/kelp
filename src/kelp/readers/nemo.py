@@ -359,7 +359,8 @@ class NemoReader:
         depth2d = None
         vert = {}
         tm3 = np.squeeze(ds[tmask_n].values) > 0.5
-        if tm3.ndim == 3 and "gdepw_1d" in ds.variables and "e1t" in ds.variables:
+        if tm3.ndim == 3 and all(
+                v in ds.variables for v in ("gdepw_1d", "e3t_1d", "e1t", "e2t")):
             # 3-D, full reference cells: interfaces from the 1-D tables
             e3 = np.squeeze(ds["e3t_1d"].values).astype(np.float64)
             gw = np.squeeze(ds["gdepw_1d"].values).astype(np.float64)
@@ -541,10 +542,6 @@ class NemoReader:
                 "NEMO reader v1: only uniform diffusion is supported "
                 "(em/m1 read spatial Kh fields, not yet mapped to T-points).")
         vd = np.float32 if velocity_float32 else np.float64
-        if getattr(mode_cfg, "Fdrift3D", False) and not getattr(mesh, "_cgrid", False):
-            raise NotImplementedError(
-                "the NEMO reader is 3-D only with mesh.nemo_grid: cgrid "
-                "(set mode.Fdrift3D: false for the T-point path).")
         if getattr(mesh, "_cgrid", False):
             ny, nx = mesh._structured_shape
             scal = (NemoReader.read_scalar_fields(ds, timestep, mesh, sample_vars,
@@ -590,7 +587,7 @@ class NemoReader:
     @staticmethod
     def _read_cgrid_3d(ds, timestep, mesh, vd, scalars):
         """3-D faces of one record on the full reference cells, plus the W
-        that makes them exactly non-divergent (``cgrid_w_from_continuity``)."""
+        that makes them non-divergent up to float32 rounding (``cgrid_w_from_continuity``)."""
         ny, nx = mesh._structured_shape
         zw = mesh._cgrid_zw
         if zw.size == 0:

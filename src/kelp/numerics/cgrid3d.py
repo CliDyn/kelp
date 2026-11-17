@@ -6,9 +6,9 @@ column bottom belong to the containing T-cell, not to the nearest F-node, which
 is what the shared z-level helpers use).  No stage clamping, no pull-back: a
 stage or end point in a dry ring cell reads zero velocity; a stage beyond the
 ring fails (``INTERPOLATION_FAILED``) and an end outside the mesh is
-``OUT_OF_BOUNDS``, as in every other path.  The end depth gets the z-level
-path's clamp (``_clamp_z``: ``z >= zw[0]`` at the surface, ``z <= mesh.depth``
-of the nearest node -- here the F-node's deepest neighbouring column).
+``OUT_OF_BOUNDS``, as in every other path.  The end depth is clamped at the
+surface only (``z >= zw[0]``; the continuity W leaves a surface residual), never
+at the bottom: a level at or below a column's floor is land, zero velocity.
 """
 from __future__ import annotations
 
@@ -45,7 +45,8 @@ def cgrid3d_step(state, vel, mesh, dt, time_dir, scheme, kwargs):
             lon, lat, z = state.lon, state.lat, state.z
         U, V, W, ok_n = interp_cgrid3d(lon, lat, z, ok, mesh, sv,
                                        find_nearest_nodes(mesh, lon, lat), time_dir)
-        first = first or (U, V, W)
+        if n == 0:
+            first = (U, V, W)
         ok = ok & ok_n
         ks.append((dt * U / I._z0(lat), dt * V / METERS_PER_DEG_LAT, dt * W))
     d = [sum(bn * k[c] for bn, k in zip(b, ks)) for c in range(3)]
@@ -62,7 +63,7 @@ def cgrid3d_step(state, vel, mesh, dt, time_dir, scheme, kwargs):
     nn = np.where(failed, find_nearest_nodes(mesh, state.lon, state.lat), nn)
     status = state.status.copy()
     status[failed] = ParticleStatus.OUTSIDE
-    z = I._clamp_z(z, vel, mesh, nn, alive & ~failed)
+    z = np.where(alive & ~failed, np.maximum(z, mesh._cgrid_zw[0]), z)
     reason = I._update_failure_reason(
         state.failure_reason, {FailureReason.INTERPOLATION_FAILED: interp_failed,
                                FailureReason.OUT_OF_BOUNDS: domain_failed})

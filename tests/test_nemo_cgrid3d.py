@@ -51,7 +51,7 @@ def test_w_balances_every_cell_and_vanishes_at_the_floor():
     assert (w[k >= nl[None]] == 0).all()                  # floor and below
 
 
-def test_uniform_layer_flow_and_ring_level():
+def test_uniform_layer_flow_and_land_below_floor():
     mesh, e2u, e1v, nl = _box()
     uk = np.array([0.1, -0.2, 0.3, 0.0, 0.05])
     u = np.broadcast_to(uk[:, None, None], (K, NY, NX)).copy(); v = np.zeros_like(u)
@@ -66,8 +66,8 @@ def test_uniform_layer_flow_and_ring_level():
         np.testing.assert_allclose((out.lon[0] - lon0) * METERS_PER_DEG_LAT, uk[k] * dt,
                                    rtol=2e-3, atol=1e-9)
         assert abs(out.z[0] - (ZW[k] + 5.0)) < 1e-6        # no w in the interior
-    # a column with a bump: the level just below its floor is a zero-velocity ring
-    # level (the particle stays alive, stuck), two levels below fails
+    # a column with a bump: every level at or below its floor is zero-velocity land
+    # (the particle stays alive, stuck)
     nl = np.full((NY, NX), K); nl[4, 5] = 2
     mesh2, e2u, e1v, nl = _box(nl)
     w = cgrid_w_from_continuity(u, v, e2u, e1v, np.diff(ZW), e2u * e1v, nl)
@@ -75,7 +75,7 @@ def test_uniform_layer_flow_and_ring_level():
     st = make_state([lon0, lon0], [lat0, lat0], [ZW[2] + 1.0, ZW[3] + 1.0])
     out = cgrid3d_step(st, vel2, mesh2, dt, 1.0, "euler", {})
     assert out.status[0] == ParticleStatus.ALIVE and abs(out.lon[0] - lon0) < 1e-12
-    assert out.status[1] == ParticleStatus.OUTSIDE
+    assert out.status[1] == ParticleStatus.ALIVE and abs(out.lon[1] - lon0) < 1e-12
 
 
 def test_closed_overturning_cell_keeps_particles_inside():
@@ -85,7 +85,7 @@ def test_closed_overturning_cell_keeps_particles_inside():
     phi = np.sin(np.pi * kk / K) * np.sin(np.pi * (ii - 0.0) / n)   # 0 at i=0, n; k=0, K
     phi[:, n + 1:] = 0.0
     u = np.zeros((K, NY, NX))
-    u[:] = ((phi[:-1] - phi[1:]) / (e2u[None, 3] * DZ) * 5.0)[:, None, :]   # u east face of T(j,i)
+    u[:] = ((phi[:-1] - phi[1:]) / (e2u[None, 3] * DZ) * 1.0e4)[:, None, :]   # u east face of T(j,i)
     v = np.zeros_like(u)
     w = cgrid_w_from_continuity(u, v, e2u, e1v, np.diff(ZW), e2u * e1v, nl)
     assert np.abs(w[0]).max() < 1e-12 * np.abs(w).max() + 1e-15        # closed at the lid
@@ -95,14 +95,15 @@ def test_closed_overturning_cell_keeps_particles_inside():
     st = make_state(rng.uniform(1.1, 8.9, P) * D, rng.uniform(1.1, 4.9, P) * D,
                     rng.uniform(1.0, 49.0, P))
     z0 = st.z.copy()
-    lo, hi = [], []
+    lo, hi, dz = [], [], 0.0
     for _ in range(300):
         st = cgrid3d_step(st, vel, mesh, 1.0e3, 1.0, "rk4", {})
         lo.append(st.z.min()); hi.append(st.z.max())
+        dz = max(dz, np.abs(st.z - z0).max())
     assert (st.status == ParticleStatus.ALIVE).all()
     assert min(lo) >= 0.0 and max(hi) <= ZW[-1]
     assert st.lon.min() > D and st.lon.max() < (NX - 1) * D     # never leaves the wet box
-    assert np.abs(st.z - z0).max() > 5.0                        # and it really overturns
+    assert dz > 5.0                                                                    # and it really overturns
 
 
 def test_sample_returns_the_cell_value():

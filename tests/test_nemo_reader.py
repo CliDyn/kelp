@@ -163,14 +163,14 @@ def test_rotation_rejected(tmp_path):
         reader.load_mesh(SimpleNamespace(meshpath=mm, rotation="fesom2"))
 
 
-def test_fdrift3d_refused_on_tpoint_read(tmp_path):
+def test_fdrift3d_refused_on_tpoint(tmp_path):
     # the T-point path is 2-D only (3-D needs mesh.nemo_grid: cgrid)
+    from kelp.tracking import run_tracking
     gt, mm = _make_nemo(tmp_path)
-    reader = get_reader("nemo")
-    ds = reader.open_dataset(gt, mode_cfg=ModeConfig(Fdrift2D=True, Fdrift3D=False))
-    mesh = reader.load_mesh(SimpleNamespace(meshpath=mm))
+    cfg, _out = _cfg(tmp_path, gt, mm)
+    cfg.mode.Fdrift3D = True
     with pytest.raises(NotImplementedError, match="Fdrift3D: false"):
-        reader.read_velocities(ds, 0, mesh, ModeConfig(Fdrift2D=False, Fdrift3D=True))
+        run_tracking(cfg)
 
 
 def test_em_diffusion_refused(tmp_path):

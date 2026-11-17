@@ -3369,8 +3369,9 @@ def _interp_cgrid_core(xp, yp, zp, nn_node, elem_hint, time_dir,
     3-D (``zw`` non-empty): u/v are the 2-D formula on the faces of the layer
     holding ``zp`` (constant within the layer); ``w_f`` ``((K+1)*ny*nx,)`` is
     linear in the layer's local coordinate and scaled by ``area/|detJ|`` so
-    the discrete field stays non-divergent.  The level just below a column's
-    floor is a zero-velocity ring level; deeper fails.
+    the discrete field stays non-divergent (exact up to float32 rounding of
+    the stored rasters).  Every level at or below a column's floor is land:
+    zero velocity, as dry columns are in 2-D.
 
     ``e2u_f``/``e1v_f`` are the model face widths (same raster; empty = absent):
     the fluxes are then ``u*e2u`` (W/E faces) and ``v*e1v`` (S/N faces), so the
@@ -3397,11 +3398,9 @@ def _interp_cgrid_core(xp, yp, zp, nn_node, elem_hint, time_dir,
     kz = 0
     nynx = 0
     if zw.shape[0] > 0:
-        nynx = e2u_f.shape[0]
+        nynx = area_f.shape[0]
         kz = max(np.searchsorted(zw, zp, side="right") - 1, 0)
-        if kz > cgrid_nlev[e]:
-            return 0.0, 0.0, 0.0, False
-        if kz == cgrid_nlev[e]:
+        if kz >= cgrid_nlev[e]:
             return 0.0, 0.0, 0.0, True
     ko = kz * nynx
     uW = u_f[ko + j * nx + i - 1]
@@ -3532,7 +3531,7 @@ def interp_cgrid3d(lon, lat, z, mask, mesh, vel, nn_nodes, time_dir=1.0, *,
     """Exact C-grid u/v(/w) for the ``mask`` particles at ``(lon, lat, z)``
     (``z`` ignored on a 2-D mesh).  Returns ``(U, V, W, ok)``; ``W`` is
     zero in 2-D; ``ok`` is False for a point outside every element (or below
-    the ring level in 3-D)."""
+    the lateral ring)."""
     a = _cgrid_args(mesh, vel)
     P = lon.shape[0]
     U = np.zeros(P); V = np.zeros(P); W = np.zeros(P)

@@ -216,8 +216,8 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         3-D (full reference cells): ``nlev2d (ny, nx)`` wet levels per column,
         ``zw (K+1,)`` the layer interfaces (positive down) and ``area (ny, nx)``
         the T-cell area ``e1t*e2t``.  ``mesh.sigma`` becomes ``zw`` and
-        ``_cgrid_nlev`` the wet levels (ring cells 0; the level just below a
-        column's floor is a zero-velocity ring level).
+        ``_cgrid_nlev`` the wet levels (ring cells 0; every level at or below a
+        column's floor is zero-velocity land).
 
     Returns
     -------

@@ -946,6 +946,8 @@ def _refuse_cgrid_unsupported(config) -> None:
         bad.append("diffusion in 3-D")
     if getattr(n.beaching, "enabled", False):
         bad.append("beaching")
+    if config.mode.Fdrift3D and getattr(n, "elem_search", "local") == "walk":
+        bad.append("elem_search 'walk' in 3-D")
     if bad:
         raise NotImplementedError(
             "numerics.uv_interp 'cgrid' (exact C-grid, v1) does not support: "
