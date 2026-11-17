@@ -411,12 +411,11 @@ of the windows only from a dataset resolved by `apply_time_options` or opened
 by the FESOM 1.4 reader; any other dataset, and an axis built from
 `numerics.file_dt` without record times, keeps the old rule.
 
-A cycled run on means cannot start before the first record's centre: the run
-clock starts within the record times, so a `start_date` before the first of
-them — 1 January 00:00 for monthly means, whose first record sits at
-16 January 12:00 — is refused as a date outside the record times. Start at the
-first centre or later; the run then crosses the seam into the next pass on its
-own.
+A cycled run on means starts within the record times: a `start_date` before
+the first record's centre (1 January 00:00 for monthly means, whose first
+record sits at 16 January 12:00) or after the last one (16 December 12:00) is
+refused as a date outside the record times. Start between the first and the
+last centre; the run then crosses the seam into the next pass on its own.
 
 ## §4 The velocity cache
 
