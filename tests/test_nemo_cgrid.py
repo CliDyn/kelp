@@ -674,3 +674,13 @@ def test_convex_corner_stage_stays_alive_in_ring():
     new, _m = _step_corner()                              # land = zero velocity
     assert new.status[0] == ParticleStatus.ALIVE
     assert new.lon[0] > 4.9 * D and new.lat[0] > 4.9 * D            # and did move on
+
+
+def test_cgrid_mesh_derives_uv_interp_and_refuses_contradictions():
+    from kelp.core.config import AppConfig, MeshConfig, NumericsConfig
+    mk = lambda **kw: AppConfig(mesh=MeshConfig(type="nemo", nemo_grid="cgrid"),
+                                numerics=NumericsConfig(**kw))
+    assert mk().numerics.uv_interp == "cgrid"
+    assert mk(uv_interp="cgrid").numerics.uv_interp == "cgrid"
+    with pytest.raises(ValueError, match="uv_interp: cgrid"):
+        mk(uv_interp="barycentric")

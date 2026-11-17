@@ -31,7 +31,7 @@ numerics:
   output_freq: 1
   uv_interp: barycentric  # REQUIRED with the default mesh.nemo_grid: tpoint (node-layout velocities).
                           # For the exact C-grid scheme (rotated/curvilinear grids, no flow through
-                          # land faces) set mesh.nemo_grid: cgrid AND uv_interp: cgrid (2-D only;
+                          # land faces) set mesh.nemo_grid: cgrid (uv_interp then becomes cgrid by itself; 2-D and 3-D;
                           # needs glamf/gphif/tmask in meshpath).
   temporal_interp: true   # blend between snapshots (NEMO output is time-stamped)
 

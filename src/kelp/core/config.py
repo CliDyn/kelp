@@ -806,6 +806,18 @@ class AppConfig:
     data: DataConfig = field(default_factory=DataConfig)
     time: TimeConfig = field(default_factory=TimeConfig)
 
+    def __post_init__(self):
+        # the exact C-grid scheme needs its own interpolator: ``mesh.nemo_grid:
+        # cgrid`` implies ``numerics.uv_interp: cgrid`` (the default ``leastsq``
+        # is replaced; naming any other interpolator is a contradiction)
+        if getattr(self.mesh, "nemo_grid", "tpoint") == "cgrid":
+            if self.numerics.uv_interp == "leastsq":
+                self.numerics.uv_interp = "cgrid"
+            elif self.numerics.uv_interp != "cgrid":
+                raise ValueError(
+                    "mesh.nemo_grid: cgrid uses numerics.uv_interp: cgrid (set "
+                    f"automatically); got {self.numerics.uv_interp!r}")
+
 
 def _load_yaml(path: Path) -> dict:
     """Read a YAML file, return dict."""
