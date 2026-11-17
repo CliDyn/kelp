@@ -154,6 +154,8 @@ def test_cf_polygon_bounds_named_nv_open():
 def test_exact_cycle_values(axis):
     out = _opened(axis)
     assert exact_cycle(out, _ft(out), 12) == YEAR
+    # the seam is measured from the first record, wherever the clock starts
+    assert exact_cycle(out, _ft(out) + 100.0, 12) == YEAR
     # January to March, as its own axis and as the cut of the year
     three = _opened(axis[:3])
     assert exact_cycle(three, _ft(three), 3) == (90 * DAY, 31 * DAY)
@@ -209,6 +211,17 @@ def test_window_equality_tolerance():
     assert got is not None
     assert got[0] == pytest.approx(3 * DAY + 0.002, abs=1e-9)
     assert got[1] == pytest.approx(DAY + 0.002, abs=1e-9)
+
+
+def test_exact_cycle_beyond_the_ns_range():
+    # monthly windows in 2300 (not a leap year), held at us: their lengths
+    # are taken at us, never through ns, which cannot hold these dates
+    edges = np.array(["2300-01-01", "2300-02-01", "2300-03-01", "2300-04-01"],
+                     dtype="datetime64[us]")
+    win = np.stack([edges[:-1], edges[1:]], axis=1)
+    ds = xr.Dataset(coords={TIME_WINDOWS: (("time", TIME_WINDOW_EDGE), win)})
+    ft = np.array([0.0, 29.5, 59.0]) * DAY
+    assert exact_cycle(ds, ft, 3) == (90 * DAY, 31 * DAY)
 
 
 def test_exact_cycle_leap_and_multi_year():
