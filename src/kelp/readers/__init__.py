@@ -731,9 +731,10 @@ def _time_axis_label(ds, data_cfg) -> str:
     encoding, else ``"the dataset"``."""
     paths = []
     for key in ("ncinput", "ncinput_u", "ncinput_v", "ncinput_w", "ncinput_eta"):
-        p = str(getattr(data_cfg, key, "") or "")
-        if p and p not in paths:
-            paths.append(p)
+        v = getattr(data_cfg, key, "") or ""
+        for p in ([str(q) for q in v] if isinstance(v, (list, tuple)) else [str(v)]):
+            if p and p not in paths:
+                paths.append(p)
     if paths:
         return ", ".join(paths)
     source = (getattr(ds, "encoding", None) or {}).get("source")

@@ -858,7 +858,9 @@ def _resolve_paths(cfg: AppConfig, config_dir: Path) -> None:
     Expands ``~`` and makes relative paths absolute using *config_dir*
     as the base.  Modifies *cfg* in place.
     """
-    def _resolve(p: str) -> str:
+    def _resolve(p):
+        if isinstance(p, (list, tuple)):          # a YAML list of files / globs
+            return [_resolve(q) for q in p]
         if not p:
             return p
         expanded = Path(p).expanduser()

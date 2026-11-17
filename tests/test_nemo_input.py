@@ -163,3 +163,19 @@ def test_glob_input_is_fingerprinted_by_its_files(tmp_path):
     fp = _path_fingerprint(str(tmp_path / "run_*_grid_T.nc"))
     assert [f[0] for f in fp] == ["run_0_2_grid_T.nc", "run_2_4_grid_T.nc"]
     assert _path_fingerprint(str(tmp_path / "nope_*.nc")) == ["missing"]
+
+
+def test_yaml_list_of_inputs_is_resolved_fingerprinted_and_labelled(tmp_path):
+    from kelp.core.config import load_config
+    from kelp.readers import _time_axis_label
+    from kelp.tracking import _path_fingerprint
+    (tmp_path / "a_grid_T.nc").write_bytes(b"x")
+    (tmp_path / "b_grid_T.nc").write_bytes(b"yy")
+    cfgf = tmp_path / "c.yaml"
+    cfgf.write_text("mode: {}\nnumerics: {dt: 60.0}\nmesh: {type: nemo, meshpath: m.nc}\n"
+                    "data: {ncinput: [a_grid_T.nc, b_grid_T.nc], inicloud: s.dat}\n"
+                    "time: {n_steps: 1}\n")
+    cfg = load_config(str(cfgf))
+    assert cfg.data.ncinput == [str(tmp_path / "a_grid_T.nc"), str(tmp_path / "b_grid_T.nc")]
+    assert [f[0] for f in _path_fingerprint(cfg.data.ncinput)] == ["a_grid_T.nc", "b_grid_T.nc"]
+    assert "a_grid_T.nc" in _time_axis_label(None, cfg.data)

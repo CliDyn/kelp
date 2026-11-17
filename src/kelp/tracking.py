@@ -909,6 +909,8 @@ def _path_fingerprint(path) -> list:
     directory (a Zarr store, a multi-year directory); 'missing' otherwise."""
     import glob
     import os
+    if isinstance(path, (list, tuple)):          # a YAML list: each entry in turn
+        return [f for p in path for f in _path_fingerprint(p)]
     if any(c in str(path) for c in "*?["):      # a glob: its files, each stat'ed
         return [[os.path.basename(f), os.stat(f).st_size, os.stat(f).st_mtime_ns]
                 for f in sorted(glob.glob(str(path)))] or ["missing"]
