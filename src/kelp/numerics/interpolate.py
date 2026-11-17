@@ -3349,22 +3349,185 @@ def interp_edge_leastsq(
 
 
 # ---------------------------------------------------------------------------
+# Exact Arakawa C-grid u/v (Delandmeter & van Sebille 2019; NEMO, 2-D).
+# The element is a T-cell with F-point corners SW, SE, NE, NW; the field is
+# the full face raster (u on the east face, v on the north face of T(j,i)),
+# flattened to ``(ny*nx,)``.  The normal flux through each cell edge is the
+# face velocity times the edge length; inside the cell the logical velocity
+# is linear along its own axis, d(xi)/dt = ((1-xi)U0 + xi U1)/detJ, which
+# keeps the interpolated field divergence-free where the face fluxes are, and
+# zero-normal-flow through land faces.
+# ---------------------------------------------------------------------------
+@njit(cache=True)
+def _interp_cgrid_core(xp, yp, nn_node, elem_hint, time_dir,
+                       node_to_elems, node_to_elems_count, elem_nodes,
+                       nodes_lon, nodes_lat, cgrid_corners, cgrid_ji, nx,
+                       u_f, v_f):
+    """C-grid u/v at one point; ``u_f``/``v_f`` are ``(ny*nx,)`` face rasters.
+
+    Returns ``(U, V, ok)`` in geographic m/s (east, north), consistent with
+    the integrators' ``METERS_PER_DEG_LAT`` metric.
+    """
+    if elem_hint >= 0:
+        e = int(elem_hint)
+    else:
+        e, in_dom = _find_containing_element_local(
+            xp, yp, nn_node, node_to_elems, node_to_elems_count,
+            elem_nodes, nodes_lon, nodes_lat)
+        if not in_dom:
+            return 0.0, 0.0, False
+    j = int(cgrid_ji[e, 0])
+    i = int(cgrid_ji[e, 1])
+    uW = u_f[j * nx + i - 1]
+    uE = u_f[j * nx + i]
+    vS = v_f[(j - 1) * nx + i]
+    vN = v_f[j * nx + i]
+    M = METERS_PER_DEG_LAT
+    cosl = np.cos(yp * DEG2RAD)
+    px = np.empty(4); py = np.empty(4)
+    for k in range(4):
+        nd = int(cgrid_corners[e, k])
+        px[k] = (((nodes_lon[nd] - xp + 180.0) % 360.0) - 180.0) * cosl * M
+        py[k] = (nodes_lat[nd] - yp) * M
+    # closed-form bilinear inverse of the point (0, 0) (Parcels v4)
+    a0 = px[0]; a1 = px[1] - px[0]; a2 = px[3] - px[0]
+    a3 = px[0] - px[1] + px[2] - px[3]
+    b0 = py[0]; b1 = py[1] - py[0]; b2 = py[3] - py[0]
+    b3 = py[0] - py[1] + py[2] - py[3]
+    scale = max(abs(a1), abs(a2), abs(b1), abs(b2), 1e-30)
+    aa = a3 * b2 - a2 * b3
+    bb = a3 * b0 - a0 * b3 + a1 * b2 - a2 * b1
+    cc = a1 * b0 - a0 * b1
+    eta = 0.0
+    if abs(aa) < 1e-12 * scale * scale:
+        if abs(bb) < 1e-300:
+            return 0.0, 0.0, False
+        eta = -cc / bb
+    else:
+        disc = bb * bb - 4.0 * aa * cc
+        if disc < 0.0:
+            disc = 0.0
+        sq = np.sqrt(disc)
+        r1 = (-bb + sq) / (2.0 * aa)
+        r2 = (-bb - sq) / (2.0 * aa)
+        d1 = max(0.0, -r1, r1 - 1.0)       # distance outside [0, 1]
+        d2 = max(0.0, -r2, r2 - 1.0)
+        eta = r1 if d1 <= d2 else r2
+    eta = min(max(eta, 0.0), 1.0)
+    den = a1 + a3 * eta
+    den2 = b1 + b3 * eta
+    if abs(den) >= abs(den2):
+        xi = (0.0 - a0 - a2 * eta) / den
+    else:
+        xi = (0.0 - b0 - b2 * eta) / den2
+    xi = min(max(xi, 0.0), 1.0)
+    # edge lengths and normal fluxes (positive towards +xi / +eta)
+    LS = np.hypot(px[1] - px[0], py[1] - py[0])
+    LE = np.hypot(px[2] - px[1], py[2] - py[1])
+    LN = np.hypot(px[3] - px[2], py[3] - py[2])
+    LW = np.hypot(px[0] - px[3], py[0] - py[3])
+    U0 = uW * LW; U1 = uE * LE; V0 = vS * LS; V1 = vN * LN
+    dxdxi = (1.0 - eta) * a1 + eta * (px[2] - px[3])
+    dydxi = (1.0 - eta) * b1 + eta * (py[2] - py[3])
+    dxdeta = (1.0 - xi) * a2 + xi * (px[2] - px[1])
+    dydeta = (1.0 - xi) * b2 + xi * (py[2] - py[1])
+    det = dxdxi * dydeta - dxdeta * dydxi
+    adet = abs(det)                       # either index-space handedness
+    if adet < 1e-12 * scale * scale:
+        return 0.0, 0.0, False
+    dxi = ((1.0 - xi) * U0 + xi * U1) / adet
+    deta = ((1.0 - eta) * V0 + eta * V1) / adet
+    U = dxdxi * dxi + dxdeta * deta
+    V = dydxi * dxi + dydeta * deta
+    return time_dir * U, time_dir * V, True
+
+
+@njit(parallel=True, cache=True)
+def _loop_interp_cgrid(P, alive_mask, lons, lats, nn_nodes, elems, time_dir,
+                       node_to_elems, node_to_elems_count, elem_nodes,
+                       nodes_lon, nodes_lat, cgrid_corners, cgrid_ji, nx,
+                       u_f, v_f, U, V, ok):
+    for i in prange(P):
+        if not alive_mask[i]:
+            continue
+        u, v, success = _interp_cgrid_core(
+            lons[i], lats[i], int(nn_nodes[i]), int(elems[i]), time_dir,
+            node_to_elems, node_to_elems_count, elem_nodes, nodes_lon,
+            nodes_lat, cgrid_corners, cgrid_ji, nx, u_f, v_f)
+        U[i] = u
+        V[i] = v
+        ok[i] = success
+
+
+def _cgrid_args(mesh, vel):
+    if not getattr(mesh, "_cgrid", False):
+        raise ValueError(
+            "uv_interp 'cgrid' needs a C-grid mesh (NEMO reader with "
+            "mesh.nemo_grid: cgrid)")
+    if vel.uv_layout != "cgrid":
+        raise ValueError(
+            f"uv_interp 'cgrid' needs uv_layout='cgrid', got {vel.uv_layout!r}")
+    return (mesh.node_to_elems, mesh.node_to_elems_count, mesh.elem_nodes,
+            mesh.nodes_lon, mesh.nodes_lat, mesh._cgrid_corners,
+            mesh._cgrid_elem_ji, int(mesh._structured_shape[1]))
+
+
+def interp_cgrid_single(xp, yp, layer, mesh, vel, node_idx,
+                        time_dir=1.0, *, elem=-1):
+    """Single-point exact C-grid u/v (signature of ``interp_barycentric_single``)."""
+    a = _cgrid_args(mesh, vel)
+    return _interp_cgrid_core(xp, yp, int(node_idx), int(elem), time_dir,
+                              *a, vel.u, vel.v)
+
+
+def interp_cgrid(state, mesh, vel, nn_nodes, time_dir=1.0, layer=0, *,
+                 elems=None):
+    """Exact Arakawa C-grid u/v for all active particles (2-D, NEMO).
+
+    Returns ``(U, V, ok)`` (east/north m/s); ``ok`` is False for a particle
+    outside every element.  ``elems`` are optional pre-validated containing
+    elements (edge-walk tracker).
+    """
+    a = _cgrid_args(mesh, vel)
+    P = state.n_particles
+    U = np.zeros(P, dtype=np.float64)
+    V = np.zeros(P, dtype=np.float64)
+    ok = np.zeros(P, dtype=bool)
+    elems_arr = (np.full(P, -1, dtype=np.int32) if elems is None
+                 else np.asarray(elems, dtype=np.int32))
+    if HAS_NUMBA:
+        _loop_interp_cgrid(P, state.alive_mask, state.lon, state.lat,
+                           nn_nodes, elems_arr, time_dir, *a,
+                           vel.u, vel.v, U, V, ok)
+    else:
+        for i in range(P):
+            if not state.alive_mask[i]:
+                continue
+            U[i], V[i], ok[i] = _interp_cgrid_core(
+                state.lon[i], state.lat[i], int(nn_nodes[i]),
+                int(elems_arr[i]), time_dir, *a, vel.u, vel.v)
+    return U, V, ok
+
+
+# ---------------------------------------------------------------------------
 # Method registry
 # ---------------------------------------------------------------------------
 #: methods whose vectorised form accepts the ``elems=`` pre-validated
 #: containing-element hints (edge-walk tracker); ``leastsq`` needs no
 #: containment and ignores the walk entirely.
-UV_INTERP_USES_ELEMS = frozenset({"barycentric", "edge_leastsq"})
+UV_INTERP_USES_ELEMS = frozenset({"barycentric", "edge_leastsq", "cgrid"})
 
 _UV_INTERPOLATORS = {
     "leastsq": interp_leastsq,
     "barycentric": interp_barycentric,
     "edge_leastsq": interp_edge_leastsq,
+    "cgrid": interp_cgrid,
 }
 _UV_INTERPOLATORS_SINGLE = {
     "leastsq": interp_leastsq_single,
     "barycentric": interp_barycentric_single,
     "edge_leastsq": interp_edge_leastsq_single,
+    "cgrid": interp_cgrid_single,
 }
 
 
@@ -3408,6 +3571,8 @@ __all__ = [
     "interp_barycentric_single",
     "interp_edge_leastsq",
     "interp_edge_leastsq_single",
+    "interp_cgrid",
+    "interp_cgrid_single",
     "interp_nearest_element",
     "get_interpolator",
     "get_interpolator_single",

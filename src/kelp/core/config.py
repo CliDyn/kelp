@@ -120,7 +120,7 @@ _VALID_DIFFUSION_SCHEMES = ("uniform", "em", "m1")
 _VALID_DIFFUSION_COMPOSITIONS = ("split", "combined", "split_rk")
 _VALID_KH_EVAL_POSITIONS = ("start", "end")
 _VALID_SAMPLE_INTERP = ("nearest", "leastsq", "barycentric", "idw")
-_VALID_UV_INTERP = ("leastsq", "barycentric", "edge_leastsq")
+_VALID_UV_INTERP = ("leastsq", "barycentric", "edge_leastsq", "cgrid")
 _VALID_EDGE_LSQ_BC = ("freeslip", "noslip")
 _VALID_ELEM_SEARCH = ("local", "walk")
 _VALID_TEMPORAL_RECONSTRUCTION = ("linear", "pchip")
@@ -509,6 +509,10 @@ class MeshConfig:
     #            (element-layout u/v => the fused leastsq kernels;
     #            v1 is 2-D only, no sampling / spatial Kh).
     healpix_geometry: str = "dual"
+    # NEMO only: "tpoint" (default; quads of T-points + face->T averaging,
+    # uv_interp barycentric) or "cgrid" (exact Arakawa C-grid: F-point cells,
+    # needs glamf/gphif in meshpath, uv_interp cgrid).
+    nemo_grid: str = "tpoint"
     # --- fesom14-only key (refused for the other mesh types) ------------
     # Euler angles [alpha, beta, gamma] (degrees, as in the run's namelist)
     # of the rotated frame a FESOM 1.4 ASCII mesh is stored in; the reader
@@ -549,6 +553,12 @@ class MeshConfig:
                     f"{self.grid_hash_cell_size!r}"
                 )
             self.grid_hash_cell_size = cell
+        if self.nemo_grid not in ("tpoint", "cgrid"):
+            raise ValueError(
+                "mesh.nemo_grid must be 'tpoint' or 'cgrid', got "
+                f"{self.nemo_grid!r}")
+        if self.nemo_grid != "tpoint" and self.type != "nemo":
+            raise ValueError("mesh.nemo_grid applies to mesh.type 'nemo' only")
         if self.healpix_geometry not in ("dual", "pixel"):
             raise ValueError(
                 "mesh.healpix_geometry must be 'dual' or 'pixel', got "

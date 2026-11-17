@@ -131,6 +131,98 @@ def build_structured_mesh(lon2d, lat2d, wet_mask, *,
     return mesh
 
 
+def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None,
+                     name: str = "nemo",
+                     r_earth: Optional[float] = None) -> Mesh:
+    """Build the exact-C-grid quad :class:`Mesh`: nodes = F-points, elements =
+    wet T-cells (the cell a ``numerics.uv_interp: cgrid`` particle lives in).
+
+    NEMO convention: ``T(j,i)`` is the cell centre, ``u(j,i)`` sits on its EAST
+    face, ``v(j,i)`` on its NORTH face and ``F(j,i)`` at its NE corner.  The
+    element of ``T(j,i)`` (``1 <= j < ny``, ``1 <= i < nx``, wet) has the
+    corners ``SW=F(j-1,i-1)``, ``SE=F(j-1,i)``, ``NE=F(j,i)``, ``NW=F(j,i-1)``;
+    nodes are the F-points referenced by at least one kept element.
+
+    Parameters
+    ----------
+    glamf, gphif : array_like (ny, nx)
+        F-point longitude / latitude (deg).
+    tmask2d : array_like (ny, nx)
+        Surface T-point land-sea mask (truthy = wet).
+    depth2d : array_like (ny, nx) or None
+        T-point bottom depth (m); a node takes the max over its wet neighbours.
+
+    Returns
+    -------
+    Mesh
+        Quad mesh; stashes ``_structured_shape=(ny, nx)``, ``_cgrid=True``,
+        ``_cgrid_elem_ji (E, 2)`` (the T-cell ``(j, i)`` of each element) and
+        ``_cgrid_corners (E, 4)`` (node ids, SW/SE/NE/NW — the interpolator
+        reads this, not ``elem_nodes``).  ``elem_nodes`` is the same quad
+        (containment is winding-agnostic).
+    """
+    lon2d = np.asarray(glamf, dtype=np.float64)
+    lat2d = np.asarray(gphif, dtype=np.float64)
+    if lon2d.ndim != 2 or lon2d.shape != lat2d.shape:
+        raise ValueError(
+            f"glamf/gphif must be 2-D (y, x) of equal shape, got "
+            f"{lon2d.shape} and {lat2d.shape}")
+    ny, nx = lon2d.shape
+    wet = np.asarray(tmask2d) > 0.5
+    if wet.shape != (ny, nx):
+        raise ValueError(f"tmask shape {wet.shape} != grid {(ny, nx)}")
+    wet = wet.copy()
+    wet[0, :] = False                 # no F corners south / west of the raster
+    wet[:, 0] = False
+    if not wet.any():
+        raise ValueError("cgrid mesh has no wet T-cells")
+    ej, ei = np.nonzero(wet)
+    raster = np.arange(ny * nx, dtype=np.int64).reshape(ny, nx)
+    quad_raster = np.stack([raster[ej - 1, ei - 1], raster[ej - 1, ei],
+                            raster[ej, ei], raster[ej, ei - 1]], axis=1)
+    referenced = np.unique(quad_raster)
+    n_nodes = int(referenced.size)
+    remap = np.full(ny * nx, -1, dtype=np.int64)
+    remap[referenced] = np.arange(n_nodes, dtype=np.int64)
+    corners = remap[quad_raster].astype(np.int32)
+
+    nodes_lon = np.ascontiguousarray(lon2d.reshape(-1)[referenced])
+    nodes_lat = np.ascontiguousarray(lat2d.reshape(-1)[referenced])
+    depth = np.zeros(n_nodes, dtype=np.float64)
+    if depth2d is not None:
+        d = np.abs(np.asarray(depth2d, dtype=np.float64))
+        d = np.where(np.asarray(tmask2d) > 0.5, np.nan_to_num(d), 0.0)
+        dp = np.zeros((ny + 1, nx + 1))
+        dp[:ny, :nx] = d                       # F(j,i): T(j,i)...T(j+1,i+1)
+        dm = np.maximum.reduce([dp[:ny, :nx], dp[1:, :nx], dp[:ny, 1:], dp[1:, 1:]])
+        depth = np.ascontiguousarray(dm.reshape(-1)[referenced])
+
+    elon = nodes_lon[corners]
+    elat = nodes_lat[corners]
+    ref = elon[:, [0]]
+    elon_unw = ref + ((elon - ref + 180.0) % 360.0 - 180.0)
+    elem_center_lon = ((elon_unw.mean(axis=1) + 180.0) % 360.0) - 180.0
+    elem_center_lat = elat.mean(axis=1)
+
+    validate_quad_convexity(corners, nodes_lon, nodes_lat,
+                            source=f"cgrid mesh '{name}'")
+    n2e, n2e_count = build_node_to_elems(n_nodes, corners)
+    kw = {} if r_earth is None else {"r_earth": r_earth}
+    mesh = Mesh(
+        name=name, nodes_lon=nodes_lon, nodes_lat=nodes_lat, depth=depth,
+        elem_nodes=corners.copy(),
+        elem_center_lon=np.ascontiguousarray(elem_center_lon),
+        elem_center_lat=np.ascontiguousarray(elem_center_lat),
+        node_to_elems=n2e, node_to_elems_count=n2e_count,
+        sigma=np.array([], dtype=np.float64), vertical_coord="zlevel", **kw)
+    mesh._structured_shape = (ny, nx)
+    mesh._cgrid = True
+    mesh._cgrid_elem_ji = np.stack([ej, ei], axis=1).astype(np.int64)
+    mesh._cgrid_corners = corners
+    build_search(mesh)
+    return mesh
+
+
 def c_grid_to_t(u_faces, v_faces, node_id) -> Tuple[np.ndarray, np.ndarray]:
     """Average Arakawa-C-grid face velocities onto wet T-points (-> node layout).
 
@@ -195,4 +287,4 @@ def field_to_nodes(field2d, node_id) -> np.ndarray:
     return out
 
 
-__all__ = ["build_structured_mesh", "c_grid_to_t", "field_to_nodes"]
+__all__ = ["build_structured_mesh", "build_cgrid_mesh", "c_grid_to_t", "field_to_nodes"]

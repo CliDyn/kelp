@@ -29,7 +29,10 @@ numerics:
   dt: 3600.0
   integrator: rk2
   output_freq: 1
-  uv_interp: barycentric  # REQUIRED: NEMO velocities are node-layout (T-points)
+  uv_interp: barycentric  # REQUIRED with the default mesh.nemo_grid: tpoint (node-layout velocities).
+                          # For the exact C-grid scheme (rotated/curvilinear grids, no flow through
+                          # land faces) set mesh.nemo_grid: cgrid AND uv_interp: cgrid (2-D only;
+                          # needs glamf/gphif/tmask in meshpath).
   temporal_interp: true   # blend between snapshots (NEMO output is time-stamped)
 
 mesh:

@@ -35,7 +35,8 @@ import xarray as xr
 from ..core.io import VelocityField
 from ..core.mesh import Mesh
 from . import register, _detect_engine
-from .structured import build_structured_mesh, c_grid_to_t, field_to_nodes
+from .structured import (build_cgrid_mesh, build_structured_mesh, c_grid_to_t,
+                         field_to_nodes)
 
 
 # Variable-name aliases (NEMO output naming varies by config / XIOS field defs).
@@ -198,6 +199,8 @@ class NemoReader:
         path = str(mesh_cfg.meshpath)
         ds = xr.open_dataset(path, engine=_engine(path))
         try:
+            if getattr(mesh_cfg, "nemo_grid", "tpoint") == "cgrid":
+                return NemoReader._load_cgrid_mesh(ds, path, mesh_cfg)
             lon_n = _first(ds, _LON_ALIASES)
             lat_n = _first(ds, _LAT_ALIASES)
             if lon_n is None or lat_n is None:
@@ -235,6 +238,32 @@ class NemoReader:
         finally:
             ds.close()
         return mesh
+
+    @staticmethod
+    def _load_cgrid_mesh(ds, path, mesh_cfg) -> Mesh:
+        """Exact C-grid mesh (``mesh.nemo_grid: cgrid``): F-point cells from
+        glamf/gphif + tmask.  No axis-alignment gate: the C-grid interpolator
+        works in index space and returns geographic u/v itself."""
+        try:
+            glamf, gphif = _squeeze_to_2d(ds["glamf"].values), _squeeze_to_2d(ds["gphif"].values)
+        except KeyError:
+            raise KeyError(
+                f"mesh.nemo_grid: cgrid needs glamf/gphif (F-point coordinates) "
+                f"in the mesh file {path!r}; found: {list(ds.variables)[:12]}…"
+            ) from None
+        tmask_n = _first(ds, ("tmask",))
+        if tmask_n is None:
+            raise KeyError(
+                f"mesh.nemo_grid: cgrid needs tmask in the mesh file {path!r}")
+        wet = _surface_2d(ds[tmask_n]) > 0.5
+        depth2d = None
+        for dn in ("hdept", "hdepw", "bathy_meter", "bathy_metry",
+                   "bathymetry", "Bathymetry"):
+            if dn in ds.variables:
+                depth2d = _squeeze_to_2d(ds[dn].values)
+                break
+        return build_cgrid_mesh(glamf, gphif, wet, depth2d=depth2d, name="nemo",
+                                r_earth=getattr(mesh_cfg, "r_earth", None))
 
     @staticmethod
     def open_dataset(path, v_path=None, w_path=None, mode_cfg=None) -> xr.Dataset:
@@ -338,8 +367,11 @@ class NemoReader:
 
     @staticmethod
     def probe_uv_layout(ds, mode_cfg=None, mesh=None) -> str:
-        # NEMO u/v are averaged onto T-points -> node layout (needs barycentric).
+        # NEMO u/v are averaged onto T-points -> node layout (needs barycentric),
+        # or kept on the faces for the exact C-grid scheme (mesh.nemo_grid: cgrid).
         # Surfacing it here lets run_tracking fail fast BEFORE creating a writer.
+        if mesh is not None and getattr(mesh, "_cgrid", False):
+            return "cgrid"
         return "node"
 
     @staticmethod
@@ -356,6 +388,23 @@ class NemoReader:
                 "NEMO reader v1: only uniform diffusion is supported "
                 "(em/m1 read spatial Kh fields, not yet mapped to T-points).")
         vd = np.float32 if velocity_float32 else np.float64
+        if getattr(mesh, "_cgrid", False):
+            if sample_vars:
+                raise NotImplementedError(
+                    "mesh.nemo_grid: cgrid does not support sample_vars (v1)")
+            ny, nx = mesh._structured_shape
+            faces = []
+            for nm in ("u", "v"):
+                a = _surface_2d(ds[nm].isel(time=timestep))
+                if a.shape != (ny, nx):
+                    raise ValueError(
+                        f"NEMO {nm} shape {a.shape} != mesh grid {(ny, nx)}")
+                faces.append(np.nan_to_num(
+                    np.asarray(a, dtype=np.float64), nan=0.0, posinf=0.0,
+                    neginf=0.0).reshape(-1).astype(vd, copy=False))
+            return VelocityField(
+                u=faces[0], v=faces[1], eta=np.zeros(mesh.n_nodes), w=None,
+                uv_layout="cgrid")
         node_id = mesh._structured_node_id
 
         u2d = _surface_2d(ds["u"].isel(time=timestep))
@@ -383,6 +432,9 @@ class NemoReader:
     @staticmethod
     def read_scalar_fields(ds, timestep, mesh, varnames, mode_cfg=None) -> dict:
         _refuse_unsupported_mode(mode_cfg, "read_scalar_fields")
+        if getattr(mesh, "_cgrid", False):
+            raise NotImplementedError(
+                "mesh.nemo_grid: cgrid does not support scalar sampling (v1)")
         node_id = mesh._structured_node_id
         out = {}
         for nm in varnames:

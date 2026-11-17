@@ -926,6 +926,31 @@ def _path_fingerprint(path) -> list:
 # Time-averaging midpoint shift
 # ---------------------------------------------------------------------------
 
+def _refuse_cgrid_unsupported(config) -> None:
+    """Exact C-grid (``uv_interp: cgrid``) v1 is 2-D, plain-flow only: refuse
+    the options that would read node/element fields it does not carry."""
+    n = config.numerics
+    bad = []
+    if config.mode.Fdrift3D:
+        bad.append("mode.Fdrift3D (3-D)")
+    if n.integrator == "rk45":
+        bad.append("integrator rk45")
+    if getattr(n, "temporal_reconstruction", "linear") != "linear":
+        bad.append("numerics.temporal_reconstruction")
+    if n.diffusion.enabled and n.diffusion.scheme != "uniform":
+        bad.append(f"diffusion scheme {n.diffusion.scheme!r}")
+    if config.mode.sample_vars:
+        bad.append("mode.sample_vars")
+    if getattr(n.beaching, "enabled", False):
+        bad.append("beaching")
+    if getattr(config.mesh, "rotation", None) is not None:
+        bad.append("mesh.rotation")
+    if bad:
+        raise NotImplementedError(
+            "numerics.uv_interp 'cgrid' (exact C-grid, v1) does not support: "
+            + ", ".join(bad))
+
+
 # --- u/v interpolation x layout compatibility (spec 2026-06-06) ---
 def _validate_uv_compat(uv_layout: str, uv_interp: str,
                         uv_vertical_option: str = "layer", *,
@@ -938,6 +963,11 @@ def _validate_uv_compat(uv_layout: str, uv_interp: str,
     u/v on a z-level ``mesh`` (when given) need the element bottoms and no
     ice-shelf cavities (:func:`_check_linear_element_mesh`; a sigma mesh
     needs neither)."""
+    if (uv_layout == "cgrid") != (uv_interp == "cgrid"):
+        raise ValueError(
+            "numerics.uv_interp 'cgrid' and the C-grid face layout go "
+            f"together (NEMO with mesh.nemo_grid: cgrid); got uv_layout="
+            f"{uv_layout!r}, uv_interp={uv_interp!r}.")
     if uv_layout == "node" and uv_interp in ("leastsq", "edge_leastsq"):
         raise ValueError(
             "node-based velocities (uv_layout='node', e.g. FESOM2 "
@@ -3387,6 +3417,8 @@ def run_tracking(
                             uv_vertical_option=_uv_vertical_option(
                                 config.mode),
                             mesh=mesh)
+    if config.numerics.uv_interp == "cgrid":
+        _refuse_cgrid_unsupported(config)
     if config.numerics.uv_interp != "leastsq":
         print(f"  uv_interp:         {config.numerics.uv_interp}")
     if (getattr(mesh, "metadata", None)

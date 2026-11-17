@@ -215,7 +215,7 @@ Paths are below `src/kelp/`.
   wet; the nodes are the wet cell centres that belong to at least one such quad).
   Notes: [readers.md](readers.md).
 - **`readers/nemo.py`** — NEMO adapter, version 1: 2-D, grids aligned with east and
-  north only (others are refused); node-layout u/v. Notes: [readers.md](readers.md).
+  north only (others are refused); node-layout u/v; opt-in exact C-grid path `mesh.nemo_grid: cgrid` (any grid orientation, 2-D). Notes: [readers.md](readers.md).
 
 ### Top level
 

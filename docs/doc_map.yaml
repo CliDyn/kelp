@@ -109,6 +109,7 @@ dev_readers:
   - src/kelp/readers/fesomc.py:FesomCReader
   - src/kelp/readers/healpix.py:HealpixReader
   - src/kelp/readers/structured.py:build_structured_mesh
+  - src/kelp/readers/structured.py:build_cgrid_mesh
   - src/kelp/readers/nemo.py:NemoReader
   - src/kelp/readers/fesom14/
   - src/kelp/readers/fesom2.py:_elem_level_metadata
