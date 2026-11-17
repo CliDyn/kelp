@@ -3361,7 +3361,7 @@ def interp_edge_leastsq(
 @njit(cache=True)
 def _interp_cgrid_core(xp, yp, nn_node, elem_hint, time_dir,
                        node_to_elems, node_to_elems_count, elem_nodes,
-                       nodes_lon, nodes_lat, cgrid_corners, cgrid_ji, nx,
+                       nodes_lon, nodes_lat, cgrid_corners, cgrid_ji, cgrid_nlev, nx,
                        e2u_f, e1v_f, u_f, v_f):
     """C-grid u/v at one point; ``u_f``/``v_f`` are ``(ny*nx,)`` face rasters.
 
@@ -3382,6 +3382,10 @@ def _interp_cgrid_core(xp, yp, nn_node, elem_hint, time_dir,
             elem_nodes, nodes_lon, nodes_lat)
         if not in_dom:
             return 0.0, 0.0, False
+    if cgrid_nlev[e] <= 0:
+        # dry-ring cell: zero velocity (the particle keeps its position; the
+        # step's end-of-step pull-back decides whether it may stay)
+        return 0.0, 0.0, True
     j = int(cgrid_ji[e, 0])
     i = int(cgrid_ji[e, 1])
     uW = u_f[j * nx + i - 1]
@@ -3459,7 +3463,7 @@ def _interp_cgrid_core(xp, yp, nn_node, elem_hint, time_dir,
 @njit(parallel=True, cache=True)
 def _loop_interp_cgrid(P, alive_mask, lons, lats, nn_nodes, elems, time_dir,
                        node_to_elems, node_to_elems_count, elem_nodes,
-                       nodes_lon, nodes_lat, cgrid_corners, cgrid_ji, nx,
+                       nodes_lon, nodes_lat, cgrid_corners, cgrid_ji, cgrid_nlev, nx,
                        e2u_f, e1v_f, u_f, v_f, U, V, ok):
     for i in prange(P):
         if not alive_mask[i]:
@@ -3467,7 +3471,7 @@ def _loop_interp_cgrid(P, alive_mask, lons, lats, nn_nodes, elems, time_dir,
         u, v, success = _interp_cgrid_core(
             lons[i], lats[i], int(nn_nodes[i]), int(elems[i]), time_dir,
             node_to_elems, node_to_elems_count, elem_nodes, nodes_lon,
-            nodes_lat, cgrid_corners, cgrid_ji, nx, e2u_f, e1v_f, u_f, v_f)
+            nodes_lat, cgrid_corners, cgrid_ji, cgrid_nlev, nx, e2u_f, e1v_f, u_f, v_f)
         U[i] = u
         V[i] = v
         ok[i] = success
@@ -3483,7 +3487,8 @@ def _cgrid_args(mesh, vel):
             f"uv_interp 'cgrid' needs uv_layout='cgrid', got {vel.uv_layout!r}")
     return (mesh.node_to_elems, mesh.node_to_elems_count, mesh.elem_nodes,
             mesh.nodes_lon, mesh.nodes_lat, mesh._cgrid_corners,
-            mesh._cgrid_elem_ji, int(mesh._structured_shape[1]),
+            mesh._cgrid_elem_ji, mesh._cgrid_nlev,
+            int(mesh._structured_shape[1]),
             mesh._cgrid_e2u, mesh._cgrid_e1v)
 
 
@@ -3521,6 +3526,9 @@ def interp_cgrid(state, mesh, vel, nn_nodes, time_dir=1.0, layer=0, *,
             U[i], V[i], ok[i] = _interp_cgrid_core(
                 state.lon[i], state.lat[i], int(nn_nodes[i]),
                 int(elems_arr[i]), time_dir, *a, vel.u, vel.v)
+    from .cgrid_step import CGRID_STATS, count_ring_evals
+    CGRID_STATS["ring_stage_evals"] += count_ring_evals(
+        mesh, state.lon, state.lat, U, V, ok, state.alive_mask)
     return U, V, ok
 
 

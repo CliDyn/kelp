@@ -21,7 +21,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from ..core.mesh import (Mesh, build_node_to_elems, build_search,
-                         validate_quad_convexity)
+                         find_nonconvex_quads, validate_quad_convexity)
 
 
 def build_structured_mesh(lon2d, lat2d, wet_mask, *,
@@ -164,7 +164,7 @@ def _orca_canonical_f(ny, nx, orca):
 
 
 def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
-                     orca: Optional[str] = None,
+                     orca: Optional[str] = None, ring: bool = True,
                      name: str = "nemo",
                      r_earth: Optional[float] = None) -> Mesh:
     """Build the exact-C-grid quad :class:`Mesh`: nodes = F-points, elements =
@@ -203,6 +203,14 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         Global layout (``readers.nemo._detect_orca_layout``): ``None`` =
         closed raster (edges are walls), ``"ew"`` = east-west halo columns,
         ``"fpivot"`` = halo columns + F-point-pivot north fold.
+    ring : bool
+        Append ONE ring of dry cells (8-neighbourhood of the wet region,
+        across the ORCA halo / fold) as zero-velocity elements after the wet
+        ones (default).  A Runge-Kutta stage that lands just on land then
+        gets zero velocity instead of killing the particle; a stage beyond
+        the ring still fails.  ``ring=False`` = wet cells only.  Ring cells
+        that are non-convex or sit at a fold pivot are dropped (counted in
+        ``_cgrid_ring_dropped``).
 
     Returns
     -------
@@ -211,7 +219,10 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         ``_cgrid_orca``, ``_cgrid_elem_ji (E, 2)`` (the T-cell ``(j, i)`` of
         each element) and ``_cgrid_corners (E, 4)`` (node ids, SW/SE/NE/NW —
         the interpolator reads this, not ``elem_nodes``).  ``elem_nodes`` is
-        the same quad (containment is winding-agnostic).
+        the same quad (containment is winding-agnostic).  Also
+        ``_cgrid_n_wet`` (the first ``n_wet`` elements are wet cells, the
+        rest ring cells), ``_cgrid_nlev (E,) int32`` (1 wet / 0 ring) and
+        ``_cgrid_kallow (E,) int32`` (1; reserved for the 3-D ring).
     """
     if orca not in CGRID_ORCA_LAYOUTS:
         raise ValueError(f"orca must be one of {CGRID_ORCA_LAYOUTS}, got {orca!r}")
@@ -261,6 +272,60 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         quad_raster = canon[quad_raster]
     else:
         canon = None
+    n_wet = int(ej.size)
+    n_ring = 0
+    ring_dropped = {"pivot": 0, "nonconvex": 0, "chord": 0}
+    if ring:
+        # wetness of every raster cell, halo / fold copies taking their
+        # canonical partner's value (so the seam / fold neighbourhoods are
+        # visible without index arithmetic)
+        jj, ii = np.mgrid[0:ny, 0:nx]
+        cj, ci = jj.copy(), ii.copy()
+        if orca == "fpivot":
+            top = cj == ny - 1
+            ci[top] = nx - 1 - ci[top]
+            cj[top] = ny - 2
+        if orca is not None:
+            ci[ci == 0] = nx - 2
+            ci[ci == nx - 1] = 1
+        wet_full = wet[cj, ci]
+        pd_ = np.pad(wet_full, 1)
+        dil = np.zeros_like(wet_full)
+        for dj in range(3):
+            for di in range(3):
+                dil |= pd_[dj:dj + ny, di:di + nx]
+        rj, ri = np.nonzero(dil & ~wet_full)
+        rj, ri = cj[rj, ri], ci[rj, ri]
+        keep = (rj >= 1) & (ri >= 1)
+        if orca is not None:
+            keep &= ri <= nx - 2
+            if orca == "fpivot":
+                keep &= rj <= ny - 2
+        rj, ri = rj[keep], ri[keep]
+        rj, ri = np.unique(np.stack([rj, ri], 1), axis=0).T
+        if orca == "fpivot":
+            piv = [(nx - 2) // 2, (nx - 2) // 2 + 1, 1, nx - 2]
+            keep = ~((rj == ny - 2) & np.isin(ri, piv))
+            ring_dropped["pivot"] = int((~keep).sum())
+            rj, ri = rj[keep], ri[keep]
+        rq = np.stack([raster[rj - 1, ri - 1], raster[rj - 1, ri],
+                       raster[rj, ri], raster[rj, ri - 1]], axis=1)
+        if canon is not None:
+            ch = np.linalg.norm(
+                _unit_xyz(flat_lon[rq], flat_lat[rq])
+                - _unit_xyz(flat_lon[canon[rq]], flat_lat[canon[rq]]),
+                axis=-1).max(axis=1)
+            keep = ch <= SAME_POINT_CHORD
+            ring_dropped["chord"] = int((~keep).sum())
+            rj, ri, rq = rj[keep], ri[keep], canon[rq[keep]]
+        bad = find_nonconvex_quads(rq, flat_lon, flat_lat)
+        keep = np.ones(rq.shape[0], dtype=bool)
+        keep[bad] = False
+        ring_dropped["nonconvex"] = int(bad.size)
+        rj, ri, rq = rj[keep], ri[keep], rq[keep]
+        n_ring = int(rj.size)
+        ej = np.concatenate([ej, rj]); ei = np.concatenate([ei, ri])
+        quad_raster = np.concatenate([quad_raster, rq], axis=0)
     referenced = np.unique(quad_raster)
     n_nodes = int(referenced.size)
     remap = np.full(ny * nx, -1, dtype=np.int64)
@@ -306,12 +371,17 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
     mesh._cgrid_orca = orca
     mesh._cgrid_elem_ji = np.stack([ej, ei], axis=1).astype(np.int64)
     mesh._cgrid_corners = corners
+    mesh._cgrid_n_wet = n_wet
+    mesh._cgrid_nlev = np.r_[np.ones(n_wet), np.zeros(n_ring)].astype(np.int32)
+    mesh._cgrid_kallow = np.ones(n_wet + n_ring, dtype=np.int32)
+    mesh._cgrid_ring_dropped = dict(ring_dropped)
     if (e2u is None) != (e1v is None):
         raise ValueError("pass both e2u and e1v, or neither")
     # the faces the kept cells read: W/E (u at (j, i-1), (j, i)), S/N (v at
     # (j-1, i), (j, i)) -- land-eliminated / NaN-filled widths elsewhere load
-    faces = {"_cgrid_e2u": np.r_[ej * nx + ei - 1, ej * nx + ei],
-             "_cgrid_e1v": np.r_[(ej - 1) * nx + ei, ej * nx + ei]}
+    wj, wi = ej[:n_wet], ei[:n_wet]           # ring cells read no face
+    faces = {"_cgrid_e2u": np.r_[wj * nx + wi - 1, wj * nx + wi],
+             "_cgrid_e1v": np.r_[(wj - 1) * nx + wi, wj * nx + wi]}
     for nm, a in (("_cgrid_e2u", e2u), ("_cgrid_e1v", e1v)):
         if a is None:
             setattr(mesh, nm, np.empty(0, dtype=np.float64))

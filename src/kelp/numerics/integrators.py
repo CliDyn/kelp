@@ -26,6 +26,7 @@ inlined callee after a pull.
 """
 from __future__ import annotations
 
+import functools
 import math
 import warnings
 from typing import Optional
@@ -56,6 +57,7 @@ from .interpolate import (
     _interp_leastsq_core_dl,
     get_interpolator, UV_INTERP_USES_ELEMS, _reject_depth_linear, _DL_LAYOUT,
 )
+from .cgrid_step import cgrid_post_step, cgrid_pre_step
 from .vertical_uv import depth_points
 from ..core.mesh import (
     Mesh, find_nearest_nodes, find_containing_elements,
@@ -4994,6 +4996,21 @@ def _run_fused_rk2_3d_bary_pchip(state, recon, mesh, dt, time_dir, w_code,
 # Unfused fallback implementations (used when Numba unavailable or 3D RK2/RK4)
 # ---------------------------------------------------------------------------
 
+def _cgrid_ring_hooks(step):
+    """Wrap a public step function with the exact-C-grid dry-ring hooks
+    (``uv_interp == "cgrid"`` only; every other call is passed straight
+    through): kill a start in a ring cell before the step, pull an end in a
+    ring cell back to the last wet point after it (``numerics/cgrid_step``)."""
+    @functools.wraps(step)
+    def wrapped(state, vel, mesh, dt, time_dir, layer=0, **kwargs):
+        if kwargs.get("uv_interp") != "cgrid":
+            return step(state, vel, mesh, dt, time_dir, layer, **kwargs)
+        state = cgrid_pre_step(state, mesh)
+        return cgrid_post_step(
+            state, step(state, vel, mesh, dt, time_dir, layer, **kwargs), mesh)
+    return wrapped
+
+
 def _euler_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
                         w_interp="nearest", vel_next=None, dt_to_next=None,
                         Dmin=0.5, z0b_min=0.1, uv_interp="leastsq",
@@ -5147,6 +5164,7 @@ def _euler_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
 # Euler (forward)
 # ---------------------------------------------------------------------------
 
+@_cgrid_ring_hooks
 def euler_step(
     state: ParticleState,
     vel: VelocityField,
@@ -5605,6 +5623,7 @@ def _rk2_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
     return out
 
 
+@_cgrid_ring_hooks
 def rk2_step(
     state: ParticleState,
     vel: VelocityField,
@@ -6004,6 +6023,7 @@ def _rk4_step_unfused(state, vel, mesh, dt, time_dir, layer, is3d,
     return out
 
 
+@_cgrid_ring_hooks
 def rk4_step(
     state: ParticleState,
     vel: VelocityField,

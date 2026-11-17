@@ -219,6 +219,11 @@ def test_closed_basin_gyre_stays_inside(tmp_path):
     # they really circulate (not parked): many revolutions of the gyre
     tot = np.abs(np.diff(tr["lon"], axis=1)).sum(axis=1)
     assert tot.min() > 20 * D
+    # every recorded position is in a wet cell (the dry ring is never recorded)
+    from kelp.numerics.cgrid_step import cgrid_classify
+    wet, _e = cgrid_classify(get_reader("nemo").load_mesh(cfg.mesh),
+                             tr["lon"].ravel(), tr["lat"].ravel())
+    assert wet.all()
 
 
 # (d) flow into a wall: approach, never cross ---------------------------------
@@ -533,3 +538,120 @@ def test_orca_layout_detector():
     lon, lat = tlon[:, 1:-1], tlat[:, 1:-1]                     # fold, no halo
     with pytest.raises(NotImplementedError, match="halo"):
         _detect_orca_layout(lon, lat)
+
+
+# --- dry ring (one ring of zero-velocity cells around the wet region) --------
+def _ring_ji(mesh):
+    return {tuple(x) for x in mesh._cgrid_elem_ji[mesh._cgrid_n_wet:].tolist()}
+
+
+def test_ring_cells_8_neighbourhood():
+    ny = nx = 10
+    (flon, flat), _ = _grid(ny, nx)
+    tmask = np.zeros((ny, nx))
+    tmask[4, 4:6] = 1.0
+    tmask[7, 7] = 1.0
+    m0 = build_cgrid_mesh(flon, flat, tmask, ring=False)
+    m1 = build_cgrid_mesh(flon, flat, tmask)
+    assert m0._cgrid_n_wet == m1._cgrid_n_wet == 3 and m0.n_elements == 3
+    np.testing.assert_array_equal(m1._cgrid_elem_ji[:3], m0._cgrid_elem_ji)   # wet ids unchanged
+    np.testing.assert_array_equal(m1._cgrid_nlev, [1, 1, 1] + [0] * (m1.n_elements - 3))
+    expect = set()
+    for j, i in zip(*np.nonzero(tmask)):
+        expect |= {(j + a, i + b) for a in (-1, 0, 1) for b in (-1, 0, 1)}
+    expect -= {(j, i) for j, i in zip(*np.nonzero(tmask))}
+    assert _ring_ji(m1) == expect and len(_ring_ji(m1)) == m1.n_elements - 3
+
+
+def test_ring_across_seam_and_fold():
+    from kelp.core.mesh import build_elem_neighbors
+    flon, flat, _tlon, _tlat, tmask = _orca_grid()
+    tmask[4, NC] = 0.0                  # dry cell at the seam (col 0 is its halo copy)
+    tmask[0, NC] = 0.0
+    tmask[NY - 2, 4] = 0.0              # dry cell on the fold row (mirrored in the halo row)
+    mesh = build_cgrid_mesh(flon, flat, tmask, orca="fpivot")
+    ring = [tuple(x) for x in mesh._cgrid_elem_ji[mesh._cgrid_n_wet:].tolist()]
+    assert len(ring) == len(set(ring))                   # each canonical cell once
+    assert (4, NC) in ring and (NY - 2, 4) in ring
+    assert all(1 <= i <= NC for _j, i in ring) and all(1 <= j <= NY - 2 for j, _i in ring)
+    piv = {(NY - 2, i) for i in (1, NC // 2, NC // 2 + 1, NC)}
+    assert not piv & set(ring)
+    assert mesh._cgrid_ring_dropped["pivot"] == 4
+    build_elem_neighbors(mesh)                           # raises if an edge has > 2 cells
+    # the wet cell east of the seam dry cell reaches it across the halo
+    ji = [tuple(x) for x in mesh._cgrid_elem_ji.tolist()]
+    nb = build_elem_neighbors(mesh)
+    assert nb[ji.index((4, 1)), 3] == ji.index((4, NC))
+
+
+def _corner_case():
+    """Land block j, i >= 6 on a closed raster: node F(5, 5) has 3 wet cells
+    and one land cell.  Uniform NE flow (faces into land closed)."""
+    ny = nx = 10
+    (flon, flat), _ = _grid(ny, nx)
+    tmask = np.ones((ny, nx))
+    tmask[0, :] = 0.0; tmask[:, 0] = 0.0
+    tmask[6:, 6:] = 0.0
+    u, v = _faces(flon, flat, tmask, vx=1.0, vy=1.0)
+    return flon, flat, tmask, u, v
+
+
+def _step_corner(ring):
+    from kelp.core.particles import make_state
+    from kelp.numerics.integrators import rk4_step
+    flon, flat, tmask, u, v = _corner_case()
+    e2u, e1v = _widths(flon, flat)
+    mesh = build_cgrid_mesh(flon, flat, tmask, e2u=e2u, e1v=e1v, ring=ring)
+    vel = VelocityField(u=u.ravel(), v=v.ravel(), eta=np.zeros(mesh.n_nodes),
+                        uv_layout="cgrid")
+    st = make_state([4.9 * D], [4.9 * D])
+    st = st.replace(nearest_node=np.array([_nearest(mesh, 4.9 * D, 4.9 * D)], np.int32),
+                    failure_reason=np.zeros(1, np.int8))
+    dt = 0.3 * D * METERS_PER_DEG_LAT        # 1 m/s: the half step passes the corner by ~0.15 D
+    return rk4_step(st, vel, mesh, dt, 1.0, uv_interp="cgrid"), mesh
+
+
+def test_convex_corner_stage_no_longer_kills():
+    from kelp.core.particles import FailureReason, ParticleStatus
+    from kelp.numerics.cgrid_step import CGRID_STATS, cgrid_classify, reset_stats
+    old, _m = _step_corner(ring=False)                    # documents the old failure
+    assert old.status[0] == ParticleStatus.OUTSIDE
+    assert old.failure_reason[0] == FailureReason.INTERPOLATION_FAILED
+    reset_stats()
+    new, mesh = _step_corner(ring=True)
+    assert new.status[0] == ParticleStatus.ALIVE
+    assert cgrid_classify(mesh, new.lon, new.lat)[0].all()          # ends wet
+    assert new.lon[0] > 4.9 * D and new.lat[0] > 4.9 * D            # and did move on
+    assert CGRID_STATS["ring_stage_evals"] > 0 and CGRID_STATS["pullbacks"] == 1
+
+
+def test_settle_unit():
+    from kelp.core.particles import make_state
+    from kelp.numerics.cgrid_step import cgrid_classify, cgrid_post_step
+    flon, flat, tmask, u, v = _corner_case()
+    mesh = build_cgrid_mesh(flon, flat, tmask)
+    # the land block starts at row 6: a step from T(5,5) toward T(7,6) ends in the ring
+    st = make_state([4.5 * D, 4.5 * D], [4.5 * D, 4.5 * D])
+    st = st.replace(nearest_node=np.array([_nearest(mesh, 4.5 * D, 4.5 * D)] * 2, np.int32))
+    # particle 0: wet -> wet (untouched); particle 1: ends in a ring cell
+    res = st.replace(lon=np.array([4.6 * D, 5.5 * D]), lat=np.array([4.6 * D, 6.5 * D]))
+    out = cgrid_post_step(st, res, mesh)
+    assert out.lon[0] == res.lon[0] and out.lat[0] == res.lat[0]
+    # particle 1 moved along the segment, stopped just short of the land boundary
+    f = (out.lon[1] - 4.5 * D) / (1.0 * D)
+    assert 0.0 < f < 1.0 and out.lat[1] == pytest.approx(4.5 * D + f * 2.0 * D, abs=1e-12)
+    assert cgrid_classify(mesh, out.lon[1:], out.lat[1:])[0].all()
+    eps = 1e-6 * D
+    assert not cgrid_classify(mesh, out.lon[1:] + eps, out.lat[1:] + 2 * eps)[0].all()
+
+
+def test_start_in_ring_dies_out_of_bounds():
+    from kelp.core.particles import FailureReason, ParticleStatus, make_state
+    from kelp.numerics.cgrid_step import cgrid_pre_step
+    flon, flat, tmask, u, v = _corner_case()
+    mesh = build_cgrid_mesh(flon, flat, tmask)
+    st = make_state([4.5 * D, 5.5 * D], [4.5 * D, 5.5 * D])      # wet cell, land (ring) cell
+    st = st.replace(failure_reason=np.zeros(2, np.int8))
+    out = cgrid_pre_step(st, mesh)
+    assert list(out.status) == [ParticleStatus.ALIVE, ParticleStatus.OUTSIDE]
+    assert out.failure_reason[1] == FailureReason.OUT_OF_BOUNDS
