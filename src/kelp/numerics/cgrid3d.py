@@ -40,19 +40,28 @@ _BUTCHER = {"euler": ((0.0,), (1.0,)),
             "rk4": ((0.0, 0.5, 0.5, 1.0), (1 / 6, 1 / 3, 1 / 3, 1 / 6))}
 
 
-def _level_coord(mesh, e, ok, z=None, s=None):
-    """Metres <-> fractional level in the cell ``e`` (``ok``: found):
-    ``z -> s`` (given ``z``) or ``s -> z`` (given ``s``).  The cell's own
-    thickness is ``e3b`` at its bottom level (``shrunk``; ``porous``: the
-    reference layer there too), else the reference layer."""
+def _cell_thickness(mesh, e, ok, k):
+    """Thickness (m) of level ``k`` (clipped to the valid range) in the cell
+    ``e`` (``ok``: found); returns ``(k, e3)``.  The cell's own thickness is
+    ``e3b`` at its bottom level (``shrunk``; ``porous``: the reference layer
+    there too), else the reference layer."""
     zw = mesh._cgrid_zw
     c = np.where(ok, mesh._cgrid_elem_ji[e, 0] * mesh._structured_shape[1]
                  + mesh._cgrid_elem_ji[e, 1], 0)
     nl, e3b = mesh._cgrid_nlev_raster.reshape(-1)[c], mesh._cgrid_e3b[c]
-    k = (np.searchsorted(zw, z, side="right") - 1 if s is None
-         else np.floor(s).astype(int))
     k = np.clip(k, 0, len(zw) - 2)
     e3 = np.where((k == nl - 1) & (mesh._cgrid_partial == "shrunk"), e3b, zw[k + 1] - zw[k])
+    return k, e3
+
+
+def _level_coord(mesh, e, ok, z=None, s=None):
+    """Metres <-> fractional level in the cell ``e`` (``ok``: found):
+    ``z -> s`` (given ``z``) or ``s -> z`` (given ``s``), measured with the
+    thickness of :func:`_cell_thickness`."""
+    zw = mesh._cgrid_zw
+    k = (np.searchsorted(zw, z, side="right") - 1 if s is None
+         else np.floor(s).astype(int))
+    k, e3 = _cell_thickness(mesh, e, ok, k)
     return k + (z - zw[k]) / e3 if s is None else zw[k] + (s - k) * e3
 
 
@@ -105,8 +114,7 @@ def cgrid3d_step(state, vel, mesh, dt, time_dir, scheme, kwargs):
     z = np.where(s == s0, state.z,
                  _level_coord(mesh, np.where(failed, e0, e1), np.where(failed, ok0, in_dom), s=s))
     # vel_w in m/s: the first stage's ds/dt times the start cell's thickness
-    e3 = (_level_coord(mesh, e0, ok0, s=np.floor(s0) + 1.0)
-          - _level_coord(mesh, e0, ok0, s=np.floor(s0)))
+    _, e3 = _cell_thickness(mesh, e0, ok0, np.floor(s0).astype(int))
     w_ms = first[2] * e3
     reason = I._update_failure_reason(
         state.failure_reason, {FailureReason.INTERPOLATION_FAILED: interp_failed,

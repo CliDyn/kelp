@@ -387,6 +387,23 @@ def test_vel_w_is_dz_dt_in_metres_per_second():
     assert dzdt[0] != 0 and abs(out.w[0] - dzdt[0]) < 1e-3 * abs(dzdt[0])
 
 
+@pytest.mark.parametrize("z0", [5.0, 21.0])    # full cell / partial bottom cell (e3b = 4 m, reference 10 m)
+def test_vel_w_is_dz_dt_also_in_a_partial_bottom_cell(z0):
+    nl = np.full((NY, NX), K); nl[2:4, 3:6] = 3
+    e3b = np.full((NY, NX), DZ); e3b[2:4, 3:6] = 4.0
+    mesh, e2u, e1v, nl = _box(nl, e3b)
+    rng = np.random.default_rng(1)
+    u = rng.normal(size=(K, NY, NX)); v = rng.normal(size=(K, NY, NX))
+    kk = np.arange(K)[:, None, None]
+    u[:, :, :-1] *= kk < np.minimum(nl[:, :-1], nl[:, 1:])
+    v[:, :-1] *= kk < np.minimum(nl[:-1], nl[1:])
+    vel = _vel(mesh, u * 1e-3, v * 1e-3, _w(mesh, u, v, e2u, e1v) * 1e-3)
+    st = make_state([3.5 * D], [2.5 * D], [z0])
+    out = cgrid3d_step(st, vel, mesh, 1.0, 1.0, "euler", {})
+    dzdt = out.z[0] - z0
+    assert dzdt != 0 and abs(out.w[0] - dzdt) < 1e-6 * abs(dzdt)
+
+
 def test_cgrid3d_step_refuses_diffusion_and_reconstruction():
     mesh, *_ = _box()
     z = np.zeros((K, NY, NX))
