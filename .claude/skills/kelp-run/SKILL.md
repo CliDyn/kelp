@@ -167,7 +167,7 @@ gate (ask, then wait for an explicit yes) holds for every run.
      ```python
      rec = track_particles(mesh, ds, reader, lon0, lat0, n_steps=int(round(T / dt)), dt=dt, integrator=INTEGRATOR,
                            temporal_interp=True, file_times=file_times, file_dt=file_dt, output_freq=int(round(RECORD_S / dt)))
-     A = rec.to_arrays()   # (T, P), time first; time = seconds since the forcing's first raw record, at the END of each recorded step; record 0 = after output_freq steps — the release is A["release_lon"/"release_lat"/"release_z"/"release_time"] (P,)
+     A = rec.to_arrays()   # (T, P), time first; time = seconds since the forcing's first raw record (first resolved record for fesom14 or after readers.apply_time_options), at the END of each recorded step; record 0 = after output_freq steps — the release is A["release_lon"/"release_lat"/"release_z"/"release_time"] (P,)
      kdir = os.path.dirname(os.path.abspath(kelp.__file__))
      git = lambda *a: subprocess.run(["git", "-C", kdir, *a], capture_output=True, text=True, check=True).stdout.strip()
      engine = {"kelp_file": kelp.__file__, "kelp_version": getattr(kelp, "__version__", "unknown"), "commit": git("rev-parse", "HEAD"),
@@ -232,7 +232,7 @@ gate (ask, then wait for an explicit yes) holds for every run.
    kelp run config.yaml -v               # then a short n_steps smoke
    ```
    Read the startup summary lines (resolved `dt`, file step, `time_averaging`
-   shift — or, with `data.time_stamp` / `time_window`, the `Record times:` line
+   shift — or, for `fesom14` and with `data.time_stamp` / `time_window`, the `Record times:` line
    with the first and last resolved record — diffusion composition, which
    files/areas were used). **3-D: confirm
    W was actually read** — FESOM2 proceeds SILENTLY without vertical velocity

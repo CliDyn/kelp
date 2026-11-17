@@ -170,9 +170,11 @@ data:
 time:
   start_time_idx: 0           # first file time index [default: 0]
   n_steps: 100                # [REQUIRED*] number of integration steps
-  # start_date: "2020-01-15T00:00"  # alternative: ISO datetime (raw file
-  #                           # timestamp; needs temporal_interp to start
-  #                           # between snapshots)
+  # start_date: "2020-01-15T00:00"  # alternative: ISO datetime (a file
+  #                           # timestamp; with time_stamp/time_window or
+  #                           # fesom14 a resolved record time, e.g. 12:00
+  #                           # for daily means; needs temporal_interp to
+  #                           # start between records)
   # duration_days: 30         # with start_date: n_steps = days*86400/dt
   on_exhausted: stop          # stop / cycle (wrap around = periodic forcing)
   num_runs: 1                 # realizations; output files get _r0, _r1, ...

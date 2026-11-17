@@ -536,7 +536,8 @@ run without an output file (`TrajectoryRecord.times`) carries the same seconds.
 - **Forcing with a calendar epoch** (dates, cftime objects, or numbers with
   `units = "<unit> since <date>"`): `standard_name = "time"`, `axis = "T"`,
   `long_name = "time at the end of the recorded step"`,
-  `units = "seconds since YYYY-MM-DD hh:mm:ss[.f]"` (the first raw record; the
+  `units = "seconds since YYYY-MM-DD hh:mm:ss[.f]"` (the first raw record, or
+  for `fesom14` and with the stamp options the first resolved record; the
   year has four digits; a fraction of a second is written only when it is not
   zero), and `calendar` = the forcing's calendar: the one xarray kept from the
   forcing file, the calendar of cftime objects (for example `noleap`,
@@ -839,10 +840,12 @@ float index and refuses a fractional one. Three rules keep the output
   labelled a resumed segment whole forcing periods too early), so
   `start_time_idx = r["file_idx"] + time_dir` is right too. With temporal
   interpolation `sim_time_start` is likewise the unwrapped `t0 + n · dt · time_dir`.
-- **Open the same forcing.** The epoch of `time` is the forcing's first raw
-  record; a segment that opens a forcing with another first record gets other
-  `units`, so its seconds count from another origin (§5.7 asks for one `units`
-  across the segments).
+- **Open the same forcing, with the same stamp options.** The epoch of `time`
+  is the forcing's first raw record (for `fesom14` and with the stamp options,
+  its first resolved record); a segment that opens a forcing with another first
+  record, or without applying the stamp options, gets other `units`, so its
+  seconds count from another origin (§5.7 asks for one `units` across the
+  segments).
 
 The release positions need no extra step: they ride in the state, so every
 segment writes the same `release_*` variables. A driver that splits a restart

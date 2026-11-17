@@ -128,7 +128,8 @@ spacing and the axis becomes $t_i=i\,\Delta t_{\text{file}}$; without either, th
 The window in time is specified flexibly. The start is an index into the forcing record
 (\conf{time.start\_time\_idx}) or a calendar date (\conf{time.start\_date}), parsed in the calendar of the
 axis. In the interpolated mode the run starts at that instant, whether or not it coincides with a stored
-time; in the discrete mode the date must coincide with a stored time, and the run starts at that record. The length is a number of integration
+time; in the discrete mode the date must coincide with a stored time --- with the FESOM~1.4 reader or the
+stamp keys, a resolved record time (\cref{sec:input-timeavg}) --- and the run starts at that record. The length is a number of integration
 steps (\conf{time.n\_steps}, the preferred form), an explicit end index, or a duration in days
 (\conf{time.duration\_days}, only together with \conf{time.start\_date}, converted to
 $\lfloor\text{days}\cdot86400/\dt\rfloor$ steps). When the run reaches
