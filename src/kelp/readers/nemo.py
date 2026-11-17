@@ -83,7 +83,7 @@ def _open_nemo(spec) -> xr.Dataset:
     ``366d`` -> ``all_leap``), which cftime rejects.  Several files (a list or
     a glob) are joined along time with ``open_mfdataset`` (lazy, one chunk per
     file) and must be in strictly increasing time order.  A single file
-    without such an alias opens exactly as before."""
+    without such an alias opens as one dataset."""
     files = _expand(spec)
     eng = _engine(files[0])
 

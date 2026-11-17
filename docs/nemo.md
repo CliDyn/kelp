@@ -1,7 +1,7 @@
 # NEMO support (exact Arakawa C-grid path)
 
 > **Covers:** tracking on native NEMO output (ORCA family, regional crops, GYRE-like boxes) with `mesh.nemo_grid: cgrid`: the scheme, the supported grid layouts, the input files, the vertical treatment, sampling, refusals, validation and known limitations.
-> **Does not cover:** the option reference (see `configuration.md`, keys `nemo_grid`, `nemo_partial_cells`, `ncinput_u/v/w`), the interpolation formulas (see `velocity_interpolation.md` §8), NEMO file adaptation recipes (skill `kelp-nemo`), the default T-point path (`nemo_grid: tpoint`, 2-D only, E/N-aligned grids; `docs/dev/readers.md`).
+> **Does not cover:** the option reference (see `configuration.md`, keys `nemo_grid`, `nemo_partial_cells`, `ncinput_u/v`), the interpolation formulas (see `velocity_interpolation.md` §8), NEMO file adaptation recipes (skill `kelp-nemo`), the default T-point path (`nemo_grid: tpoint`, 2-D only, E/N-aligned grids; `docs/dev/readers.md`).
 > **Code:** `src/kelp/readers/nemo.py:NemoReader`, `src/kelp/readers/structured.py:build_cgrid_mesh`, `src/kelp/readers/nemo.py:detect_cgrid_layout`, `src/kelp/numerics/interpolate.py:interp_cgrid3d`, `src/kelp/numerics/cgrid3d.py:cgrid3d_step`.
 > **Verified at:** see `docs/doc_map.yaml` (stamped via check_doc_sync --bless).
 

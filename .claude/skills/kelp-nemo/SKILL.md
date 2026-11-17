@@ -7,7 +7,7 @@ description: Use when KELP is to track particles on NEMO output (ORCA family, re
 
 Authoritative references: **`docs/nemo.md`** (what the C-grid path does, layouts,
 refusals, validation) and **`docs/configuration.md`** (keys `mesh.nemo_grid`,
-`nemo_partial_cells`, `data.ncinput`, `ncinput_u/v/w`). This skill is the
+`nemo_partial_cells`, `data.ncinput`, `ncinput_u/v`). This skill is the
 adaptation workflow. The run itself follows **kelp-run**; the YAML mechanics
 **kelp-config**.
 
@@ -28,8 +28,8 @@ output. The default `tpoint` path is 2-D, E/N-aligned grids only.
    on ORCA05); grid_W is never read (`ncinput_w` is refused).
 3. **File names**: the reader finds grid_U/V by swapping the `grid_T` token in
    the `data.ncinput` name. Files without that token (crops, renamed
-   files): set `data.ncinput_u`, `ncinput_v` explicitly. Every one of the four
-   keys takes a file, a glob or a list; several files per grid join along
+   files): set `data.ncinput_u`, `ncinput_v` explicitly. Each of `ncinput`,
+   `ncinput_u`, `ncinput_v` takes a file, a glob or a list; several files per grid join along
    time (each file may carry its own epoch; the joined axis must be strictly
    increasing).
 4. **Halo / fold / crop**: nothing to set. The layout is detected from the

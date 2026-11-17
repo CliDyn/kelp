@@ -23,7 +23,7 @@ the tracker was developed privately from 2026-06.
   ORCA025, eORCA), read from the coordinates; crops get open absorbing edges.
   `mesh.rotation` works with the C-grid path.
 - Inputs: `mesh_mask.nc` or `domain_cfg.nc`; a file, glob or list per grid
-  (`data.ncinput`, new `ncinput_u`, `ncinput_v`, `ncinput_w`); XIOS calendar
+  (`data.ncinput`, new `ncinput_u`, `ncinput_v`; `ncinput_w` is refused: W comes from continuity); XIOS calendar
   spellings (`360d`, ...). New `mesh.nemo_partial_cells: shrunk | porous`.
   `mode.sample_vars` return the T-cell value.
 - Refused, loudly: s-coordinates, ice-shelf cavities, non-T `sample_vars`,
