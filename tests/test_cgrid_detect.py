@@ -78,18 +78,19 @@ def test_partial_width_crop_symmetric_about_a_pivot_is_refused(fold):
     would join the crop's west and east edges."""
     g = orca_grid(fold, False)
     ni = NC
-    refused = 0
-    for lo in range(1, ni // 2):
+    for lo in range(1, ni // 2 - 1):                  # windows >= 4 columns wide
         win = slice(lo, ni - lo)                       # symmetric about the raw centre
         xy = {k: (a[:, win], b[:, win]) for k, (a, b) in g.xy.items()}
-        try:
-            lay, _ = _detect(xy)
-        except ValueError as e:
-            assert "not full width" in str(e)
-            refused += 1
-        else:
-            assert not lay.fold                        # never a fold on a partial raster
-    assert refused > 0
+        with pytest.raises(ValueError, match="not full width"):
+            _detect(xy)
+
+
+def test_non_finite_coordinates_are_refused():
+    g = orca_grid("T", True)
+    xy = {k: (a.copy(), b.copy()) for k, (a, b) in g.xy.items()}
+    xy["T"][0][3, 4] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        _detect(xy)
 
 
 def test_zero_tiles_and_pole_row_are_refused():

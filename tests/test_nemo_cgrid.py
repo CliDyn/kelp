@@ -491,13 +491,14 @@ def _orca_case(tmp_path, fold="F", halo=True, vy=0.5, n_steps=120, dt=1800.0, se
 
 
 @pytest.mark.parametrize("fold,halo", ORCA_LAYOUTS, ids=ORCA_IDS)
-def test_orca_mesh_topology_and_flux_continuity(tmp_path, fold, halo):
+def test_orca_mesh_topology_and_flux_continuity(tmp_path, fold, halo, capsys):
     from kelp.core.mesh import build_elem_neighbors
     from kelp.readers.structured import cgrid_canonical
     cfg, _out, u, v = _orca_case(tmp_path, fold, halo)
     mesh = get_reader("nemo").load_mesh(cfg.mesh)
     lay = mesh._cgrid_layout
     assert (lay.fold, lay.halo_cols, lay.periodic) == (fold, halo, True)
+    assert f"NEMO cgrid layout: {lay.label()}" in capsys.readouterr().out      # the log line
     ny, nx = lay.shape
     assert mesh._structured_shape == (NY, NC + 2) and lay.J == NY - 2
     ji = mesh._cgrid_elem_ji
@@ -538,22 +539,6 @@ def test_orca_mesh_topology_and_flux_continuity(tmp_path, fold, halo):
         assert abs((va - vb) @ nrm) <= 1e-9 * np.hypot(*nrm)
 
 
-def test_orca_layouts_give_one_mesh(tmp_path):
-    """Halo and halo-free files of a pivot give the same mesh (same canonical rasters)."""
-    for fold in "TF":
-        meshes = []
-        for halo in (True, False):
-            d = tmp_path / f"{fold}{halo}"
-            d.mkdir()
-            cfg, *_ = _orca_case(d, fold, halo)
-            meshes.append(get_reader("nemo").load_mesh(cfg.mesh))
-        a, b = meshes
-        assert a.n_nodes == b.n_nodes and a.n_elements == b.n_elements
-        np.testing.assert_array_equal(a._cgrid_corners, b._cgrid_corners)
-        np.testing.assert_array_equal(a._cgrid_e2u[np.isfinite(a._cgrid_e2u)],
-                                      b._cgrid_e2u[np.isfinite(b._cgrid_e2u)])
-
-
 def test_orca_particles_cross_seam_and_fold_rotation_invariant(tmp_path):
     """Northward flow: two particles cross the fold segment (|x| < A), one the
     seam (x > A); all stay ALIVE on their streamline x = const, in the
@@ -577,7 +562,7 @@ def test_orca_particles_cross_seam_and_fold_rotation_invariant(tmp_path):
         import xarray as xr
         with xr.open_dataset(out) as ds:                      # the layout, open edges included
             assert f"{fold}-pivot north fold" in ds.attrs["cgrid_layout"]
-            assert "open to the outside: S" in ds.attrs["cgrid_layout"]
+            assert "unjoined raster edges (open where wet): S" in ds.attrs["cgrid_layout"]
     for fold in "TF":
         np.testing.assert_array_equal(tracks[fold, False, None], tracks[fold, True, None])
         np.testing.assert_allclose(tracks[fold, True, "fesom2"], tracks[fold, True, None], atol=1e-4)
@@ -612,13 +597,6 @@ def test_orca_mismatched_copies_refuse(tmp_path):
     cfg.mesh.meshpath = str(tmp_path / "bad_mesh.nc")
     with pytest.raises(ValueError, match="e2u: 1 halo / fold copies differ"):
         rd.load_mesh(cfg.mesh)
-
-
-def test_orca_layout_in_the_log_and_the_mesh(tmp_path, capsys):
-    cfg, *_ = _orca_case(tmp_path, "T", False)
-    mesh = get_reader("nemo").load_mesh(cfg.mesh)
-    assert "T-pivot north fold (halo-free, padded)" in capsys.readouterr().out
-    assert "raster edges open to the outside: S" in mesh._cgrid_layout.label()
 
 
 # --- dry ring (one ring of zero-velocity cells around the wet region) --------

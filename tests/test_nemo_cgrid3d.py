@@ -1,6 +1,7 @@
 """3-D exact C-grid (full reference cells): W from continuity, plain RK stepping,
 cell-value sampling.  Synthetic closed boxes only."""
 import numpy as np
+import pytest
 
 from kelp.core.geometry import METERS_PER_DEG_LAT
 from kelp.core.io import VelocityField
@@ -251,3 +252,98 @@ def test_partial_cells_refused_when_invalid():
         MeshConfig(type="nemo", nemo_grid="cgrid", nemo_partial_cells="bogus")
     with pytest.raises(ValueError, match="nemo_partial_cells"):
         MeshConfig(type="fesom2", nemo_partial_cells="porous")
+
+
+# --- halo-free fold layouts, 3-D, partial bottom cells on the fold row ----------
+@pytest.mark.parametrize("fold", "TF")
+def test_halo_free_fold_3d_load_flux_w_and_sampling(tmp_path, fold):
+    import warnings
+
+    import pandas as pd
+    import xarray as xr
+
+    from kelp.core.config import MeshConfig, ModeConfig
+    from kelp.core.mesh import build_elem_neighbors
+    from kelp.readers import get_reader
+    from kelp.readers.structured import cgrid_to_canonical
+    from tests._cgrid_orca import strip
+    from tests.test_nemo_cgrid import _orca_fields
+
+    K3 = 3
+    zw = DZ * np.arange(K3 + 1)
+    g, flon, flat, tm2, e2u, e1v, _u, _v = _orca_fields(fold, False)
+    lay = g.canon
+    ny, nx = lay.shape
+    J = lay.J
+    C = lambda a, k, vec=False: cgrid_to_canonical(a, lay, k, vector=vec)
+    nl = np.where(tm2 > 0.5, K3, 0)
+    nl[J - 1, 3:7] = np.where(nl[J - 1, 3:7] > 0, 2, 0)
+    nl[J, 2:6] = np.where(nl[J, 2:6] > 0, 2, 0)                  # partial cells on the fold row
+    nl = C(nl, "T").astype(int)
+    e3b = np.full((ny, nx), DZ)
+    e3b[J - 1, 3:7], e3b[J, 2:6] = 6.0, 4.0
+    e3b = C(e3b, "T")
+    e3t = cgrid_thickness(zw, np.where(nl > 0, nl - 1, -1), e3b)
+    e3u, e3v = e3t.copy(), e3t.copy()
+    e3u[:, :, :-1] = np.minimum(e3t[:, :, :-1], e3t[:, :, 1:])
+    e3v[:, :-1] = np.minimum(e3t[:, :-1], e3t[:, 1:])
+    e3u, e3v = C(e3u, "U"), C(e3v, "V")
+    lvl = np.arange(K3)[:, None, None]
+    rng = np.random.default_rng(0)
+    u, v = rng.normal(size=(2, K3, ny, nx))
+    u[:, :, :-1] *= lvl < np.minimum(nl[:, :-1], nl[:, 1:]); u[:, :, -1] = 0
+    v[:, :-1] *= lvl < np.minimum(nl[:-1], nl[1:]); v[:, -1] = 0
+    u, v = C(u, "U", True), C(v, "V", True)
+    jj, ii = np.mgrid[0:ny, 0:nx]
+    theta = C(1000.0 * lvl + 10.0 * jj + 0.01 * ii + 0 * lvl, "T")
+    e1t = C(np.sqrt(e2u * e1v), "T")
+    S = lambda a: strip(a, False)
+    tc = {"time_counter": pd.date_range("2020-01-01", periods=2, freq="h")}
+    rec = lambda a: np.stack([S(a)] * 2)
+    xr.Dataset({"thetao": (("time_counter", "deptht", "y", "x"), rec(theta)),
+                "e3t": (("time_counter", "deptht", "y", "x"), rec(e3t))},
+               coords=tc).to_netcdf(tmp_path / "E_grid_T.nc")
+    xr.Dataset({"uo": (("time_counter", "depthu", "y", "x"), rec(u))}, coords=tc).to_netcdf(tmp_path / "E_grid_U.nc")
+    xr.Dataset({"vo": (("time_counter", "depthv", "y", "x"), rec(v))}, coords=tc).to_netcdf(tmp_path / "E_grid_V.nc")
+    d3 = lambda a: (("t", "z", "y", "x"), S(a)[None])
+    d2 = lambda a: (("y", "x"), S(a))
+    xr.Dataset({
+        "tmask": d3((lvl < nl).astype(float)), "nav_lon": (("y", "x"), g.xy["T"][0]),
+        "nav_lat": (("y", "x"), g.xy["T"][1]), "glamf": d2(flon), "gphif": d2(flat),
+        "e2u": d2(e2u), "e1v": d2(e1v), "e1t": d2(e1t), "e2t": d2(e1t),
+        "e3t_1d": (("z",), np.full(K3, DZ)), "e3t_0": d3(e3t), "e3u_0": d3(e3u), "e3v_0": d3(e3v)},
+        attrs=dict(Iperio=1, Jperio=0, NFold=1, NFtype=fold)).to_netcdf(tmp_path / "mesh_mask.nc")
+    rd = get_reader("nemo")
+    mesh = rd.load_mesh(MeshConfig(type="nemo", meshpath=str(tmp_path / "mesh_mask.nc"), nemo_grid="cgrid"))
+    mode = ModeConfig(Fdrift3D=True, sample_vars=["thetao"])
+    ds = rd.open_dataset(str(tmp_path / "E_grid_T.nc"), mode_cfg=mode)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        rd.prepare(mesh, ds)
+    vel = rd.read_velocities(ds, 0, mesh, mode_cfg=mode, sample_vars=["thetao"])
+    U, V, W = vel.u.reshape(K3, ny, nx), vel.v.reshape(K3, ny, nx), vel.w.reshape(K3 + 1, ny, nx)
+    np.testing.assert_array_equal(U, u)
+    np.testing.assert_array_equal(V, v)
+    E3u = cgrid_thickness(zw, mesh._cgrid_kbu.reshape(ny, nx), mesh._cgrid_e3u.reshape(ny, nx))
+    E3v = cgrid_thickness(zw, mesh._cgrid_kbv.reshape(ny, nx), mesh._cgrid_e3v.reshape(ny, nx))
+    nw = mesh._cgrid_n_wet
+    j, i = mesh._cgrid_elem_ji[:nw].T
+    nb = build_elem_neighbors(mesh)[:nw]
+    e2, e1 = mesh._cgrid_e2u.reshape(ny, nx), mesh._cgrid_e1v.reshape(ny, nx)
+    area = mesh._cgrid_area.reshape(ny, nx)[j, i]
+    e, s = np.nonzero((nb >= 0) & (nb < nw))
+    n = nb[e, s]
+    s2 = np.array([np.flatnonzero(nb[b] == a)[0] for a, b in zip(e, n)])
+    assert ((j[e] >= J - 1) & (np.abs(i[e] - i[n]) > 1)).sum() > 0          # fold edges are in play
+    for k in range(K3):
+        fu, fv = U[k] * e2 * E3u[k], V[k] * e1 * E3v[k]
+        out = np.stack([-fv[j - 1, i], fu[j, i], fv[j, i], -fu[j, i - 1]], 1)
+        scale = np.abs(out).max()
+        assert np.abs(out[e, s] + out[n, s2]).max() <= 1e-12 * scale        # shared edges balance
+        res = out.sum(1) + (W[k + 1, j, i] - W[k, j, i]) * area
+        wet = k < mesh._cgrid_nlev_raster[j, i]
+        assert np.abs(res[wet]).max() <= 1e-12 * scale                      # per-cell continuity
+        got = sample_field_cgrid(vel.scalars["thetao"], mesh, mesh.elem_center_lon[:nw],
+                                 mesh.elem_center_lat[:nw], np.full(nw, zw[k] + 0.5))
+        np.testing.assert_array_equal(got[wet], theta[k, j, i][wet])        # incl. fold-row cells
+        assert np.isnan(got[~wet]).all()

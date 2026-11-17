@@ -205,7 +205,7 @@ class CgridLayout:
         edges = "S" + ("" if self.fold else ", N") + ("" if self.periodic else ", E, W")
         shape = ("" if self.shape == tuple(self.raw_shape) else
                  f"; {self.raw_shape[0]}x{self.raw_shape[1]} -> {self.shape[0]}x{self.shape[1]}")
-        return f"{', '.join(parts)}; raster edges open to the outside: {edges}{shape}"
+        return f"{', '.join(parts)}; unjoined raster edges (open where wet): {edges}{shape}"
 
 
 def _centre(layout: CgridLayout, kind: str):

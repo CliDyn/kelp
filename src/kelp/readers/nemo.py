@@ -137,6 +137,9 @@ def detect_cgrid_layout(tlon, tlat, flon=None, flat=None, flags=None):
         flon, flat = (np.asarray(a, dtype=np.float64) for a in (flon, flat))
     if tlat.shape != raw or (have_f and (flon.shape != raw or flat.shape != raw)):
         raise ValueError("glamt/gphit and glamf/gphif must share one (ny, nx) shape")
+    if not all(np.isfinite(a).all() for a in (tlon, tlat) + ((flon, flat) if have_f else ())):
+        raise ValueError("the mesh file's glamt/gphit/glamf/gphif hold non-finite values: "
+                         "the layout cannot be detected")
     if ((tlon == 0) & (tlat == 0)).sum() + (((flon == 0) & (flat == 0)).sum() if have_f else 0) > 1:
         raise ValueError(
             "the mesh file has zero-filled tiles (land-processor elimination when "
@@ -484,8 +487,7 @@ class NemoReader:
         if tmask_n is None:
             raise KeyError(
                 f"mesh.nemo_grid: cgrid needs tmask in the mesh file {path!r}")
-        tm = rd(tmask_n, "T")
-        tm3 = tm > 0.5
+        tm3 = rd(tmask_n, "T") > 0.5          # boolean: no float64 3-D copy kept
         wet = tm3[0] if tm3.ndim == 3 else tm3
         depth2d = None
         vert = {}

@@ -74,7 +74,7 @@ def test_copy_check_refuses_a_stale_copy_and_names_the_raster():
     rng = np.random.default_rng(1)
     a = cgrid_to_canonical(rng.standard_normal((2, NY, NI + 2)), lay, "U", vector=True)
     a[1, 3, 0] += 1e-3                                # stale E-W halo column
-    with pytest.raises(ValueError, match=r"u record: 1 halo / fold copies differ.*1\.00e-03|u record: 1 halo"):
+    with pytest.raises(ValueError, match=r"u record: 1 halo / fold copies differ.*max \|diff\| 0\.001"):
         cgrid_to_canonical(a, lay, "U", vector=True, check=True, name="u record")
     a = cgrid_to_canonical(a, lay, "U", vector=True)  # silently repaired without the check
     a[0, NY - 1, 4] *= -1                             # a missing sign flip across the fold
@@ -105,7 +105,7 @@ def test_layout_shapes_label_and_validation():
     lay = CgridLayout((70, 1440), False, False, True, "T")
     assert lay.shape == (71, 1442) and (lay.c0, lay.ni, lay.J) == (1, 1440, 69)
     assert "T-pivot north fold" in lay.label() and "70x1440 -> 71x1442" in lay.label()
-    assert "open to the outside: S" in lay.label()
+    assert "unjoined raster edges (open where wet): S" in lay.label()
     reg = CgridLayout((10, 12))
     assert reg.shape == (10, 12) and "N, E, W" in reg.label()
     with pytest.raises(ValueError):
