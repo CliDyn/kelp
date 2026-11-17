@@ -14,7 +14,8 @@ from tests.test_nemo_cgrid import _grid, _widths
 K, NY, NX, DZ = 3, 6, 8, 10.0
 
 
-def _domain_cfg(tmp_path, *, tmask=False, top=1, e3_bad=False, attrs=None, name="domain_cfg.nc"):
+def _domain_cfg(tmp_path, *, tmask=False, top=1, e3_bad=False, no_e3=False, attrs=None,
+                name="domain_cfg.nc"):
     (flon, flat), (tlon, tlat) = _grid(NY, NX)
     e2u, e1v = _widths(flon, flat)
     bot = np.full((NY, NX), K); bot[0, :] = 0; bot[:, 0] = 0      # the first row / column dry
@@ -28,6 +29,9 @@ def _domain_cfg(tmp_path, *, tmask=False, top=1, e3_bad=False, attrs=None, name=
           "e3t_1d": (("z",), np.full(K, DZ)), "e3t_0": (("z", "y", "x"), e3),
           "e3u_0": (("z", "y", "x"), e3.copy()), "e3v_0": (("z", "y", "x"), e3.copy()),
           "bottom_level": d2(bot), "top_level": d2(np.where(bot > 0, top, 0))}
+    if no_e3:
+        for n in ("e3t_0", "e3u_0", "e3v_0"):
+            del dv[n]
     if tmask:
         dv["tmask"] = (("z", "y", "x"), ((lvl < bot) & (bot > 0)).astype(float))
     xr.Dataset(dv, attrs=attrs or {}).to_netcdf(tmp_path / name)
@@ -54,6 +58,13 @@ def test_domain_cfg_without_tmask_equals_the_mesh_mask_form(tmp_path):
 def test_domain_cfg_refusals(tmp_path, kw, match):
     with pytest.raises(NotImplementedError, match=match):
         _load(_domain_cfg(tmp_path, **kw))
+
+
+@pytest.mark.parametrize("attrs", [{"VertCoord": "zps"}, {"ln_zps": 1}])
+def test_zps_without_partial_cell_thicknesses_is_refused(tmp_path, attrs):
+    with pytest.raises(ValueError, match="partial steps"):
+        _load(_domain_cfg(tmp_path, no_e3=True, attrs=attrs))
+    assert _load(_domain_cfg(tmp_path, no_e3=True, attrs={"VertCoord": "zco"})).n_elements > 0
 
 
 def _with_misf(tmp_path, wet_val, land_val, draft=0.0):

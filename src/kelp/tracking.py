@@ -3132,9 +3132,15 @@ def run_tracking(
             suggestion = "mean"
             hint = ("healpix products are typically daily means stamped at "
                     "the END of the averaging window (ng5 convention)")
+        elif "nemo" in mesh_type:
+            suggestion = "instant"
+            hint = ("NEMO (XIOS) stamps a mean at the CENTRE of its averaging "
+                    "window, which needs no midpoint shift")
+            stamp_hint = (" To say so explicitly, set data.time_stamp: centre "
+                          "and data.time_window.")
         else:
             suggestion = "instant"
-            hint = "FESOM-C typically writes instantaneous snapshots"
+            hint = "this reader typically writes instantaneous snapshots"
             stamp_hint = ""
         warnings.warn(
             f"data.time_averaging is not set. {hint} — "

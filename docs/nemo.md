@@ -72,7 +72,7 @@ the `e3t` of the z*/vvl check are canonicalised silently.
   `nav_lon/nav_lat` (layout detection), `e2u`, `e1v` (face widths; absent in 2-D: plane
   lengths, logged; required in 3-D);
 - for 3-D also `e3t_1d`, `e1t`, `e2t`, and `e3t_0`, `e3u_0`, `e3v_0` for
-  partial cells (absent: full reference cells).
+  partial cells (absent: full reference cells; a zps vertical grid without them is refused).
 
 The model output is `data.ncinput` (the grid_T file(s)), with the grid_U /
 grid_V siblings derived by swapping the `grid_T` token in the file

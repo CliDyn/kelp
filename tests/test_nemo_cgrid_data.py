@@ -1,5 +1,9 @@
-"""Data-gated (``KELP_TEST_NEMO_DATA``): partial-cell W against the model's W on
-the ORCA05 equatorial crop, and z* detection on the eORCA025 crop."""
+"""Data-gated (``KELP_TEST_NEMO_DATA``): the exact C-grid path on real NEMO
+crops: partial-cell W against the model's W (ORCA05), z* detection and
+halo-free T-pivot layouts (eORCA025), the global topologies (ORCA05 F-pivot,
+ORCA2 T-pivot with halos), input robustness.  Skips when the directory or a
+file in it is missing."""
+import functools
 import os
 from pathlib import Path
 
@@ -95,7 +99,7 @@ def _flux_balance_and_special_edges(mesh, ds, mode):
     return np.abs(out[e, k] + out[n, k2]).max() / np.abs(out).max(), int(special.sum())
 
 
-def test_orca05_full_mesh_counts_unchanged_by_the_canonical_rewrite():
+def test_orca05_full_mesh_counts():
     from kelp.core.mesh import build_elem_neighbors
     mesh = _mesh(_sib("nemo_orca05", "mesh_mask.nc"), "fesom2")
     nw = int((mesh._cgrid_nlev > 0).sum())               # the wet cells (the ring follows them)
@@ -222,3 +226,19 @@ def test_eorca025_crops_without_the_grid_token_via_explicit_paths():
         str(d / "eorca025_equatorial_T.nc"), u_path=str(d / "eorca025_equatorial_U.nc"),
         v_path=str(d / "eorca025_equatorial_V.nc"), mode_cfg=mode)
     assert {"u", "v"} <= set(ds.variables)
+
+
+def _skip_if_files_missing(fn):
+    """A data directory that is only partly filled skips, never errors."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except FileNotFoundError as err:
+            pytest.skip(f"missing under KELP_TEST_NEMO_DATA: {err.filename or err}")
+    return wrapper
+
+
+for _n, _f in list(globals().items()):
+    if _n.startswith("test_") and callable(_f):
+        globals()[_n] = _skip_if_files_missing(_f)

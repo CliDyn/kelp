@@ -647,6 +647,16 @@ class NemoReader:
                         "only z-levels with partial bottom cells (zco / zps) are "
                         "supported")
                 _check_zps_rule(zw, nlev, e3b, e3u0, e3v0)
+            else:
+                zps = str(ds.attrs.get("VertCoord", "")).strip().lower() == "zps"
+                for src in (ds.attrs, ds.variables):
+                    if "ln_zps" in src:
+                        zps = zps or bool(np.asarray(getattr(src["ln_zps"], "values", src["ln_zps"])).any())
+                if zps:
+                    raise ValueError(
+                        f"mesh file {path!r}: the vertical grid has partial steps (zps) but the "
+                        "file lacks e3t_0 / e3u_0 / e3v_0; full reference cells would misplace the "
+                        "floor and the fluxes (use a mesh_mask / domain_cfg that carries them)")
             for nm in ("e1t", "e2t"):
                 if (np.asarray(ds[nm]) <= 0).any():
                     raise ValueError(

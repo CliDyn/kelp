@@ -1,5 +1,6 @@
-"""3-D exact C-grid (full reference cells): W from continuity, plain RK stepping,
-cell-value sampling.  Synthetic closed boxes only."""
+"""3-D exact C-grid (full and partial bottom cells): W from continuity, plain RK
+stepping in the fractional level coordinate, vel_w, cell-value sampling.
+Synthetic closed boxes only."""
 import numpy as np
 import pytest
 
