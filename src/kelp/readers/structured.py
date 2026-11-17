@@ -165,7 +165,7 @@ def _orca_canonical_f(ny, nx, orca):
 
 def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
                      orca: Optional[str] = None, ring: bool = True,
-                     name: str = "nemo",
+                     nlev2d=None, zw=None, area=None, name: str = "nemo",
                      r_earth: Optional[float] = None) -> Mesh:
     """Build the exact-C-grid quad :class:`Mesh`: nodes = F-points, elements =
     wet T-cells (the cell a ``numerics.uv_interp: cgrid`` particle lives in).
@@ -211,6 +211,13 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         beyond the ring a stage still fails.  ``ring=False`` = wet cells only.  Ring cells
         that are non-convex or sit at a fold pivot are dropped (counted in
         ``_cgrid_ring_dropped``).
+
+    nlev2d, zw, area : array_like or None
+        3-D (full reference cells): ``nlev2d (ny, nx)`` wet levels per column,
+        ``zw (K+1,)`` the layer interfaces (positive down) and ``area (ny, nx)``
+        the T-cell area ``e1t*e2t``.  ``mesh.sigma`` becomes ``zw`` and
+        ``_cgrid_nlev`` the wet levels (ring cells 0; the level just below a
+        column's floor is a zero-velocity ring level).
 
     Returns
     -------
@@ -371,7 +378,16 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
     mesh._cgrid_elem_ji = np.stack([ej, ei], axis=1).astype(np.int64)
     mesh._cgrid_corners = corners
     mesh._cgrid_n_wet = n_wet
-    mesh._cgrid_nlev = np.r_[np.ones(n_wet), np.zeros(n_ring)].astype(np.int32)
+    nl = (np.ones(n_wet) if nlev2d is None
+          else np.asarray(nlev2d)[ej[:n_wet], ei[:n_wet]])
+    mesh._cgrid_nlev = np.r_[nl, np.zeros(n_ring)].astype(np.int32)
+    mesh._cgrid_nlev_raster = np.zeros((ny, nx), dtype=np.int32)
+    mesh._cgrid_nlev_raster[ej[:n_wet], ei[:n_wet]] = nl
+    mesh._cgrid_zw = np.empty(0) if zw is None else np.asarray(zw, np.float64)
+    mesh._cgrid_area = (np.empty(0) if area is None
+                        else np.ascontiguousarray(area, np.float64).reshape(-1))
+    if zw is not None:
+        mesh.sigma = mesh._cgrid_zw
     mesh._cgrid_ring_dropped = dict(ring_dropped)
     if (e2u is None) != (e1v is None):
         raise ValueError("pass both e2u and e1v, or neither")
@@ -397,6 +413,26 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
             setattr(mesh, nm, np.ascontiguousarray(a))
     build_search(mesh)
     return mesh
+
+
+def cgrid_w_from_continuity(u, v, e2u, e1v, e3, area, nlev):
+    """Vertical velocity (positive down) from the continuity of the SAME
+    full-cell face fluxes the interpolator uses (``u*e2u*e3[k]``,
+    ``v*e1v*e3[k]``), integrated upward from ``w = 0`` at the sea floor.
+
+    ``u``, ``v`` ``(K, ny, nx)`` (land 0); ``e3 (K,)``; ``nlev (ny, nx)`` wet
+    levels.  Returns ``(K+1, ny, nx)``: the discrete field is exactly
+    non-divergent in every cell (surface ``w`` is the residual).
+    """
+    fu = u * e2u * e3[:, None, None]
+    fv = v * e1v * e3[:, None, None]
+    H = fu + fv
+    H[:, :, 1:] -= fu[:, :, :-1]
+    H[:, 1:, :] -= fv[:, :-1, :]
+    H *= np.arange(len(e3))[:, None, None] < nlev
+    w = np.zeros((len(e3) + 1,) + u.shape[1:])
+    w[:-1] = np.cumsum(H[::-1], axis=0)[::-1] / area
+    return w
 
 
 def c_grid_to_t(u_faces, v_faces, node_id) -> Tuple[np.ndarray, np.ndarray]:
@@ -463,4 +499,4 @@ def field_to_nodes(field2d, node_id) -> np.ndarray:
     return out
 
 
-__all__ = ["build_structured_mesh", "build_cgrid_mesh", "c_grid_to_t", "field_to_nodes"]
+__all__ = ["build_structured_mesh", "build_cgrid_mesh", "cgrid_w_from_continuity", "c_grid_to_t", "field_to_nodes"]

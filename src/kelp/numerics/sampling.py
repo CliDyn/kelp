@@ -931,3 +931,32 @@ __all__ = [
     "_loop_sample_mid_sigma",
     "_sample_sigma_3d",
 ]
+
+
+def sample_field_cgrid(values, mesh, lons, lats, zs=None, *, alive=None,
+                       nearest=None):
+    """Cell value of a T-point scalar on the exact C-grid layout (Parcels'
+    ``cgrid_tracer``): ``values`` is the flattened T raster ``(ny*nx,)`` or
+    ``(K, ny*nx)`` (land NaN); a particle gets the value of the wet cell
+    (and layer, from ``zs``) containing it, NaN elsewhere or when dead."""
+    from ..core.mesh import find_containing_elements, find_nearest_nodes
+    P = len(lons)
+    alive = np.ones(P, dtype=bool) if alive is None else np.asarray(alive)
+    out = np.full(P, np.nan)
+    idx = np.nonzero(alive)[0]
+    if idx.size == 0:
+        return out
+    nn = (find_nearest_nodes(mesh, lons[idx], lats[idx]) if nearest is None
+          else np.asarray(nearest)[idx])
+    e, ok = find_containing_elements(mesh, lons[idx], lats[idx], nn)
+    e = np.where(ok, e, 0)
+    flat = (mesh._cgrid_elem_ji[e, 0] * mesh._structured_shape[1]
+            + mesh._cgrid_elem_ji[e, 1])
+    if values.ndim == 2:
+        zw = mesh._cgrid_zw
+        k = np.clip(np.searchsorted(zw, zs[idx], side="right") - 1, 0, values.shape[0] - 1)
+        out[idx] = values[k, flat]
+    else:
+        out[idx] = values[flat]
+    out[idx[~ok]] = np.nan
+    return out

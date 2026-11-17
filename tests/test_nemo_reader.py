@@ -163,20 +163,14 @@ def test_rotation_rejected(tmp_path):
         reader.load_mesh(SimpleNamespace(meshpath=mm, rotation="fesom2"))
 
 
-def test_fdrift3d_refused_open_and_read(tmp_path):
-    # v1 is 2-D only: both open_dataset and read_velocities must fail fast in 3D.
+def test_fdrift3d_refused_on_tpoint_read(tmp_path):
+    # the T-point path is 2-D only (3-D needs mesh.nemo_grid: cgrid)
     gt, mm = _make_nemo(tmp_path)
     reader = get_reader("nemo")
-    mode3d = ModeConfig(Fdrift2D=False, Fdrift3D=True)
-    with pytest.raises(NotImplementedError, match="2-D only|Fdrift2D"):
-        reader.open_dataset(gt, mode_cfg=mode3d)
-    # read_velocities guards independently (covers direct callers / a 2-D ds
-    # paired with a 3-D mode_cfg).
-    mode2d = ModeConfig(Fdrift2D=True, Fdrift3D=False)
-    ds = reader.open_dataset(gt, mode_cfg=mode2d)
+    ds = reader.open_dataset(gt, mode_cfg=ModeConfig(Fdrift2D=True, Fdrift3D=False))
     mesh = reader.load_mesh(SimpleNamespace(meshpath=mm))
-    with pytest.raises(NotImplementedError, match="2-D only|Fdrift2D"):
-        reader.read_velocities(ds, 0, mesh, mode3d)
+    with pytest.raises(NotImplementedError, match="Fdrift3D: false"):
+        reader.read_velocities(ds, 0, mesh, ModeConfig(Fdrift2D=False, Fdrift3D=True))
 
 
 def test_em_diffusion_refused(tmp_path):

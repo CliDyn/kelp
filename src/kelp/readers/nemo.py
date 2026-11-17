@@ -37,7 +37,7 @@ import xarray as xr
 from ..core.io import VelocityField
 from ..core.mesh import Mesh
 from . import register, _detect_engine
-from .structured import (SAME_POINT_CHORD, _unit_xyz, build_cgrid_mesh,
+from .structured import (cgrid_w_from_continuity, SAME_POINT_CHORD, _unit_xyz, build_cgrid_mesh,
                          build_structured_mesh, c_grid_to_t, field_to_nodes)
 
 
@@ -255,10 +255,6 @@ def _refuse_unsupported_mode(mode_cfg, where):
     """Fail fast on mode settings the v1 reader cannot honour."""
     if mode_cfg is None:
         return
-    if getattr(mode_cfg, "Fdrift3D", False):
-        raise NotImplementedError(
-            f"the NEMO reader is 2-D only in v1 ({where}; deptht/e3t/partial "
-            "cells/W are a staged follow-up); set mode.Fdrift3D: false.")
     if getattr(mode_cfg, "sigma_mean", False):
         raise NotImplementedError(
             "the NEMO reader tracks the surface level only in v1; "
@@ -361,8 +357,25 @@ class NemoReader:
                 f"mesh.nemo_grid: cgrid needs tmask in the mesh file {path!r}")
         wet = _surface_2d(ds[tmask_n]) > 0.5
         depth2d = None
-        for dn in ("hdept", "hdepw", "bathy_meter", "bathy_metry",
-                   "bathymetry", "Bathymetry"):
+        vert = {}
+        tm3 = np.squeeze(ds[tmask_n].values) > 0.5
+        if tm3.ndim == 3 and "gdepw_1d" in ds.variables and "e1t" in ds.variables:
+            # 3-D, full reference cells: interfaces from the 1-D tables
+            e3 = np.squeeze(ds["e3t_1d"].values).astype(np.float64)
+            gw = np.squeeze(ds["gdepw_1d"].values).astype(np.float64)
+            zw = np.r_[gw, gw[-1] + e3[-1]]
+            nlev = tm3.sum(0)
+            if not (tm3 == (np.arange(tm3.shape[0])[:, None, None] < nlev)).all():
+                raise ValueError("mesh.nemo_grid: cgrid 3-D: tmask is not a "
+                                 "contiguous wet column from the surface "
+                                 "(ice-shelf cavities are not supported)")
+            vert = dict(nlev2d=nlev, zw=zw, area=_squeeze_to_2d(ds["e1t"].values)
+                        * _squeeze_to_2d(ds["e2t"].values))
+            depth2d = zw[nlev]
+            print(f"  NEMO cgrid 3-D: {tm3.shape[0]} levels, full reference "
+                  "cells (interfaces from gdepw_1d)")
+        for dn in (() if vert else ("hdept", "hdepw", "bathy_meter", "bathy_metry",
+                                    "bathymetry", "Bathymetry")):
             if dn in ds.variables:
                 depth2d = _squeeze_to_2d(ds[dn].values)
                 break
@@ -396,7 +409,7 @@ class NemoReader:
         mesh = build_cgrid_mesh(glamf, gphif, wet, depth2d=depth2d, name="nemo",
                                 orca=orca,
                                 r_earth=getattr(mesh_cfg, "r_earth", None),
-                                **widths)
+                                **widths, **vert)
         mesh.rotation_angles = angles
         return mesh
 
@@ -480,6 +493,11 @@ class NemoReader:
             if nm in dsT.variables:
                 data[nm] = _rename_tz(dsT[nm])
 
+        w_file = w_path or _sibling(path, "W")
+        if getattr(cfg, "Fdrift3D", False) and w_file is not None:
+            wn = _first(_open_nemo(w_file), ("vovecrtz", "w", "wo"))
+            if wn is not None:            # the file's W: only compared with the
+                data["w_file"] = _rename_tz(_open_nemo(w_file)[wn])   # continuity W
         merged = xr.Dataset({k: v.variable for k, v in data.items()})
         # Preserve a usable time axis (``.variable`` dropped coords) so dt
         # auto-detect / temporal_interp work, mirroring the other readers.
@@ -523,11 +541,16 @@ class NemoReader:
                 "NEMO reader v1: only uniform diffusion is supported "
                 "(em/m1 read spatial Kh fields, not yet mapped to T-points).")
         vd = np.float32 if velocity_float32 else np.float64
+        if getattr(mode_cfg, "Fdrift3D", False) and not getattr(mesh, "_cgrid", False):
+            raise NotImplementedError(
+                "the NEMO reader is 3-D only with mesh.nemo_grid: cgrid "
+                "(set mode.Fdrift3D: false for the T-point path).")
         if getattr(mesh, "_cgrid", False):
-            if sample_vars:
-                raise NotImplementedError(
-                    "mesh.nemo_grid: cgrid does not support sample_vars (v1)")
             ny, nx = mesh._structured_shape
+            scal = (NemoReader.read_scalar_fields(ds, timestep, mesh, sample_vars,
+                                                  mode_cfg) if sample_vars else None)
+            if getattr(mode_cfg, "Fdrift3D", False):
+                return NemoReader._read_cgrid_3d(ds, timestep, mesh, vd, scal)
             faces = []
             for nm in ("u", "v"):
                 a = _surface_2d(ds[nm].isel(time=timestep))
@@ -539,7 +562,7 @@ class NemoReader:
                     neginf=0.0).reshape(-1).astype(vd, copy=False))
             return VelocityField(
                 u=faces[0], v=faces[1], eta=np.zeros(mesh.n_nodes), w=None,
-                uv_layout="cgrid")
+                uv_layout="cgrid", scalars=scal)
         node_id = mesh._structured_node_id
 
         u2d = _surface_2d(ds["u"].isel(time=timestep))
@@ -565,11 +588,65 @@ class NemoReader:
             eta=eta, w=None, uv_layout="node", scalars=scalars)
 
     @staticmethod
+    def _read_cgrid_3d(ds, timestep, mesh, vd, scalars):
+        """3-D faces of one record on the full reference cells, plus the W
+        that makes them exactly non-divergent (``cgrid_w_from_continuity``)."""
+        ny, nx = mesh._structured_shape
+        zw = mesh._cgrid_zw
+        if zw.size == 0:
+            raise ValueError("mode.Fdrift3D with mesh.nemo_grid: cgrid needs a "
+                             "3-D mesh_mask (3-D tmask, gdepw_1d, e3t_1d, e1t, e2t)")
+        uv = []
+        for nm in ("u", "v"):
+            a = np.nan_to_num(np.asarray(ds[nm].isel(time=timestep).values,
+                                         dtype=np.float64))
+            if a.shape != (zw.size - 1, ny, nx):
+                raise ValueError(f"NEMO {nm} shape {a.shape} != (K, ny, nx) "
+                                 f"{(zw.size - 1, ny, nx)}")
+            uv.append(a.astype(vd).astype(np.float64))   # w consistent with stored u/v
+        e2u, e1v = (m.reshape(ny, nx) for m in (mesh._cgrid_e2u, mesh._cgrid_e1v))
+        w = cgrid_w_from_continuity(uv[0], uv[1], e2u, e1v, np.diff(zw),
+                                    mesh._cgrid_area.reshape(ny, nx),
+                                    mesh._cgrid_nlev_raster)
+        if not getattr(mesh, "_cgrid_w_logged", False):
+            mesh._cgrid_w_logged = True
+            wet = w[:-1] != 0
+            msg = (f"  NEMO cgrid 3-D: W from continuity, max |w(0)| = "
+                   f"{np.abs(w[0]).max():.2e} m/s (surface residual)")
+            if "w_file" in ds.variables:
+                wf = -np.nan_to_num(np.asarray(ds["w_file"].isel(time=timestep).values,
+                                               dtype=np.float64))
+                if wf.shape == w[:-1].shape and wet.any():
+                    msg += (f"; corr with the file's W = "
+                            f"{np.corrcoef(w[:-1][wet], wf[wet])[0, 1]:.3f}")
+            print(msg)
+        return VelocityField(
+            u=uv[0].reshape(uv[0].shape[0], -1).astype(vd),
+            v=uv[1].reshape(uv[1].shape[0], -1).astype(vd),
+            w=w.reshape(w.shape[0], -1).astype(vd), eta=np.zeros(mesh.n_nodes),
+            uv_layout="cgrid", scalars=scalars)
+
+    @staticmethod
     def read_scalar_fields(ds, timestep, mesh, varnames, mode_cfg=None) -> dict:
         _refuse_unsupported_mode(mode_cfg, "read_scalar_fields")
         if getattr(mesh, "_cgrid", False):
-            raise NotImplementedError(
-                "mesh.nemo_grid: cgrid does not support scalar sampling (v1)")
+            # T-cell values on the raster (land -> NaN: the files carry 0.0
+            # there), flattened (ny*nx,) / (K, ny*nx) for sample_field_cgrid
+            ny, nx = mesh._structured_shape
+            out = {}
+            for nm in varnames:
+                if nm not in ds.variables:
+                    raise ValueError(f"NEMO reader: sampled variable {nm!r} not "
+                                     "in the dataset (grid_T, mode.sample_vars).")
+                a = np.asarray(ds[nm].isel(time=timestep).values, dtype=np.float64)
+                if getattr(mode_cfg, "Fdrift3D", False):
+                    nl = mesh._cgrid_nlev_raster
+                    a = np.where(np.arange(a.shape[0])[:, None, None] < nl, a, np.nan)
+                    out[nm] = a.reshape(a.shape[0], -1)
+                else:
+                    a = _surface_2d(ds[nm].isel(time=timestep))
+                    out[nm] = np.where(mesh._cgrid_nlev_raster > 0, a, np.nan).reshape(-1)
+            return out
         node_id = mesh._structured_node_id
         out = {}
         for nm in varnames:

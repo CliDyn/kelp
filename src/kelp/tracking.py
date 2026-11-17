@@ -174,10 +174,15 @@ def _sample_record_fields(state, mesh, vel, sample_interp, Dmin=0.5):
     """
     if not getattr(vel, "scalars", None):
         return None
-    from .numerics.sampling import sample_field
+    from .numerics.sampling import sample_field, sample_field_cgrid
     alive = state.status == ParticleStatus.ALIVE
     out = {}
     for name, arr in vel.scalars.items():
+        if getattr(mesh, "_cgrid", False):
+            out[name] = sample_field_cgrid(arr, mesh, state.lon, state.lat,
+                                           state.z, alive=alive,
+                                           nearest=state.nearest_node)
+            continue
         out[name] = sample_field(
             arr, mesh, state.lon, state.lat,
             zs=state.z if arr.ndim == 2 else None,
@@ -927,20 +932,18 @@ def _path_fingerprint(path) -> list:
 # ---------------------------------------------------------------------------
 
 def _refuse_cgrid_unsupported(config) -> None:
-    """Exact C-grid (``uv_interp: cgrid``) v1 is 2-D, plain-flow only: refuse
-    the options that would read node/element fields it does not carry."""
+    """Exact C-grid (``uv_interp: cgrid``): refuse the options that would read
+    node/element fields it does not carry."""
     n = config.numerics
     bad = []
-    if config.mode.Fdrift3D:
-        bad.append("mode.Fdrift3D (3-D)")
     if n.integrator == "rk45":
         bad.append("integrator rk45")
     if getattr(n, "temporal_reconstruction", "linear") != "linear":
         bad.append("numerics.temporal_reconstruction")
     if n.diffusion.enabled and n.diffusion.scheme != "uniform":
         bad.append(f"diffusion scheme {n.diffusion.scheme!r}")
-    if config.mode.sample_vars:
-        bad.append("mode.sample_vars")
+    if config.mode.Fdrift3D and n.diffusion.enabled:
+        bad.append("diffusion in 3-D")
     if getattr(n.beaching, "enabled", False):
         bad.append("beaching")
     if bad:
@@ -3419,6 +3422,11 @@ def run_tracking(
                             mesh=mesh)
     if config.numerics.uv_interp == "cgrid":
         _refuse_cgrid_unsupported(config)
+    if (config.mesh.type == "nemo" and config.mode.Fdrift3D
+            and getattr(config.mesh, "nemo_grid", "tpoint") != "cgrid"):
+        raise NotImplementedError(
+            "the NEMO reader is 3-D only with mesh.nemo_grid: cgrid; set "
+            "mode.Fdrift3D: false for the T-point path.")
     if config.numerics.uv_interp != "leastsq":
         print(f"  uv_interp:         {config.numerics.uv_interp}")
     if (getattr(mesh, "metadata", None)
