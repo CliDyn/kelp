@@ -247,6 +247,61 @@ def test_wall_approach_never_crosses(tmp_path):
     assert x.max() < wall and x.max() > wall - 0.05 * D
 
 
+# (d2) open edges: the exit through a raster edge is OUTSIDE ------------------
+def _exits(tr):
+    from kelp.core.particles import FailureReason, ParticleStatus
+    assert (tr["status"][:, -1] == int(ParticleStatus.OUTSIDE)).all()
+    # a stage leaving the mesh and the end point leaving it differ only in the label
+    assert np.isin(tr["failure_reason"][:, -1],
+                   [int(FailureReason.OUT_OF_BOUNDS), int(FailureReason.INTERPOLATION_FAILED)]).all()
+
+
+@pytest.mark.parametrize("vx,vy", [(1, 0), (-1, 0), (0, 1), (0, -1)], ids=["E", "W", "N", "S"])
+def test_box_edges_are_open(tmp_path, vx, vy):
+    """A raster edge is open where water reaches it: the face flux of the edge is
+    read from the raster and the particle leaves (a stage or the end point
+    outside the mesh).  No flag, no config key."""
+    from kelp.tracking import run_tracking
+    from kelp.writers import load_trajectories
+    ny = nx = 10
+    tmask = np.ones((ny, nx)); tmask[0, :] = 0.0; tmask[:, 0] = 0.0
+    (flon, flat), _ = _grid(ny, nx)
+    u, v = _faces(flon, flat, np.ones((ny, nx)), vx=float(vx), vy=float(vy))
+    u[:, -1], v[-1, :] = u[:, -2], v[-2, :]               # water reaches the east / north edge
+    n_steps, dt = 60, 3600.0
+    gt, mm = _write(tmp_path, ny, nx, 0.0, tmask, u, v, n_time=n_steps + 2, dt=dt)
+    cfg, out = _cfg(tmp_path, gt, mm, [(5.3 * D, 5.3 * D)], n_steps, dt=dt,
+                    mode=ModeConfig(Fdrift2D=True, Fdrift3D=False, time_dir=1.0,
+                                    track_failure_reason=True))
+    run_tracking(cfg)
+    _exits(load_trajectories(str(out)))
+
+
+def test_fold_slab_south_edge_is_open(tmp_path):
+    """An arctic-style slab (the fold in the raster, the south edge cut): a
+    particle crosses the fold southwards, runs on and leaves at the open edge."""
+    from kelp.tracking import run_tracking
+    from kelp.writers import load_trajectories
+    cfg, out, _u, _v = _orca_case(tmp_path, "T", False, vy=-1.5, n_steps=300,
+                                  seeds=[(0.3, 0.45)])
+    cfg.mode = ModeConfig(Fdrift2D=True, Fdrift3D=False, time_dir=1.0, track_failure_reason=True)
+    run_tracking(cfg, temporal_interp=False)
+    tr = load_trajectories(str(out))
+    _exits(tr)
+    assert tr["lat"][0].min() < -1.0 and np.abs(tr["lon"][0] - 0.3).max() < 5e-3   # crossed y = 0 first
+
+
+def test_duplicate_nodes_and_wet_pivots_refuse():
+    g, flon, flat, tmask, *_ = _orca_fields("F", True)
+    with pytest.raises(ValueError, match="pairs of mesh nodes coincide"):
+        build_cgrid_mesh(flon, flat, tmask)               # the fold raster taken for a regional one
+    from kelp.readers.structured import fold_pivot_cells
+    wet = tmask.copy()
+    wet[fold_pivot_cells(g.canon)] = 1.0
+    with pytest.raises(ValueError, match="fold's grid poles must be on land"):
+        build_cgrid_mesh(flon, flat, wet, layout=g.canon)
+
+
 # (e) rotated grid: accepted by cgrid, still refused by the default ----------
 def test_rotated_grid_accepted_only_in_cgrid(tmp_path):
     ny = nx = 6
