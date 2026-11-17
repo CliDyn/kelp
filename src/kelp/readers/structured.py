@@ -539,6 +539,14 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
     mesh._cgrid_nlev = np.r_[nl, np.zeros(n_ring)].astype(np.int32)
     mesh._cgrid_nlev_raster = np.zeros((ny, nx), dtype=np.int32)
     mesh._cgrid_nlev_raster[ej[:n_wet], ei[:n_wet]] = nl
+    # wet levels of the u / v faces (NEMO umask / vmask = tmask * tmask) from the
+    # raw tmask -- the cells without an F-point quad (first row / column) are
+    # still water for their faces; a raster edge is open (no outer cell)
+    lev = (np.asarray(nlev2d) if nlev2d is not None else np.asarray(tmask2d) > 0.5).astype(np.int32)
+    fu, fv = lev.copy(), lev.copy()
+    fu[:, :-1] = np.minimum(lev[:, :-1], lev[:, 1:])
+    fv[:-1] = np.minimum(lev[:-1], lev[1:])
+    mesh._cgrid_face_levels = {"U": fu, "V": fv}
     mesh._cgrid_zw = np.empty(0) if zw is None else np.asarray(zw, np.float64)
     mesh._cgrid_area = (np.empty(0) if area is None
                         else np.ascontiguousarray(area, np.float64).reshape(-1))

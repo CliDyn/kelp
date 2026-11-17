@@ -264,7 +264,7 @@ def test_box_edges_are_open(tmp_path, vx, vy):
     from kelp.tracking import run_tracking
     from kelp.writers import load_trajectories
     ny = nx = 10
-    tmask = np.ones((ny, nx)); tmask[0, :] = 0.0; tmask[:, 0] = 0.0
+    tmask = np.ones((ny, nx))
     (flon, flat), _ = _grid(ny, nx)
     u, v = _faces(flon, flat, np.ones((ny, nx)), vx=float(vx), vy=float(vy))
     u[:, -1], v[-1, :] = u[:, -2], v[-2, :]               # water reaches the east / north edge
@@ -453,7 +453,6 @@ def _orca_fields(fold, halo, vy=0.5):
     v[:, 1:] = (psi[:, 1:] - psi[:, :-1]) / e1v[:, 1:]
     u, v = (cgrid_to_canonical(a, lay, k, vector=True) for a, k in ((u, "U"), (v, "V")))
     tmask = np.ones(flon.shape)
-    tmask[0] = 0.0
     tmask[fold_pivot_cells(lay)] = 0.0                  # the fold's grid poles are land
     return g, flon, flat, cgrid_to_canonical(tmask, lay, "T"), e2u, e1v, u, v
 

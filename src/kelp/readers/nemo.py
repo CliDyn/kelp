@@ -326,7 +326,8 @@ def _surface_2d(da: xr.DataArray) -> np.ndarray:
     return _squeeze_to_2d(da.values)
 
 
-def _read_raster(da, layout, kind, name, *, vector=False, check=False, surface=False):
+def _read_raster(da, layout, kind, name, *, vector=False, check=False, surface=False,
+                 face_levels=None):
     """The ONLY way the cgrid path reads a raster: ``da`` (a DataArray or array,
     trailing dims the raw ``(ny, nx)`` of ``layout``; ``surface`` takes the
     surface level of a depth dimension) -> its canonical float64 form
@@ -339,7 +340,13 @@ def _read_raster(da, layout, kind, name, *, vector=False, check=False, surface=F
     ``w_file`` and ``e3t_file`` are canonicalised silently (their stale copies
     -- ``bathy_metry`` on the fold row, eddy-induced velocities -- are real)."""
     a = _surface_2d(da) if surface else np.asarray(da)
-    return cgrid_to_canonical(a, layout, kind, vector=vector, check=check, name=name)
+    a = cgrid_to_canonical(a, layout, kind, vector=vector, check=check, name=name)
+    if face_levels is not None:
+        # u / v live on faces: zero wherever the face mask (derived from tmask,
+        # not from what the file holds on land faces) says land
+        a = np.where(np.arange(a.shape[0])[:, None, None] < face_levels, a, 0.0) \
+            if a.ndim == 3 else np.where(face_levels > 0, a, 0.0)
+    return a
 
 
 def _max_axis_misalignment_deg(lon2d: np.ndarray, lat2d: np.ndarray) -> float:
@@ -825,7 +832,8 @@ class NemoReader:
             if getattr(mode_cfg, "Fdrift3D", False):
                 return NemoReader._read_cgrid_3d(ds, timestep, mesh, vd, scal)
             faces = [_read_raster(ds[nm].isel(time=timestep), lay, k, nm, vector=True,
-                                  check=True, surface=True).reshape(-1).astype(vd, copy=False)
+                                  check=True, surface=True,
+                                  face_levels=mesh._cgrid_face_levels[k]).reshape(-1).astype(vd, copy=False)
                      for nm, k in (("u", "U"), ("v", "V"))]
             return VelocityField(
                 u=faces[0], v=faces[1], eta=np.zeros(mesh.n_nodes), w=None,
@@ -896,7 +904,8 @@ class NemoReader:
         lay = mesh._cgrid_layout
         uv = []
         for nm, k in (("u", "U"), ("v", "V")):
-            a = _read_raster(ds[nm].isel(time=timestep), lay, k, nm, vector=True, check=True)
+            a = _read_raster(ds[nm].isel(time=timestep), lay, k, nm, vector=True, check=True,
+                             face_levels=mesh._cgrid_face_levels[k])
             if a.shape != (zw.size - 1, ny, nx):
                 raise ValueError(f"NEMO {nm} shape {a.shape} != (K, ny, nx) "
                                  f"{(zw.size - 1, ny, nx)}")
@@ -908,17 +917,6 @@ class NemoReader:
         w = cgrid_w_from_continuity(uv[0], uv[1], e2u, e1v, e3u, e3v,
                                     mesh._cgrid_area.reshape(ny, nx),
                                     mesh._cgrid_nlev_raster)
-        if not getattr(mesh, "_cgrid_w_logged", False):
-            mesh._cgrid_w_logged = True
-            wet = w[:-1] != 0
-            msg = (f"  NEMO cgrid 3-D: W from continuity, max |w(0)| = "
-                   f"{np.abs(w[0]).max():.2e} m/s (surface residual)")
-            if "w_file" in ds.variables:
-                wf = -_read_raster(ds["w_file"].isel(time=timestep), lay, "T", "w_file")
-                if wf.shape == w[:-1].shape and wet.any():
-                    msg += (f"; corr with the file's W = "
-                            f"{np.corrcoef(w[:-1][wet], wf[wet])[0, 1]:.3f}")
-            print(msg)
         return VelocityField(
             u=uv[0].reshape(uv[0].shape[0], -1).astype(vd),
             v=uv[1].reshape(uv[1].shape[0], -1).astype(vd),

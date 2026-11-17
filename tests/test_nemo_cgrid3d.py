@@ -210,7 +210,10 @@ def test_zstar_thicknesses_warn_and_use_the_reference():
     with pytest.warns(RuntimeWarning, match=r"5\.0%.*z\*/vvl"):
         NemoReader.prepare(mesh, ds)
     vel = NemoReader._read_cgrid_3d(ds, 0, mesh, np.float64, None)
-    np.testing.assert_allclose(vel.w.reshape(K + 1, NY, NX), _w(mesh, u[0], v[0], e2u, e1v))
+    fl = mesh._cgrid_face_levels                          # land faces read as zero
+    kk = np.arange(K)[:, None, None]
+    np.testing.assert_allclose(vel.w.reshape(K + 1, NY, NX),
+                               _w(mesh, u[0] * (kk < fl["U"]), v[0] * (kk < fl["V"]), e2u, e1v))
     with warnings.catch_warnings():
         warnings.simplefilter("error")                    # reference thicknesses: silent
         NemoReader.prepare(mesh, ds.assign(e3t_file=(dims, np.stack([ref, ref]))))
@@ -347,3 +350,22 @@ def test_halo_free_fold_3d_load_flux_w_and_sampling(tmp_path, fold):
                                  mesh.elem_center_lat[:nw], np.full(nw, zw[k] + 0.5))
         np.testing.assert_array_equal(got[wet], theta[k, j, i][wet])        # incl. fold-row cells
         assert np.isnan(got[~wet]).all()
+
+
+def test_garbage_on_land_faces_is_masked_by_the_tmask_faces():
+    """u / v are zeroed on every face the tmask closes (umask / vmask = tmask *
+    tmask), whatever the file holds there: same velocities as with zeros."""
+    import xarray as xr
+    from kelp.readers.nemo import NemoReader
+    nl = np.full((NY, NX), K); nl[2:4, 3:6] = 3
+    mesh, e2u, e1v, nl = _box(nlev=nl)
+    rng = np.random.default_rng(5)
+    kk = np.arange(K)[:, None, None]
+    fl = mesh._cgrid_face_levels
+    dims = ("time", "z", "y", "x")
+    clean = [rng.normal(size=(K, NY, NX)) * (kk < fl[k]) for k in "UV"]
+    dirty = [c + 7.0 * (kk >= fl[k]) for c, k in zip(clean, "UV")]
+    out = [NemoReader._read_cgrid_3d(xr.Dataset({"u": (dims, u[None]), "v": (dims, v[None])}),
+                                     0, mesh, np.float64, None) for u, v in (clean, dirty)]
+    for f in ("u", "v", "w"):
+        np.testing.assert_array_equal(getattr(out[0], f), getattr(out[1], f))
