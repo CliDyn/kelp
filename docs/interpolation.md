@@ -701,6 +701,8 @@ bracketed payload `vel_a.lerp(vel_b, α)`), `numerics.integrators._make_stage_ve
 
 ## 7. Containment and polygon vertex weights
 
+(The exact NEMO C-grid scheme, `uv_interp: cgrid`, is a flux-form scheme of its own; see `velocity_interpolation.md` §8 and `nemo.md`.)
+
 This is the shared geometric primitive under the barycentric `W` combine (§3) and
 barycentric scalar sampling (§4). It splits cleanly into a **containment test**
 (is the point inside the element?) and a **weight computation** (how much does

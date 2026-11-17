@@ -415,13 +415,13 @@ the validation campaign and the `-m slow` cross-checks against Parcels.
   Standalone numbered restart files (`write_restart_file`) support resumable-chain
   runs that span a wall-clock limit, bit-for-bit identical to one continuous run.
 
-There is also a **structured-grid foundation** (`readers/structured.py`,
-`readers/nemo.py`) that maps a logically rectangular C-grid onto a quad mesh.
-It is early work: two-dimensional only, restricted to grids whose axes line up
-with east and north, and not part of what we run day to day. It refuses rather
-than guesses whenever those limits are exceeded. See the `nemo.py` notes in
-[`docs/dev/readers.md`](docs/dev/readers.md) and "Remaining work" in
-[`CLAUDE.md`](CLAUDE.md) for its exact scope before relying on it.
+NEMO output is supported through the exact Arakawa C-grid path
+(`mesh.nemo_grid: cgrid`, readers `readers/nemo.py` and `readers/structured.py`):
+2-D and 3-D (z-levels with partial cells), regional boxes and global ORCA
+layouts, validated on ORCA05 and eORCA025 output. The scope, the inputs and the
+refusals are in [`docs/nemo.md`](docs/nemo.md). The default T-point path
+(`nemo_grid: tpoint`) is early work: two-dimensional, restricted to grids whose
+axes line up with east and north.
 
 ## Licence and citation
 

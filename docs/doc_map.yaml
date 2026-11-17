@@ -27,6 +27,7 @@ configuration:
   - src/kelp/core/config.py:ModeConfig
   - src/kelp/readers/fesom14/reader.py:Fesom14Reader
   - src/kelp/readers/__init__.py:apply_time_options
+  - src/kelp/readers/nemo.py:NemoReader
   doc: docs/configuration.md
   verified_at: 8165ac2
 coordinate_frame:
@@ -69,6 +70,7 @@ dev_integrators:
   - src/kelp/numerics/temporal_reconstruct.py:reconstruct_pchip
   - src/kelp/numerics/vertical_uv.py:check_depth_linear_record
   - src/kelp/numerics/integrators.py:_check_depth_linear_entry
+  - src/kelp/numerics/cgrid3d.py:cgrid3d_step
   doc: docs/dev/integrators.md
   verified_at: d2df57d
 dev_mesh:
@@ -98,6 +100,8 @@ dev_numerics:
   - src/kelp/numerics/interpolate.py:_interp_edge_leastsq_core_dl
   - src/kelp/numerics/interpolate.py:_interp_bary_elem_core_dl
   - src/kelp/numerics/vertical_uv.py:uv_wet
+  - src/kelp/numerics/interpolate.py:_interp_cgrid_core
+  - src/kelp/numerics/interpolate.py:interp_cgrid3d
   doc: docs/dev/numerics.md
   verified_at: a71bd9c
 dev_readers:
@@ -114,6 +118,8 @@ dev_readers:
   - src/kelp/readers/fesom14/
   - src/kelp/readers/fesom2.py:_elem_level_metadata
   - src/kelp/readers/__init__.py:apply_time_options
+  - src/kelp/readers/nemo.py:detect_cgrid_layout
+  - src/kelp/readers/nemo.py:_read_raster
   doc: docs/dev/readers.md
   verified_at: a71bd9c
 dev_tracking:
@@ -280,6 +286,8 @@ velocity_interpolation:
   - src/kelp/numerics/interpolate.py:_interp_edge_leastsq_core_dl
   - src/kelp/numerics/interpolate.py:_interp_bary_elem_core_dl
   - src/kelp/numerics/vertical_uv.py:uv_wet
+  - src/kelp/numerics/interpolate.py:_interp_cgrid_core
+  - src/kelp/numerics/interpolate.py:interp_cgrid3d
   doc: docs/velocity_interpolation.md
   verified_at: 66e8006
 vertical:
@@ -301,3 +309,13 @@ w_reconstruction:
   - src/kelp/w_reconstruct.py:compare_variants
   doc: docs/w_reconstruction.md
   verified_at: d2df57d
+nemo:
+  code:
+  - src/kelp/readers/nemo.py:NemoReader
+  - src/kelp/readers/structured.py:build_cgrid_mesh
+  - src/kelp/readers/nemo.py:detect_cgrid_layout
+  - src/kelp/numerics/interpolate.py:interp_cgrid3d
+  - src/kelp/numerics/cgrid3d.py:cgrid3d_step
+  - src/kelp/tracking.py:_refuse_cgrid_unsupported
+  doc: docs/nemo.md
+  verified_at: 6991278

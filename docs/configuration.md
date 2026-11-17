@@ -217,7 +217,7 @@ it ends in `.zarr` or is a directory containing a `.zattrs` (Zarr v2) or
 - Variables are then resolved by name inside the merged dataset (see
   `mode.var_*` in §2).
 
-**NEMO (`mesh.type: nemo`)** — no directory scanning. `ncinput`, `ncinput_u`,
+**NEMO (`mesh.type: nemo`; user page `nemo.md`)** — no directory scanning. `ncinput`, `ncinput_u`,
 `ncinput_v`, `ncinput_w` each take a file, a glob or a list of files per grid;
 several files of one grid are joined along time (each decoded on its own epoch;
 the joined axis must be strictly increasing, else `ValueError`). Without

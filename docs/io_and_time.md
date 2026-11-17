@@ -57,6 +57,9 @@ tracker reads both transparently.)
 
 ## §2 Finding the data files
 
+NEMO (`mesh.type: nemo`) has its own file rules (grid_T token swap, `ncinput_u/v/w`, globs and lists per grid, `mesh_mask` / `domain_cfg`): `nemo.md` §3, `configuration.md`.
+
+
 `open_dataset` (the FESOM2 reader's version is the richest) accepts the input
 data in three shapes:
 

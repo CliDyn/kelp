@@ -1,0 +1,35 @@
+# ==========================================================================
+# kelp example — NEMO, exact C-grid path, 3-D (z-levels / zps), docs/nemo.md
+# ==========================================================================
+# Needs a 3-D mesh_mask (or domain_cfg): tmask, e3t_1d, e1t, e2t, e2u, e1v and,
+# for partial cells, e3t_0 / e3u_0 / e3v_0. W is computed by the reader from
+# continuity (== the model's W); grid_W is not needed. Seeds: "lon lat depth_m"
+# with depth positive down.
+
+mode:
+  Fdrift3D: true
+  time_dir: 1.0
+  sample_vars: [thetao, so]    # T-cell values along the track (exact names in grid_T)
+
+numerics:
+  dt: 3600.0
+  integrator: rk4
+  output_freq: 24
+  temporal_interp: true        # blend between records; false = discrete (dt must equal the record step)
+
+mesh:
+  type: nemo
+  nemo_grid: cgrid
+  nemo_partial_cells: shrunk   # NEMO <= 4.2; `porous` for NEMO 5 (changes metres only)
+  meshpath: path/to/mesh_mask.nc
+
+data:
+  ncinput: path/to/EXP_grid_T.nc     # thetao, so, (e3t: z*/vvl check)
+  inicloud: particles_3d.dat
+  output_path: ./.tmp/nemo_tracks_3d.zarr
+  time_averaging: mean
+
+time:
+  start_time_idx: 0
+  n_steps: 720
+  on_exhausted: cycle

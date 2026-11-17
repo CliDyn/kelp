@@ -214,8 +214,8 @@ Paths are below `src/kelp/`.
   `Mesh` (a quad of four neighbouring cell centres is kept only when all four are
   wet; the nodes are the wet cell centres that belong to at least one such quad).
   Notes: [readers.md](readers.md).
-- **`readers/nemo.py`** — NEMO adapter, version 1: 2-D, grids aligned with east and
-  north only (others are refused); node-layout u/v; opt-in exact C-grid path `mesh.nemo_grid: cgrid` (any grid orientation, 2-D). Notes: [readers.md](readers.md).
+- **`readers/nemo.py`** — NEMO adapter. Default T-point path: 2-D, grids aligned with east and
+  north only (others are refused); node-layout u/v. Exact C-grid path `mesh.nemo_grid: cgrid` (`numerics/cgrid3d.py`, any grid orientation incl. global ORCA, 2-D + 3-D z-levels / zps, user page `docs/nemo.md`). Notes: [readers.md](readers.md).
 
 ### Top level
 

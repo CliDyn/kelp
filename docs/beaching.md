@@ -23,6 +23,9 @@ switched on in the configuration.
 
 ## 1. What beaching is
 
+(Not available with the NEMO C-grid path, `mesh.nemo_grid: cgrid`: land is zero velocity there and the run is refused with beaching enabled; see `nemo.md`.)
+
+
 Every particle carries a **status**, a small integer (`ParticleStatus` in
 `src/kelp/core/particles.py`). Three of its values matter for beaching (a
 fourth, `NOT_RELEASED`, is used only by delayed release and never produced or

@@ -19,6 +19,9 @@ is byte-for-byte identical to a pure-advection run.
 
 ## 1. Why particles get a random kick
 
+(NEMO C-grid path, `mesh.nemo_grid: cgrid`: uniform-Kh diffusion in 2-D only; em/m1 and any diffusion in 3-D are refused, `nemo.md` §6.)
+
+
 The velocity field read from a model output is an *average* over each grid cell
 and each output interval. Motions smaller or faster than that — eddies,
 filaments, turbulent overturning — are smoothed away. Yet those motions do real
