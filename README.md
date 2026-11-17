@@ -308,8 +308,8 @@ annotated template: [`config.yaml`](config.yaml).
 | `inicloud` | `""` | **required**: seeds, one `lon lat [depth] [release_sec]` per line |
 | `particle_offset` | `null` | global index of the file's first particle in a sharded release (default: the shard file's header, else 0) |
 | `output_path` | `""` | `.nc` → NetCDF, `.zarr` → Zarr; empty = in-memory only |
-| `time_averaging` | `null` (warns) | `mean` (time-averaged output; timestamps shifted to window midpoints) / `instant`; FESOM 1.4: leave unset (the reader resolves each record's time; refused) |
-| `time_stamp`, `time_window`, `time_offset` | `null` | FESOM 1.4 only, for files that do not say what their stamps mean: `start`/`centre`/`end`/`instant` + `calendar_month`/`calendar_year`/`calendar_day`/`"<n> <s\|min\|h\|d>"`; a fixed `"<±n> <unit>"` shift of the raw stamps |
+| `time_averaging` | `null` (warns) | `mean` (time-averaged output stamped at the window end; timestamps shifted to window midpoints) / `instant`; leave unset when `time_stamp`/`time_window` are set, and for FESOM 1.4 (the reader resolves each record's time; refused) |
+| `time_stamp`, `time_window`, `time_offset` | `null` | where each stamp sits in its averaging window, for every mesh type: `start`/`centre`/`end`/`instant` + `calendar_month`/`calendar_year`/`calendar_day`/`"<n> <s\|min\|h\|d>"`, and a fixed `"<±n> <unit>"` shift of the raw stamps; each record then sits at its window centre (e.g. means stamped at the window start: `start` + `calendar_day`). FESOM 1.4 needs them only for files that do not say what their stamps mean |
 
 ### `time`
 

@@ -56,8 +56,9 @@ let RK4 separate from RK2 at coarse file cadence, set
 | `time.end_time_idx` | legacy: → `n_steps = end - start` (refused together with `start_date`: use `duration_days` or `n_steps`) |
 | `time.start_date` + `time.duration_days` | start at an ISO datetime; `n_steps = days·86400/dt` |
 
-`start_date` matches the raw file timestamps; starting **between** snapshots
-requires `temporal_interp: true` (else it raises with that suggestion).
+`start_date` matches the raw file timestamps — for `fesom14` and with the stamp
+options below, the resolved instants (a daily mean at 12:00); starting **between**
+snapshots requires `temporal_interp: true` (else it raises with that suggestion).
 
 ## Direction
 
@@ -75,6 +76,11 @@ Models like FESOM2 write time-averaged output (e.g. monthly means) timestamped a
 the **end** of the averaging window. Set `time_averaging: mean` to shift each
 timestamp to the window midpoint; `instant` for snapshots. If unset, KELP
 warns and suggests a default by mesh type (FESOM2 and HEALPix → `mean`, FESOM-C and NEMO → `instant`).
+Output whose stamps are not the end of the window — a mean stamped at the START of its day or
+month, as stores written from GRIB with the reference time are (`healpix.md` §2) — needs
+`data.time_stamp` + `data.time_window` (e.g. `start` + `calendar_day`) in place of
+`time_averaging`, for every mesh type: each record then sits at the centre of its window, and no
+midpoint shift follows (`configuration.md` §5, `io_and_time.md` §3).
 FESOM 1.4 (`mesh.type: fesom14`) is the exception: its reader resolves what time each record
 represents (the window centre of a mean, from the files' time bounds or the raw output schedule, or
 from `data.time_stamp` + `data.time_window`), so leave `time_averaging` unset — it is refused there

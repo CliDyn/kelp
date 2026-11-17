@@ -31,9 +31,15 @@ campaign order-of-operations and the setup pitfalls.
 2. **There is no typo protection.** Unknown or misspelled keys (including
    wrong case, e.g. `Fdrift2d`) are silently dropped and the default is used.
    After writing a config, re-check every key against `docs/configuration.md`.
-3. **Make the implicit explicit.** Always set `data.time_averaging` — except for `mesh.type: fesom14`, which
-   refuses the key: its reader resolves what time each record represents from the files (time bounds, the raw
-   writer's schedule, or `data.time_stamp` + `data.time_window`), so leave it unset there. FESOM2
+3. **Make the implicit explicit.** Always say where the time stamps sit. Stamps at the window END (or
+   snapshots): set `data.time_averaging`. Stamps at the window START, or any convention that is not the
+   window end, on any reader: set `data.time_stamp` + `data.time_window` INSTEAD of `time_averaging`
+   (refused next to them) — e.g. daily means stamped 00:00 of their own day: `time_stamp: start`,
+   `time_window: calendar_day`; HEALPix stores written from GRIB by a polytope/earthkit download stamp
+   the start, gribscan-indexed ones the end (`docs/healpix.md` §2); `mean` would place start-stamped
+   records a whole window early, silently. `mesh.type: fesom14` refuses `time_averaging`: its reader
+   resolves what time each record represents from the files (time bounds, the raw writer's schedule,
+   or `data.time_stamp` + `data.time_window`), so leave it unset there. FESOM2
    output is time-averaged at EVERY cadence, daily included: write
    `time_averaging: mean` (its timestamps are the window END). `instant` is for
    true snapshot archives only (FESOM-C); if you cannot prove the file holds
@@ -135,7 +141,10 @@ campaign order-of-operations and the setup pitfalls.
      ```
    - `start_date` must hit a file timestamp exactly unless
      `temporal_interp: true`; with `time_averaging: mean` give the raw
-     end-of-window timestamp from the file, not the midpoint.
+     end-of-window timestamp from the file, not the midpoint; with
+     `data.time_stamp`/`time_window` (and for `fesom14`) give the RESOLVED
+     instant, the window centre of a mean (a daily mean at 12:00 — `kelp info`
+     prints the first and last one).
    - `checkpoint_freq` does nothing without `data.output_path`. It only ever
      keeps the **latest** checkpoint (resume from where the run stopped). A run
      too long for one compute job's wall clock instead needs the driver-level
@@ -200,10 +209,10 @@ data:
   # ncinput_w: path/to/w.fesom.1958.nc    # 3D only
   inicloud:   particles.dat                # lon lat [depth] [release_sec]
   output_path: trajectories.zarr           # .zarr or .nc; empty = in-memory
-  time_averaging: mean    # ALWAYS set: mean (averages) / instant (snapshots) — fesom14: leave unset (refused)
+  time_averaging: mean    # ALWAYS set: mean (averages stamped at the window END) / instant (snapshots) — stamps at the window START: time_stamp: start + time_window: calendar_day instead; fesom14: leave unset (refused)
 
 time:
-  start_date: "2005-01-01"   # temporal_interp: the run starts at this instant; discrete: must equal a RAW file timestamp (list them: `ncdump -t -v time FILE`; `kelp info` shows only the first and last)
+  start_date: "2005-01-01"   # temporal_interp: the run starts at this instant; discrete: must equal a RAW file timestamp (list them: `ncdump -t -v time FILE`; `kelp info` shows only the first and last) — with time_stamp/time_window (and fesom14) a RESOLVED one (window centre, e.g. 12:00)
   # start_time_idx: 0     # alternative ONLY when you have read the index off the file's time axis; a multi-year directory starts at its FIRST year — index 0 is NOT your date
   n_steps: 720
   on_exhausted: stop      # cycle = wrap around (periodic forcing)
@@ -251,6 +260,7 @@ Counting strandings (which criterion can fire on this mesh, the default block, c
    assert c.numerics.diffusion.seed == o.numerics.diffusion.seed
    assert isinstance(c.numerics.dt, float) and isinstance(c.time.start_time_idx, int)
    assert c.mesh.rotation == o.mesh.rotation and c.data.time_averaging == o.data.time_averaging
+   assert all(getattr(c.data, k) == getattr(o.data, k) for k in ("time_stamp", "time_window", "time_offset"))
    ```
 3. `SUMMARY.md` — one line per decision with the rule that drove it (quoted) or
    "own judgement"; its last line is the launch-gate line below (a gate stated
@@ -268,7 +278,8 @@ Counting strandings (which criterion can fire on this mesh, the default block, c
 - All five sections present, empty ones as `{}`?
 - Files pinned explicitly, or is directory discovery intentional and the
   directory clean?
-- `time_averaging` set explicitly (and absent for `fesom14`)?
+- `time_averaging` set explicitly — or, for stamps that are not the window end, `time_stamp` +
+  `time_window` in its place (absent for `fesom14` and next to the stamp options)?
 - dt ↔ `temporal_interp` consistent (discrete mode wants dt = file step)?
 - 3D: W variable actually resolves (`var_w` or `w`/`wo`/`wvel` for FESOM2,
   `w` = `Wvel` for FESOM-C — `w_cart` is refused), and its sign convention

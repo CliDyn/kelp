@@ -152,14 +152,19 @@ data:
                               #   ('# comments'; release_sec = delayed-release
                               #   offset in seconds, optional — see time.n_pulses)
   # output_path: tracks.zarr  # .zarr → Zarr, otherwise NetCDF; empty = in-memory
-  time_averaging: instant     # SET EXPLICITLY: mean (time-averaged output,
-                              #   timestamps shifted to window midpoints)
-                              #   or instant (snapshots); fesom14: remove it
-                              #   (the reader resolves the record times)
-  # fesom14 only, for files without time bounds or output_schedule:
-  # time_stamp: end           # start / centre / end / instant
-  # time_window: calendar_month   # calendar_month / calendar_year / calendar_day / "5 d"
-  # time_offset: "+12 h"      # shift of the raw stamps (raw job started at 12:00)
+  time_averaging: instant     # SET EXPLICITLY: mean (time-averaged output
+                              #   stamped at the window END; timestamps shifted
+                              #   to window midpoints) or instant (snapshots);
+                              #   remove it when time_stamp/time_window are set,
+                              #   and for fesom14 (the reader resolves the times)
+  # Where each stamp sits in its averaging window, for every reader. Use them
+  # instead of time_averaging when the stamps are not the window end (e.g. daily
+  # means stamped at 00:00 of their day); fesom14 needs them only for files
+  # without time bounds or output_schedule:
+  # time_stamp: start         # start / centre / end / instant
+  # time_window: calendar_day # calendar_day / calendar_month / calendar_year / "5 d"
+  # time_offset: "+45 min"    # shift of the raw stamps first (e.g. means stamped
+                              #   23:15 with end + calendar_day); fesom14 also alone
 
 # --- Time control ----------------------------------------------------------
 time:

@@ -26,6 +26,7 @@ configuration:
   - src/kelp/cli/main.py:main
   - src/kelp/core/config.py:ModeConfig
   - src/kelp/readers/fesom14/reader.py:Fesom14Reader
+  - src/kelp/readers/__init__.py:apply_time_options
   doc: docs/configuration.md
   verified_at: d2df57d
 coordinate_frame:
@@ -111,6 +112,7 @@ dev_readers:
   - src/kelp/readers/nemo.py:NemoReader
   - src/kelp/readers/fesom14/
   - src/kelp/readers/fesom2.py:_elem_level_metadata
+  - src/kelp/readers/__init__.py:apply_time_options
   doc: docs/dev/readers.md
   verified_at: d2df57d
 dev_tracking:
@@ -174,6 +176,7 @@ healpix:
   - utils/extract_healpix_region.py:extract_region
   - src/kelp/numerics/integrators.py:_bary_fused_anchor_exact
   - src/kelp/core/mesh.py:grid_hash_dense_for_elements
+  - src/kelp/readers/__init__.py:apply_time_options
   doc: docs/healpix.md
   verified_at: d2df57d
 interpolation:
@@ -205,6 +208,8 @@ io_and_time:
   - src/kelp/tracking.py:_release_arrays
   - src/kelp/core/release.py:mask_inactive_velocity
   - src/kelp/readers/fesom14/_timeaxis.py:resolve_axis
+  - src/kelp/readers/__init__.py:apply_time_options
+  - src/kelp/readers/fesom14/_timeaxis.py:resolve_stamps
   doc: docs/io_and_time.md
   verified_at: d2df57d
 localization:

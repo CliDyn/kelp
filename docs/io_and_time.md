@@ -200,8 +200,9 @@ realization).
 
 ### Time-averaged output and the midpoint shift
 
-(Not for `mesh.type: fesom14`, whose reader resolves each record's time itself —
-next subsection.)
+(Not for `mesh.type: fesom14`, whose reader resolves each record's time itself,
+and not for a run with the stamp options `data.time_stamp` / `data.time_window`,
+which resolve them for every other reader — the next two subsections.)
 
 Some models write **time-averaged** output: each record is the mean over an
 averaging window (a day, a month), and the file stamps that record with the time
@@ -262,6 +263,64 @@ interpolation — and monthly means, a calendar month apart, need
 summary and `kelp info` print one line saying what resolved the times and the
 first and last instant.
 
+### Record times from the stamp options (every other reader)
+
+The other readers hand on the stamps as the files carry them, and
+`time_averaging: mean` assumes that each stamp is the end of its averaging
+window. Output stamped elsewhere — a store written from GRIB with the reference
+time stamps the START of the window (`healpix.md` §2) — is placed one full
+window early under `mean` and half a window early under `instant`, and nothing
+fails. For such output set `data.time_stamp` and `data.time_window` in place of
+`time_averaging`, and `data.time_offset` when the stamps sit early or late by a
+fixed amount. `readers.apply_time_options(ds, config.data, mesh_type)` then
+resolves the time coordinate of the opened dataset — one axis, with every file
+already joined (yearly files concatenated, the HEALPix `ncinput_eta` store
+merged) — once, in this order: the offset is added to every stamp; the stamp and
+the window give each record's window (`start`: the window begins at the stamp,
+`end`: it ends there, `centre`: it is centred on it); the record's time is the
+centre of its window for a mean, the shifted stamp for `instant`. The arithmetic
+and the refusals are those of the FESOM 1.4 reader's options
+(`readers/fesom14/_timeaxis.py:resolve_stamps`). Calendar windows are computed
+exactly in the calendar of the axis (a `datetime64` axis in
+`proleptic_gregorian`, a cftime axis in its own), so monthly means stamped on
+the first of the month at 00:00 with `start` / `calendar_month` sit at
+16 January 12:00, 15 February 00:00 (12:00 in a leap year), and so on. With a
+calendar window a stamp off its boundary (for `centre`, off the centre) is
+refused, as are gaps between windows, overlapping or duplicate records and a
+broken snapshot cadence; the messages name the configured data paths in place of
+a file and a variable. The resolved axis keeps its form — cftime stays cftime
+in its calendar, `datetime64` stays `datetime64` (in nanoseconds while every
+instant fits that range, else in microseconds) — with the axis's attributes
+and its `calendar` encoding, so the output's time units and calendar are those
+of the input.
+
+`_open_run_dataset` applies the options right after `open_dataset`, so
+`run_tracking` and `kelp info` resolve the same axis, and resolve it once (a
+second application would shift it again). `_time_option_kwargs` checks the rules
+before the mesh or any data is read: `time_stamp` and `time_window` come
+together; `data.time_averaging` next to any of the keys is refused, with a
+message saying to remove it; `time_offset` alone is refused, since these readers
+have no time bounds or output schedule for it to act on; and
+`time.on_exhausted: cycle` with a `calendar_month` or `calendar_year` window is
+refused, because the cycle period (the span from the first to the last record
+plus the last interval) assumes equally spaced records — for twelve monthly
+centres it would be 364.5 days instead of 365. Fixed-duration and
+`calendar_day` windows are of equal length and cycle exactly. A dataset without
+a `time` dimension, or whose axis carries no calendar dates, is refused when it
+is opened.
+
+From there on the run treats the axis as it treats that of the FESOM 1.4
+reader: no `time_averaging` warning, no midpoint shift, the output's
+`time_averaging` attribute reads `"resolved_from_options"` (§5.8), a
+`start_date` is matched against the resolved instants (a daily mean stamped
+D 00:00 with `start` sits at D 12:00, so a discrete-mode start names 12:00),
+monthly means need `temporal_interp: true`, and the run summary prints one line
+`Record times: resolved from data.time_stamp=…, data.time_window=…[,
+data.time_offset=…]; first …, last …`, which `kelp info` prints too. A caller
+that opens a dataset with `reader.open_dataset` and passes it to
+`run_single_realization` or `track_particles` directly gets the raw stamps, and
+calls `apply_time_options` on it once before.
+
 ### Starting from a calendar date
 
 Instead of a numeric index into the file, a run can name an ISO **`start_date`**
@@ -269,8 +328,9 @@ Instead of a numeric index into the file, a run can name an ISO **`start_date`**
 the **raw** file timestamps — the original on-disk times, *not* the
 midpoint-shifted ones — and returns the corresponding file index. If the
 requested date falls exactly on a snapshot, the run starts there. (For
-`fesom14` the file timestamps are the resolved instants of the previous
-subsection, so a `start_date` is matched against the window centres.) If it falls
+`fesom14` and with the stamp options the file timestamps are the resolved
+instants of the two previous subsections, so a `start_date` is matched against
+the window centres.) If it falls
 *between* two snapshots, that only works with temporal interpolation enabled
 (so the tracker can construct a velocity at the in-between instant); otherwise it
 raises with an explanatory message. With temporal interpolation the run clock
@@ -412,7 +472,9 @@ that missed a record read 9.97e36 there — the NetCDF default fill.)
 first **raw** record of the forcing time axis (`ds["time"][0]`), the origin
 `extract_time_info` measures from (§3). Under `time_averaging: mean` the run
 reads midpoint-shifted times; the labels follow them, but the origin does not
-move, so the dates are the window centres.
+move, so the dates are the window centres. For `fesom14` and with the stamp
+options the dataset's axis already holds the resolved instants, so `T0` is the
+first record's resolved time (the centre of its window for a mean).
 
 **The forcing's own clock.** KELP keeps the clock of the forcing and converts
 no time zones: the output dates repeat the forcing's timestamps. CF time and
@@ -657,7 +719,8 @@ writing a file would be overkill.
 trajectories as global attributes of the output. Always: `integrator`, `dt`,
 `time_dir`, `mesh_type`, `start_time_idx`, `n_steps`, `mode_3d`,
 `temporal_interp` (0/1), `temporal_reconstruction`, `time_averaging` (the
-resolved value), `exact_nearest`, `grid_hash_cell`, `grid_hash_cell_rule`,
+resolved value: `mean` or `instant`, `"resolved_by_reader"` for `fesom14`,
+`"resolved_from_options"` for another reader with the stamp options), `exact_nearest`, `grid_hash_cell`, `grid_hash_cell_rule`,
 `particle_offset` (the shard offset of the random draws, 0 for an unsharded run),
 `random_draws` (0/1: whether the run draws random numbers at all) and
 `kelp_version` (package version plus the commit, read from `.git` without a
@@ -665,7 +728,11 @@ resolved value), `exact_nearest`, `grid_hash_cell`, `grid_hash_cell_rule`,
 (`reader-converted-2026-09-23` — an output without it was written by an engine
 that used FESOM2/HEALPix W unconverted); option-dependent attributes (diffusion,
 beaching, rotation, `uv_vertical = "linear"` for `mode.uv_vertical: linear`, …)
-only when the option is on. The sharding concatenator
+only when the option is on. Each of `time_stamp`, `time_window` and
+`time_offset` that is set is written as a string attribute of that name (for
+every reader, `fesom14` included); a key that is not set is not written, so a
+run without the stamp options carries exactly the attributes it carried before.
+The sharding concatenator
 (`utils/concat_trajectories.py`) compares every attribute and refuses shards
 that differ (until 2026-09-23 two shards run with linear and PCHIP temporal
 reconstruction merged without complaint). It also refuses shards that differ in
@@ -756,7 +823,11 @@ float index and refuses a fractional one. Three rules keep the output
 
 - **Pass the same `file_times`** the first call used — under
   `time_averaging: mean` the midpoint-shifted axis that `run_tracking` builds
-  (`extract_time_info` and then `tracking._shift_to_midpoints`). A segment
+  (`extract_time_info` and then `tracking._shift_to_midpoints`); for `fesom14`
+  and with the stamp options the resolved axis as it was opened, with no shift.
+  A driver opens the data through `readers._open_run_dataset` (which applies the
+  stamp options once) and skips its own midpoint shift when
+  `readers._record_time_mode(config)` is not `None`. A segment
   given another axis does not continue the run: its labels — and, with
   temporal interpolation, the forcing times it reads — are off, by half a
   record interval for the raw axis.
@@ -852,7 +923,10 @@ the library) runs a long experiment as a sequence of bounded jobs:
    if one exists, `load_restart` it, validate its frame and its
    `mode.uv_vertical` rule (`_validate_restart_uv_vertical(r["uv_vertical"],
    mode)`), and continue from `step_i + 1`. Otherwise build the seeds and
-   start fresh.
+   start fresh. Either way the data are opened as `run_tracking` opens them
+   (`readers._open_run_dataset`: the level cut, every `open_dataset` keyword,
+   the stamp options), and a segment of a run with the stamp options writes the
+   same time attributes as `run_tracking` (`readers._time_metadata`).
 2. **Run in chunks.** Advance `restart_every` steps at a time. Each chunk writes
    one trajectory **segment** (`part_<step>.zarr`) *and* one numbered standalone
    restart file (`write_restart_file(..., uv_vertical=mode.uv_vertical)`, so
@@ -882,8 +956,11 @@ The pieces above fire at three different rhythms over a run.
 `open_dataset` build the mesh and open the data (§1–§2). `extract_time_info`
 reads the time axis into seconds and derives `file_dt`, and `dt` is auto-detected
 if unset (§3). If `time_averaging` is `"mean"`, the timestamps are shifted to
-window midpoints. If a `start_date` is given, it is resolved to a starting file
-index against the raw timestamps.
+window midpoints — unless the record times were resolved at the open, by the
+`fesom14` reader or from the stamp options (`readers.apply_time_options`, called
+by `_open_run_dataset`), in which case nothing is shifted. If a `start_date` is
+given, it is resolved to a starting file index against the dataset's timestamps:
+the raw ones, or the resolved instants when the open resolved them.
 
 **Every simulation step.** The step asks `_VelCache.get` for the velocity
 snapshot(s) it needs; in temporal-interpolation mode a small helper blends two
