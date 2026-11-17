@@ -18,6 +18,8 @@ This skill turns a described experiment into a runnable setup: **seeds → confi
   output-writer choice (Zarr vs NetCDF), sizing recipes, and SLURM run
   operations. Read it to set a realistic `dt`/scheme/tracer-count and to answer
   *how long will it take / how many threads / should I extract a region*.
+- **the `kelp-nemo` skill** — NEMO output (ORCA, regional): input checklist,
+  variable-name mapping, halo / fold / crop pitfalls, a minimal config.
 - **the `kelp-config` skill** — the config-writing mechanics (explicit-file
   pinning, `time_averaging`, cross-key constraints). Follow it when you write
   the YAML; this skill is the layer above that also decides the knobs, makes
@@ -53,7 +55,7 @@ gate (ask, then wait for an explicit yes) holds for every run.
    | a release point/region + count | the **seeds** (step 2) |
    | "released over time / every N days / a continuous source" | `time.n_pulses` + `pulse_interval` (or a per-seed `release_sec` column) — see step 2 |
    | a duration + cadence | `dt`, `n_steps`, `temporal_interp`, `on_exhausted` |
-   | which velocity layout the data has | ELEMENT layout (FESOM2 `u`/`v`, FESOM-C `u2d`/`v2d`/`u`/`v` on the element dim) → `uv_interp: leastsq` (the default, fused; it reproduces the legacy Fortran tracker's scheme); NODE layout (FESOM2 `unod`/`vnod`, HEALPix pixels, NEMO T-points) → `barycentric` (required). Decide from the variable's DIMENSION in `ncdump -h` (`elem` vs `nod2`/`node`), never from the name (`kelp info` prints mesh sizes and the first/last time stamp, not the layout). On 2-D node layout pair `barycentric` with `elem_search: local` — `walk` disables the ~×9 fused barycentric kernel |
+   | which velocity layout the data has | ELEMENT layout (FESOM2 `u`/`v`, FESOM-C `u2d`/`v2d`/`u`/`v` on the element dim) → `uv_interp: leastsq` (the default, fused; it reproduces the legacy Fortran tracker's scheme); NODE layout (FESOM2 `unod`/`vnod`, HEALPix pixels, NEMO T-points) → `barycentric` (required); NEMO output proper (ORCA, regional) → `mesh.nemo_grid: cgrid` (exact C-grid, 2-D/3-D, `uv_interp` follows; setup in the **`kelp-nemo`** skill, `docs/nemo.md`). Decide from the variable's DIMENSION in `ncdump -h` (`elem` vs `nod2`/`node`), never from the name (`kelp info` prints mesh sizes and the first/last time stamp, not the layout). On 2-D node layout pair `barycentric` with `elem_search: local` — `walk` disables the ~×9 fused barycentric kernel |
    | node-layout data (`unod`/`vnod`, NEMO) or a coastal boundary-condition study | `numerics.uv_interp` (`barycentric` for node layout; `edge_leastsq` + `edge_leastsq_bc` for FESOM-style elemental interpolation) — `elem_search`: `local` on node layout (the 2-D fused barycentric kernels and the 3-D RK2 fused kernel need it); `walk` (identical results, faster containment) pays off on the unfused element-layout paths (`barycentric`/`edge_leastsq` on element layout) |
    | an idealized periodic channel / doubly-periodic box | `numerics.periodic_lon` / `periodic_lat` `[lo, hi]` — the mesh must carry a ghost band past the window (docs/configuration.md; incompatible with `mesh.rotation`; window strictly inside ±180/±90) |
    | "how deep do they get" / subduction / any depth statistic | `mode.max_levels: null` (full column) — `max_levels` is a RAM lever that inserts an artificial bottom and CLAMPS exactly the quantity measured; never trim it "to save time" (it saves none) |
