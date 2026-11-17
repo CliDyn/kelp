@@ -7,7 +7,7 @@ from kelp.core.io import VelocityField
 from kelp.core.particles import ParticleStatus, make_state
 from kelp.numerics.cgrid3d import cgrid3d_step
 from kelp.numerics.sampling import sample_field_cgrid
-from kelp.readers.structured import (build_cgrid_mesh, cgrid_face_thickness,
+from kelp.readers.structured import (build_cgrid_mesh, cgrid_thickness,
                                      cgrid_w_from_continuity)
 from tests.test_nemo_cgrid import D, _grid, _widths
 
@@ -15,23 +15,36 @@ K, NY, NX, DZ = 5, 6, 10, 10.0
 ZW = DZ * np.arange(K + 1)
 
 
-def _box(nlev=None):
+def _zps(nl, e3b):
+    """Cell and face thicknesses (K, NY, NX) of the NEMO partial-step rule: a face
+    takes the smaller of its two cells' thickness (the last column / row: its own)."""
+    e3t = cgrid_thickness(ZW, np.where(nl > 0, nl - 1, -1), e3b)
+    e3u, e3v = e3t.copy(), e3t.copy()
+    e3u[:, :, :-1] = np.minimum(e3t[:, :, :-1], e3t[:, :, 1:])
+    e3v[:, :-1] = np.minimum(e3t[:, :-1], e3t[:, 1:])
+    return e3t, e3u, e3v
+
+
+def _box(nlev=None, e3b=None):
     """Closed box, wet cells j = 1..NY-2, i = 1..NX-2 (the rest dry), K layers
-    (or ``nlev`` (NY, NX) levels per column)."""
+    (or ``nlev`` (NY, NX) levels per column, ``e3b`` the bottom-cell thicknesses)."""
     (flon, flat), _ = _grid(NY, NX)
     e2u, e1v = _widths(flon, flat)
     nl = np.full((NY, NX), K) if nlev is None else nlev
     nl = np.where(np.arange(NY)[:, None] * np.arange(NX)[None] > 0, nl, 0)
     nl[-1, :] = 0; nl[:, -1] = 0
-    mesh = build_cgrid_mesh(flon, flat, nl > 0, e2u=e2u, e1v=e1v, nlev2d=nl, zw=ZW, depth2d=ZW[nl],
-                            area=e2u * e1v)
+    eb = np.full((NY, NX), DZ) if e3b is None else e3b
+    _, e3u, e3v = _zps(nl, eb)
+    mesh = build_cgrid_mesh(flon, flat, nl > 0, e2u=e2u, e1v=e1v, nlev2d=nl, zw=ZW, e3b=eb,
+                            e3u0=e3u, e3v0=e3v, area=e2u * e1v)
     return mesh, e2u, e1v, nl
 
 
-def _w(u, v, e2u, e1v, nl, e3b=None):
-    eb = np.full(nl.shape, DZ) if e3b is None else e3b
-    e3u, e3v = cgrid_face_thickness(ZW, nl, eb)
-    return cgrid_w_from_continuity(u, v, e2u, e1v, e3u, e3v, e2u * e1v, nl)
+def _w(mesh, u, v, e2u, e1v):
+    ny, nx = mesh._structured_shape
+    e3u, e3v = (cgrid_thickness(ZW, getattr(mesh, f"_cgrid_kb{n}").reshape(ny, nx),
+                                getattr(mesh, f"_cgrid_e3{n}").reshape(ny, nx)) for n in "uv")
+    return cgrid_w_from_continuity(u, v, e2u, e1v, e3u, e3v, e2u * e1v, mesh._cgrid_nlev_raster)
 
 
 def _vel(mesh, u, v, w):
@@ -46,7 +59,7 @@ def test_w_balances_every_cell_and_vanishes_at_the_floor():
     mesh, e2u, e1v, nl = _box(nl)
     rng = np.random.default_rng(0)
     u = rng.normal(size=(K, NY, NX)); v = rng.normal(size=(K, NY, NX))
-    w = _w(u, v, e2u, e1v, nl)
+    w = _w(mesh, u, v, e2u, e1v)
     j, i = np.mgrid[1:NY - 1, 1:NX - 1]
     for k in range(K):
         div = ((u[k, j, i] * e2u[j, i] - u[k, j, i - 1] * e2u[j, i - 1]
@@ -62,7 +75,7 @@ def test_uniform_layer_flow_and_land_below_floor():
     mesh, e2u, e1v, nl = _box()
     uk = np.array([0.1, -0.2, 0.3, 0.0, 0.05])
     u = np.broadcast_to(uk[:, None, None], (K, NY, NX)).copy(); v = np.zeros_like(u)
-    w = _w(u, v, e2u, e1v, nl)
+    w = _w(mesh, u, v, e2u, e1v)
     vel = _vel(mesh, u, v, w)
     lon0, lat0 = 4.5 * D, 3.5 * D                         # interior, 2 cells from the walls
     dt = 60.0
@@ -77,7 +90,7 @@ def test_uniform_layer_flow_and_land_below_floor():
     # (the particle stays alive, stuck)
     nl = np.full((NY, NX), K); nl[4, 5] = 2
     mesh2, e2u, e1v, nl = _box(nl)
-    w = _w(u, v, e2u, e1v, nl)
+    w = _w(mesh2, u, v, e2u, e1v)
     vel2 = _vel(mesh2, u, v, w)
     st = make_state([lon0, lon0], [lat0, lat0], [ZW[2] + 1.0, ZW[3] + 1.0])
     out = cgrid3d_step(st, vel2, mesh2, dt, 1.0, "euler", {})
@@ -94,7 +107,7 @@ def test_closed_overturning_cell_keeps_particles_inside():
     u = np.zeros((K, NY, NX))
     u[:] = ((phi[:-1] - phi[1:]) / (e2u[None, 3] * DZ) * 1.0e4)[:, None, :]   # u east face of T(j,i)
     v = np.zeros_like(u)
-    w = _w(u, v, e2u, e1v, nl)
+    w = _w(mesh, u, v, e2u, e1v)
     assert np.abs(w[0]).max() < 1e-12 * np.abs(w).max() + 1e-15        # closed at the lid
     vel = _vel(mesh, u, v, w)
     rng = np.random.default_rng(3)
@@ -131,17 +144,14 @@ def test_partial_bottom_cell_balance_floor_and_particle():
     nl = np.full((NY, NX), K); nl[2:4, 3:6] = 3
     e3b = np.full((NY, NX), DZ); e3b[2:4, 3:6] = 4.0; e3b[3, 6] = 7.0   # partial bottoms
     e3b[:, 6:8] = np.where(nl[:, 6:8] == K, 3.0, e3b[:, 6:8])
-    (flon, flat), _ = _grid(NY, NX)
-    e2u, e1v = _widths(flon, flat)
-    nl = np.where(np.arange(NY)[:, None] * np.arange(NX)[None] > 0, nl, 0)
-    nl[-1, :] = 0; nl[:, -1] = 0
-    mesh = build_cgrid_mesh(flon, flat, nl > 0, e2u=e2u, e1v=e1v, nlev2d=nl, zw=ZW,
-                            e3b=e3b, area=e2u * e1v)
+    mesh, e2u, e1v, nl = _box(nl, e3b)
     assert mesh._cgrid_e3b[2 * NX + 3] == 4.0
     rng = np.random.default_rng(1)
     u = rng.normal(size=(K, NY, NX)); v = rng.normal(size=(K, NY, NX))
-    e3u, e3v = cgrid_face_thickness(ZW, nl, e3b)
-    w = _w(u, v, e2u, e1v, nl, e3b)
+    _, e3u, e3v = _zps(nl, e3b)
+    kk = np.arange(K)[:, None, None]                       # land faces carry no flow
+    u[:, :, :-1] *= kk < np.minimum(nl[:, :-1], nl[:, 1:]); v[:, :-1] *= kk < np.minimum(nl[:-1], nl[1:])
+    w = _w(mesh, u, v, e2u, e1v)
     j, i = np.mgrid[1:NY - 1, 1:NX - 1]
     for k in range(K):
         div = ((u[k, j, i] * e2u[j, i] * e3u[k, j, i] - u[k, j, i - 1] * e2u[j, i - 1] * e3u[k, j, i - 1]
@@ -149,8 +159,10 @@ def test_partial_bottom_cell_balance_floor_and_particle():
                + (w[k + 1, j, i] - w[k, j, i]) * e2u[j, i] * e1v[j, i])
         wet = k < nl[j, i]
         assert np.abs(div[wet]).max() < 1e-9 * np.abs(u).max() * e2u.max() * DZ
-    # a face between a partial and a full cell has the smaller thickness
+    # a face between a partial and a full cell has the smaller thickness; the
+    # mesh holds it as one (level, thickness) pair per face
     assert e3u[2, 2, 2] == 4.0 and e3u[2, 2, 5] == 4.0 and e3u[1, 2, 2] == DZ
+    assert mesh._cgrid_kbu[2 * NX + 2] == 2 and mesh._cgrid_e3u[2 * NX + 2] == 4.0
     # floor at the true depth: a particle in the partial bottom cell of (3, 3) stays above it
     j0, i0 = 3, 4                                         # T(3, 4), nlev 3, e3b 4
     floor = ZW[nl[j0, i0] - 1] + e3b[j0, i0]
@@ -162,6 +174,24 @@ def test_partial_bottom_cell_balance_floor_and_particle():
         st = cgrid3d_step(st, vel, mesh, 60.0, 1.0, "rk4", {})
         z.append(st.z[0])
     assert st.status[0] == ParticleStatus.ALIVE and max(z) <= floor
+
+
+def test_crossing_into_a_thinner_cell_stays_in_the_fluid():
+    """Deep cell (bottom thickness 10) -> thin neighbour (4): the fractional level
+    is kept across the face, so the particle lands inside the neighbour, above
+    its floor, and keeps moving (a metres face-map put it below the floor, at rest)."""
+    e3b = np.full((NY, NX), DZ); e3b[:, 5:] = 4.0
+    mesh, e2u, e1v, nl = _box(None, e3b)
+    u = np.zeros((K, NY, NX)); u[K - 1, 1:-1, 1:-2] = 5e-2   # eastward in the bottom layer
+    v = np.zeros_like(u)
+    vel = _vel(mesh, u, v, _w(mesh, u, v, e2u, e1v))
+    z0 = ZW[K - 1] + np.array([7.0, 9.5])       # both below the thin neighbour's floor (in metres)
+    st = make_state([2.5 * D] * 2, [2.5 * D] * 2, list(z0))
+    for _ in range(1500):
+        st = cgrid3d_step(st, vel, mesh, 600.0, 1.0, "rk4", {})
+    floor = ZW[K - 1] + 4.0
+    assert (st.lon > 4.5 * D).all() and (st.z < floor).all()    # across the face, inside the fluid
+    assert (np.abs(st.u) > 0).all()                              # and still moving
 
 
 def test_zstar_thicknesses_warn_and_use_the_reference():
@@ -177,9 +207,9 @@ def test_zstar_thicknesses_warn_and_use_the_reference():
     ds = xr.Dataset({"u": (dims, u), "v": (dims, v),
                      "e3t_file": (dims, np.stack([ref, 1.05 * ref]))})
     with pytest.warns(RuntimeWarning, match=r"5\.0%.*z\*/vvl"):
-        vel = NemoReader._read_cgrid_3d(ds, 0, mesh, np.float64, None)
-    np.testing.assert_allclose(vel.w.reshape(K + 1, NY, NX), _w(u[0], v[0], e2u, e1v, nl))
+        NemoReader.prepare(mesh, ds)
+    vel = NemoReader._read_cgrid_3d(ds, 0, mesh, np.float64, None)
+    np.testing.assert_allclose(vel.w.reshape(K + 1, NY, NX), _w(mesh, u[0], v[0], e2u, e1v))
     with warnings.catch_warnings():
         warnings.simplefilter("error")                    # reference thicknesses: silent
-        NemoReader._read_cgrid_3d(ds.assign(e3t_file=(dims, np.stack([ref, ref]))), 0,
-                                  _box()[0], np.float64, None)
+        NemoReader.prepare(mesh, ds.assign(e3t_file=(dims, np.stack([ref, ref]))))

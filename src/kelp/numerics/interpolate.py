@@ -3359,11 +3359,11 @@ def interp_edge_leastsq(
 # zero-normal-flow through land faces.
 # ---------------------------------------------------------------------------
 @njit(cache=True)
-def _cgrid_e3t(zw, nlev_f, e3b_f, c, k):
-    """Thickness of raster cell ``c`` at level ``k``: the reference layer,
-    or ``e3b_f`` in the column's bottom wet cell."""
-    if k == nlev_f[c] - 1:
-        return e3b_f[c]
+def _cgrid_e3face(zw, kb_f, e3_f, f, k):
+    """Thickness of face ``f`` at level ``k``: the reference layer, or the
+    face's one partial level ``kb_f[f]`` (zps) with thickness ``e3_f[f]``."""
+    if k == kb_f[f]:
+        return e3_f[f]
     return zw[k + 1] - zw[k]
 
 
@@ -3371,21 +3371,25 @@ def _cgrid_e3t(zw, nlev_f, e3b_f, c, k):
 def _interp_cgrid_core(xp, yp, zp, nn_node, elem_hint, time_dir,
                        node_to_elems, node_to_elems_count, elem_nodes,
                        nodes_lon, nodes_lat, cgrid_corners, cgrid_ji, cgrid_nlev, nx,
-                       e2u_f, e1v_f, area_f, zw, nlev_f, e3b_f, u_f, v_f, w_f):
+                       e2u_f, e1v_f, area_f, zw, e3b_f, kbu_f, e3u_f, kbv_f, e3v_f,
+                       u_f, v_f, w_f):
     """C-grid u/v(/w) at one point; ``u_f``/``v_f`` are ``(ny*nx,)`` face
     rasters, or ``(K*ny*nx,)`` layer-wise with ``zw`` (K+1 interfaces) given.
 
-    3-D (``zw`` non-empty): u/v are the 2-D formula on the faces of the layer
-    holding ``zp`` (constant within the layer); ``w_f`` ``((K+1)*ny*nx,)`` is
-    linear in the layer's local coordinate and scaled by ``area/|detJ|`` so
-    the discrete field stays non-divergent (exact up to float32 rounding of
-    the stored rasters).  Partial bottom cells (zps): a column's bottom wet
-    cell has thickness ``e3b_f`` instead of the reference layer, a face's
-    thickness is the smaller of its two cells' (``nlev_f`` raster levels), and
-    the face fluxes are weighted by ``e3face/e3cell`` so the in-cell
-    divergence still balances ``dW/dz``; the layer coordinate of the bottom
-    cell runs to the true floor.  Every level at or below a column's floor is
-    land: zero velocity, as dry columns are in 2-D.
+    3-D (``zw`` non-empty): ``zp`` is the FRACTIONAL LEVEL ``s = k + zeta``
+    (level ``k = floor(s)``, ``zeta`` the fraction within the containing
+    cell's own thickness; see ``numerics.cgrid3d``).  u/v are the 2-D formula
+    on the faces of level ``k`` (constant within the level); ``w_f``
+    ``((K+1)*ny*nx,)`` is linear in ``zeta``, and the third return value is
+    ``ds/dt = ((1-zeta) w_k + zeta w_k+1) * area / (|detJ| e3cell)`` in levels
+    per second: inside the cell ``dxi/dt = Uflux/Vol`` and ``dzeta/dt =
+    Wflux/Vol`` with ``Vol = |detJ| e3cell``, so the field is non-divergent
+    (up to float32 rounding of the stored rasters).  Partial bottom cells
+    (zps): the column's bottom wet cell has thickness ``e3b_f``; a face's
+    thickness at level ``k`` is the reference layer except at its one partial
+    level (``kb*_f`` / ``e3*_f``, the model's ``e3u_0`` / ``e3v_0``), and the
+    face fluxes are weighted by ``e3face/e3cell``.  ``s >= nlev`` (the floor)
+    and the levels below are land: zero velocity, as dry columns are in 2-D.
 
     ``e2u_f``/``e1v_f`` are the model face widths (same raster; empty = absent):
     the fluxes are then ``u*e2u`` (W/E faces) and ``v*e1v`` (S/N faces), so the
@@ -3393,8 +3397,8 @@ def _interp_cgrid_core(xp, yp, zp, nn_node, elem_hint, time_dir,
     local plane).  Without them the fluxes use plane edge lengths, each edge at
     the cosine of ITS OWN mean latitude.
 
-    Returns ``(U, V, ok)`` in geographic m/s (east, north), consistent with
-    the integrators' ``METERS_PER_DEG_LAT`` metric.
+    Returns ``(U, V, W, ok)`` in geographic m/s (east, north), consistent with
+    the integrators' ``METERS_PER_DEG_LAT`` metric (``W``: see above).
     """
     if elem_hint >= 0:
         e = int(elem_hint)
@@ -3412,26 +3416,20 @@ def _interp_cgrid_core(xp, yp, zp, nn_node, elem_hint, time_dir,
     kz = 0
     nynx = 0
     fW = 1.0; fE = 1.0; fS = 1.0; fN = 1.0
-    zbot = 0.0
+    e3c = 1.0
     if zw.shape[0] > 0:
         nynx = area_f.shape[0]
-        kz = max(np.searchsorted(zw, zp, side="right") - 1, 0)
-        c = j * nx + i
-        if kz >= cgrid_nlev[e]:
+        if zp >= cgrid_nlev[e]:
             return 0.0, 0.0, 0.0, True
-        zbot = zw[kz + 1]
+        kz = min(max(int(np.floor(zp)), 0), zw.shape[0] - 2)
+        c = j * nx + i
         e3c = zw[kz + 1] - zw[kz]
-        if kz == nlev_f[c] - 1:
+        if kz == cgrid_nlev[e] - 1:
             e3c = e3b_f[c]
-            zbot = zw[kz] + e3c
-            if zp >= zbot:
-                return 0.0, 0.0, 0.0, True
-        fW = min(e3c, _cgrid_e3t(zw, nlev_f, e3b_f, c - 1, kz)) / e3c
-        if i + 1 < nx:
-            fE = min(e3c, _cgrid_e3t(zw, nlev_f, e3b_f, c + 1, kz)) / e3c
-        fS = min(e3c, _cgrid_e3t(zw, nlev_f, e3b_f, c - nx, kz)) / e3c
-        if c + nx < nynx:
-            fN = min(e3c, _cgrid_e3t(zw, nlev_f, e3b_f, c + nx, kz)) / e3c
+        fW = _cgrid_e3face(zw, kbu_f, e3u_f, c - 1, kz) / e3c
+        fE = _cgrid_e3face(zw, kbu_f, e3u_f, c, kz) / e3c
+        fS = _cgrid_e3face(zw, kbv_f, e3v_f, c - nx, kz) / e3c
+        fN = _cgrid_e3face(zw, kbv_f, e3v_f, c, kz) / e3c
     ko = kz * nynx
     uW = u_f[ko + j * nx + i - 1]
     uE = u_f[ko + j * nx + i]
@@ -3504,9 +3502,9 @@ def _interp_cgrid_core(xp, yp, zp, nn_node, elem_hint, time_dir,
     V = dydxi * dxi + dydeta * deta
     W = 0.0
     if w_f.shape[0] > 0:
-        zeta = min(max((zp - zw[kz]) / (zbot - zw[kz]), 0.0), 1.0)
+        zeta = min(max(zp - kz, 0.0), 1.0)
         W = ((1.0 - zeta) * w_f[ko + j * nx + i]
-             + zeta * w_f[ko + nynx + j * nx + i]) * area_f[j * nx + i] / adet
+             + zeta * w_f[ko + nynx + j * nx + i]) * area_f[j * nx + i] / (adet * e3c)
     return time_dir * U, time_dir * V, time_dir * W, True
 
 
@@ -3514,7 +3512,8 @@ def _interp_cgrid_core(xp, yp, zp, nn_node, elem_hint, time_dir,
 def _loop_interp_cgrid(P, alive_mask, lons, lats, zs, nn_nodes, elems, time_dir,
                        node_to_elems, node_to_elems_count, elem_nodes,
                        nodes_lon, nodes_lat, cgrid_corners, cgrid_ji, cgrid_nlev, nx,
-                       e2u_f, e1v_f, area_f, zw, nlev_f, e3b_f, u_f, v_f, w_f, U, V, W, ok):
+                       e2u_f, e1v_f, area_f, zw, e3b_f, kbu_f, e3u_f, kbv_f, e3v_f,
+                       u_f, v_f, w_f, U, V, W, ok):
     for i in prange(P):
         if not alive_mask[i]:
             continue
@@ -3522,7 +3521,7 @@ def _loop_interp_cgrid(P, alive_mask, lons, lats, zs, nn_nodes, elems, time_dir,
             lons[i], lats[i], zs[i], int(nn_nodes[i]), int(elems[i]), time_dir,
             node_to_elems, node_to_elems_count, elem_nodes, nodes_lon,
             nodes_lat, cgrid_corners, cgrid_ji, cgrid_nlev, nx, e2u_f, e1v_f,
-            area_f, zw, nlev_f, e3b_f, u_f, v_f, w_f)
+            area_f, zw, e3b_f, kbu_f, e3u_f, kbv_f, e3v_f, u_f, v_f, w_f)
         U[i] = u
         V[i] = v
         W[i] = w
@@ -3542,7 +3541,8 @@ def _cgrid_args(mesh, vel):
             mesh._cgrid_elem_ji, mesh._cgrid_nlev,
             int(mesh._structured_shape[1]),
             mesh._cgrid_e2u, mesh._cgrid_e1v, mesh._cgrid_area, mesh._cgrid_zw,
-            mesh._cgrid_nlev_full, mesh._cgrid_e3b)
+            mesh._cgrid_e3b, mesh._cgrid_kbu, mesh._cgrid_e3u,
+            mesh._cgrid_kbv, mesh._cgrid_e3v)
 
 
 _NOW = np.empty(0)
@@ -3560,8 +3560,8 @@ def interp_cgrid_single(xp, yp, layer, mesh, vel, node_idx,
 def interp_cgrid3d(lon, lat, z, mask, mesh, vel, nn_nodes, time_dir=1.0, *,
                    elems=None):
     """Exact C-grid u/v(/w) for the ``mask`` particles at ``(lon, lat, z)``
-    (``z`` ignored on a 2-D mesh).  Returns ``(U, V, W, ok)``; ``W`` is
-    zero in 2-D; ``ok`` is False for a point outside every element (or below
+    (``z`` ignored on a 2-D mesh, the fractional level on a 3-D one).
+    Returns ``(U, V, W, ok)``; ``W`` is zero in 2-D and ``ds/dt`` (levels/s) in 3-D; ``ok`` is False for a point outside every element (or below
     the lateral ring)."""
     a = _cgrid_args(mesh, vel)
     P = lon.shape[0]

@@ -37,7 +37,7 @@ import xarray as xr
 from ..core.io import VelocityField
 from ..core.mesh import Mesh
 from . import register, _detect_engine
-from .structured import (cgrid_w_from_continuity, cgrid_face_thickness, cgrid_cell_thickness, SAME_POINT_CHORD, _unit_xyz, build_cgrid_mesh,
+from .structured import (cgrid_w_from_continuity, cgrid_thickness, SAME_POINT_CHORD, _unit_xyz, build_cgrid_mesh,
                          build_structured_mesh, c_grid_to_t, field_to_nodes)
 
 
@@ -268,6 +268,36 @@ def _refuse_unsupported_mode(mode_cfg, where):
             f"mode.sigma_layer = {layer!r} is not supported (use 0 or null).")
 
 
+def _check_zps_rule(zw, nlev, e3b, e3u0, e3v0):
+    """Load-time consistency check: the model's face thickness at a face's
+    bottom level must be the NEMO partial-step rule, the smaller of its two
+    cells' thickness there (``e3u(j,i) = min(e3t(j,i), e3t(j,i+1))``; ``v``
+    likewise towards ``j+1``).  Interior faces of wet cells only (the crop's
+    last column / row has no neighbour cell here; the mesh keeps the file's
+    value there).  The kernel uses the file's e3u_0 / e3v_0, not this rule."""
+    ref = np.diff(zw)
+
+    bad = 0.0
+    for e3f, sl_a, sl_b in ((e3u0, np.s_[:, :-1], np.s_[:, 1:]),
+                            (e3v0, np.s_[:-1, :], np.s_[1:, :])):
+        na, nb = nlev[sl_a], nlev[sl_b]
+        kb = np.minimum(na, nb) - 1
+        wet = kb >= 0
+        k = np.maximum(kb, 0)
+        rule = np.minimum(np.where(na - 1 == k, e3b[sl_a], ref[k]),
+                          np.where(nb - 1 == k, e3b[sl_b], ref[k]))
+        got = np.take_along_axis(e3f[(slice(None),) + sl_a], k[None], 0)[0]
+        bad = max(bad, float(np.max(np.abs(got - rule)[wet] / rule[wet], initial=0.0)))
+        above = np.arange(len(ref))[:, None, None] < kb[None]      # wet levels above the bottom
+        bad = max(bad, float(np.max(np.abs(e3f[(slice(None),) + sl_a] / ref[:, None, None] - 1)
+                                    * above, initial=0.0)))
+    if bad > 1e-4:
+        raise ValueError(
+            "mesh.nemo_grid: cgrid 3-D: e3u_0/e3v_0 differ from the partial-step "
+            f"rule min(e3t_0 of the two cells) by {bad:.2e} (relative); only "
+            "z-levels with partial steps (zps) are supported")
+
+
 @register("nemo")
 class NemoReader:
     """Reader for NEMO curvilinear C-grid output (2-D v1)."""
@@ -371,36 +401,20 @@ class NemoReader:
                 raise ValueError("mesh.nemo_grid: cgrid 3-D: tmask is not a "
                                  "contiguous wet column from the surface "
                                  "(ice-shelf cavities are not supported)")
-            e3b = None
+            e3b = e3u0 = e3v0 = None
             if all(v in ds.variables for v in ("e3t_0", "e3u_0", "e3v_0")):
                 e3t0, e3u0, e3v0 = (np.squeeze(ds[v].values).astype(np.float64)
                                     for v in ("e3t_0", "e3u_0", "e3v_0"))
                 jj, ii = np.nonzero(nlev > 0)
                 e3b = np.zeros(nlev.shape)
                 e3b[jj, ii] = e3t0[nlev[jj, ii] - 1, jj, ii]
-                # e3u_0/e3v_0 must follow the partial-step rule (min of the two
-                # cells) wherever both cells are wet; else this is not zps
-                kk = np.arange(tm3.shape[0])[:, None, None]
-                ru, rv = cgrid_face_thickness(zw, nlev, e3b)
-                wu = (kk < nlev[:, :-1]) & (kk < nlev[:, 1:])
-                wv = (kk < nlev[:-1]) & (kk < nlev[1:])
-                du = np.abs(ru[:, :, :-1] - e3u0[:, :, :-1])[wu] / e3u0[:, :, :-1][wu]
-                dv = np.abs(rv[:, :-1] - e3v0[:, :-1])[wv] / e3v0[:, :-1][wv]
-                bad = max(du.max(initial=0.0), dv.max(initial=0.0))
-                if bad > 1e-4:
-                    raise ValueError(
-                        "mesh.nemo_grid: cgrid 3-D: e3u_0/e3v_0 differ from the "
-                        f"partial-step rule min(e3t_0 of the two cells) by {bad:.2e} "
-                        "(relative); only z-levels with partial steps (zps) are "
-                        "supported")
-            vert = dict(nlev2d=nlev, zw=zw, e3b=e3b, area=_squeeze_to_2d(ds["e1t"].values)
+                _check_zps_rule(zw, nlev, e3b, e3u0, e3v0)
+            vert = dict(nlev2d=nlev, zw=zw, e3b=e3b, e3u0=e3u0, e3v0=e3v0,
+                        area=_squeeze_to_2d(ds["e1t"].values)
                         * _squeeze_to_2d(ds["e2t"].values))
-            depth2d = np.where(nlev > 0, zw[np.maximum(nlev - 1, 0)]
-                               + (np.diff(zw)[np.maximum(nlev - 1, 0)] if e3b is None
-                                  else e3b), 0.0)
             print(f"  NEMO cgrid 3-D: {tm3.shape[0]} levels, "
-                  + ("partial bottom cells (e3t_0)" if e3b is not None else
-                     "full reference cells (no e3t_0 in the mesh file)"))
+                  + ("partial bottom cells (e3t_0, e3u_0, e3v_0)" if e3b is not None else
+                     "full reference cells (no e3t_0 / e3u_0 / e3v_0 in the mesh file)"))
         for dn in (() if vert else ("hdept", "hdepw", "bathy_meter", "bathy_metry",
                                     "bathymetry", "Bathymetry")):
             if dn in ds.variables:
@@ -613,6 +627,32 @@ class NemoReader:
             eta=eta, w=None, uv_layout="node", scalars=scalars)
 
     @staticmethod
+    def prepare(mesh, ds) -> None:
+        """z*/vvl check (3-D cgrid only; changes nothing): when ``grid_T`` carries
+        ``e3t`` (merged as ``e3t_file``), warn if records 0 / last deviate from
+        the reference thickness.  Fixed reference thicknesses (``e3*_0``) are
+        used either way, so z* transports are off by about eta/H."""
+        if not (getattr(mesh, "_cgrid", False) and mesh._cgrid_zw.size
+                and "e3t_file" in ds.variables):
+            return
+        ny, nx = mesh._structured_shape
+        nlev = mesh._cgrid_nlev_raster
+        ref = cgrid_thickness(mesh._cgrid_zw, np.where(nlev > 0, nlev - 1, -1),
+                              mesh._cgrid_e3b.reshape(ny, nx))
+        wet = np.arange(ref.shape[0])[:, None, None] < nlev
+        dev = max(float(np.nanmax(np.abs(np.asarray(ds["e3t_file"].isel(time=r).values,
+                                                    dtype=np.float64) - ref)[wet] / ref[wet]))
+                  for r in (0, ds.sizes["time"] - 1))
+        if dev > 1e-4:
+            import warnings
+            warnings.warn(
+                f"NEMO cgrid 3-D: the file's e3t differs from the reference "
+                f"e3t_0 by up to {dev:.1%} (records 0 and last): z*/vvl "
+                "detected. Fixed reference thicknesses (e3*_0) are used, so "
+                "the transports are off by about eta/H (z* is not supported "
+                "yet).", RuntimeWarning, stacklevel=2)
+
+    @staticmethod
     def _read_cgrid_3d(ds, timestep, mesh, vd, scalars):
         """3-D faces of one record on the partial-step cells, plus the W
         that makes them non-divergent up to float32 rounding (``cgrid_w_from_continuity``)."""
@@ -630,27 +670,12 @@ class NemoReader:
                                  f"{(zw.size - 1, ny, nx)}")
             uv.append(a.astype(vd).astype(np.float64))   # w consistent with stored u/v
         e2u, e1v = (m.reshape(ny, nx) for m in (mesh._cgrid_e2u, mesh._cgrid_e1v))
-        nlev = mesh._cgrid_nlev_full.reshape(ny, nx)
-        e3b = mesh._cgrid_e3b.reshape(ny, nx)
-        e3u, e3v = cgrid_face_thickness(zw, nlev, e3b)
+        e3u, e3v = (cgrid_thickness(zw, getattr(mesh, f"_cgrid_kb{n}").reshape(ny, nx),
+                                    getattr(mesh, f"_cgrid_e3{n}").reshape(ny, nx))
+                    for n in ("u", "v"))
         w = cgrid_w_from_continuity(uv[0], uv[1], e2u, e1v, e3u, e3v,
                                     mesh._cgrid_area.reshape(ny, nx),
                                     mesh._cgrid_nlev_raster)
-        if "e3t_file" in ds.variables and not getattr(mesh, "_cgrid_zstar_checked", False):
-            mesh._cgrid_zstar_checked = True
-            ref = cgrid_cell_thickness(zw, nlev, e3b)
-            wet = np.arange(ref.shape[0])[:, None, None] < nlev
-            dev = max(float(np.nanmax(np.abs(np.asarray(ds["e3t_file"].isel(time=r).values,
-                                               dtype=np.float64) - ref)[wet] / ref[wet]))
-                      for r in (0, ds.sizes["time"] - 1))
-            if dev > 1e-4:
-                import warnings
-                warnings.warn(
-                    f"NEMO cgrid 3-D: the file's e3t differs from the reference "
-                    f"e3t_0 by up to {dev:.1%} (records 0 and last): z*/vvl "
-                    "detected. Fixed reference thicknesses (e3*_0) are used, so "
-                    "the transports are off by about eta/H (z* is not supported "
-                    "yet).", RuntimeWarning, stacklevel=2)
         if not getattr(mesh, "_cgrid_w_logged", False):
             mesh._cgrid_w_logged = True
             wet = w[:-1] != 0

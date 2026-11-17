@@ -165,7 +165,8 @@ def _orca_canonical_f(ny, nx, orca):
 
 def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
                      orca: Optional[str] = None, ring: bool = True,
-                     nlev2d=None, zw=None, area=None, e3b=None, name: str = "nemo",
+                     nlev2d=None, zw=None, area=None, e3b=None, e3u0=None, e3v0=None,
+                     name: str = "nemo",
                      r_earth: Optional[float] = None) -> Mesh:
     """Build the exact-C-grid quad :class:`Mesh`: nodes = F-points, elements =
     wet T-cells (the cell a ``numerics.uv_interp: cgrid`` particle lives in).
@@ -212,12 +213,17 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         that are non-convex or sit at a fold pivot are dropped (counted in
         ``_cgrid_ring_dropped``).
 
-    nlev2d, zw, area, e3b : array_like or None
+    nlev2d, zw, area, e3b, e3u0, e3v0 : array_like or None
         3-D (z-level, partial bottom cells): ``nlev2d (ny, nx)`` wet levels per
         column, ``zw (K+1,)`` the reference layer interfaces (positive down),
         ``area (ny, nx)`` the T-cell area ``e1t*e2t`` and ``e3b (ny, nx)`` the
         thickness of each column's bottom wet cell (default: the reference
-        layer = full cells); the floor is ``zw[nlev-1] + e3b``.  ``mesh.sigma`` becomes ``zw`` and
+        layer = full cells); the floor is ``zw[nlev-1] + e3b`` (also the node
+        depth when ``depth2d`` is None).  ``e3u0`` / ``e3v0 (K, ny, nx)`` are
+        the model's face thicknesses (default: the reference layer); only a
+        face's bottom level differs from it (zps), so the mesh keeps one level
+        index and one thickness per face (``_cgrid_kbu/_e3u``, ``_kbv/_e3v``,
+        ``-1`` = no partial level).  ``mesh.sigma`` becomes ``zw`` and
         ``_cgrid_nlev`` the wet levels (ring cells 0; every level at or below a
         column's floor is zero-velocity land).
 
@@ -342,6 +348,13 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
 
     nodes_lon = np.ascontiguousarray(flat_lon[referenced])
     nodes_lat = np.ascontiguousarray(flat_lat[referenced])
+    if zw is not None:
+        nf = np.asarray(nlev2d, np.int32)
+        eb = (np.diff(np.asarray(zw, np.float64))[np.maximum(nf - 1, 0)] if e3b is None
+              else np.asarray(e3b, np.float64))
+        eb = np.where(nf > 0, eb, 0.0)
+        if depth2d is None:
+            depth2d = np.where(nf > 0, np.asarray(zw, np.float64)[np.maximum(nf - 1, 0)] + eb, 0.0)
     depth = np.zeros(n_nodes, dtype=np.float64)
     if depth2d is not None:
         d = np.abs(np.asarray(depth2d, dtype=np.float64))
@@ -388,15 +401,18 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
     mesh._cgrid_zw = np.empty(0) if zw is None else np.asarray(zw, np.float64)
     mesh._cgrid_area = (np.empty(0) if area is None
                         else np.ascontiguousarray(area, np.float64).reshape(-1))
-    mesh._cgrid_nlev_full = np.empty(0, np.int32)
     mesh._cgrid_e3b = np.empty(0)
+    for nm in ("u", "v"):
+        setattr(mesh, f"_cgrid_kb{nm}", np.empty(0, np.int32))
+        setattr(mesh, f"_cgrid_e3{nm}", np.empty(0))
     if zw is not None:
         mesh.sigma = mesh._cgrid_zw
-        nf = np.asarray(nlev2d, np.int32)
-        mesh._cgrid_nlev_full = np.ascontiguousarray(nf).reshape(-1)
-        eb = (np.diff(mesh._cgrid_zw)[np.maximum(nf - 1, 0)] if e3b is None
-              else np.asarray(e3b, np.float64))
-        mesh._cgrid_e3b = np.ascontiguousarray(np.where(nf > 0, eb, 0.0)).reshape(-1)
+        mesh._cgrid_nlev_raster = nf          # every raster cell (halo copies too)
+        mesh._cgrid_e3b = np.ascontiguousarray(eb).reshape(-1)
+        for nm, e3 in (("u", e3u0), ("v", e3v0)):
+            kb, th = _partial_level(mesh._cgrid_zw, e3, (ny, nx))
+            setattr(mesh, f"_cgrid_kb{nm}", kb)
+            setattr(mesh, f"_cgrid_e3{nm}", th)
     mesh._cgrid_ring_dropped = dict(ring_dropped)
     if (e2u is None) != (e1v is None):
         raise ValueError("pass both e2u and e1v, or neither")
@@ -424,32 +440,38 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
     return mesh
 
 
-def cgrid_cell_thickness(zw, nlev, e3b):
-    """Reference T-cell thickness ``(K, ny, nx)``: the layer thickness except
-    in each column's bottom wet cell (``e3b``)."""
+def _partial_level(zw, e3, shape):
+    """Compact form of a zps thickness field ``e3 (K, ny, nx)``: per column the
+    first level whose thickness differs from the reference layer and that
+    thickness -> flat ``(kb int32, th)``; ``kb = -1`` where none does (also
+    for ``e3 is None``: pure reference layers).  Only a face's bottom wet level
+    can differ (zps; the reader checks it); levels below it are land."""
+    n = shape[0] * shape[1]
+    if e3 is None:
+        return np.full(n, -1, np.int32), np.zeros(n)
+    e3 = np.asarray(e3, np.float64)
+    ref = np.diff(zw)[:, None, None]
+    diff = np.abs(e3 - ref) > 1e-4 * ref
+    kb = np.where(diff.any(0), diff.argmax(0), -1)
+    th = np.take_along_axis(e3, np.maximum(kb, 0)[None], 0)[0]
+    return kb.astype(np.int32).reshape(-1), np.where(kb >= 0, th, 0.0).reshape(-1)
+
+
+def cgrid_thickness(zw, kb, e3):
+    """Thickness field ``(K, ny, nx)``: the reference layers, level ``kb[j, i]``
+    replaced by ``e3[j, i]`` where ``kb >= 0`` (cells: ``kb = nlev - 1`` and the
+    bottom thickness; faces: the mesh's ``_cgrid_kbu/_e3u`` or ``_kbv/_e3v``)."""
     K = len(zw) - 1
-    e3t = np.broadcast_to(np.diff(zw)[:, None, None], (K,) + nlev.shape).copy()
-    jj, ii = np.nonzero(nlev > 0)
-    e3t[nlev[jj, ii] - 1, jj, ii] = e3b[jj, ii]
-    return e3t
-
-
-def cgrid_face_thickness(zw, nlev, e3b):
-    """Face layer thicknesses ``(e3u, e3v)`` ``(K, ny, nx)`` of the partial-step
-    (zps) grid: a face takes the smaller of its two cells' thickness
-    (``e3u(j,i) = min(e3t(j,i), e3t(j,i+1))``, ``e3v`` likewise towards
-    ``j+1``; the last column / row is the cell's own)."""
-    e3t = cgrid_cell_thickness(zw, nlev, e3b)
-    e3u, e3v = e3t.copy(), e3t.copy()
-    e3u[:, :, :-1] = np.minimum(e3t[:, :, :-1], e3t[:, :, 1:])
-    e3v[:, :-1, :] = np.minimum(e3t[:, :-1, :], e3t[:, 1:, :])
-    return e3u, e3v
+    out = np.broadcast_to(np.diff(zw)[:, None, None], (K,) + kb.shape).copy()
+    jj, ii = np.nonzero(kb >= 0)
+    out[kb[jj, ii], jj, ii] = e3[jj, ii]
+    return out
 
 
 def cgrid_w_from_continuity(u, v, e2u, e1v, e3u, e3v, area, nlev):
     """Vertical velocity (positive down) from the continuity of the face
     fluxes ``u*e2u*e3u`` and ``v*e1v*e3v`` (``e3u``/``e3v`` ``(K, ny, nx)``
-    from :func:`cgrid_face_thickness`),
+    from :func:`cgrid_thickness`),
     integrated upward from ``w = 0`` at the sea floor.
 
     ``u``, ``v`` ``(K, ny, nx)`` (land 0); ``nlev (ny, nx)`` wet levels.
@@ -532,4 +554,4 @@ def field_to_nodes(field2d, node_id) -> np.ndarray:
 
 
 __all__ = ["build_structured_mesh", "build_cgrid_mesh", "cgrid_w_from_continuity",
-           "cgrid_face_thickness", "cgrid_cell_thickness", "c_grid_to_t", "field_to_nodes"]
+           "cgrid_thickness", "c_grid_to_t", "field_to_nodes"]

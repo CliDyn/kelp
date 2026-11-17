@@ -18,6 +18,7 @@ def _read(mesh_file, grid_t, var_u, var_v):
     rd = get_reader("nemo")
     mesh = rd.load_mesh(MeshConfig(type="nemo", meshpath=str(mesh_file), nemo_grid="cgrid"))
     ds = rd.open_dataset(str(grid_t), mode_cfg=mode)
+    rd.prepare(mesh, ds)
     return mesh, ds, rd.read_velocities(ds, 0, mesh, mode_cfg=mode)
 
 
@@ -29,9 +30,9 @@ def test_orca05_partial_cell_w_equals_model_w():
     wf = -np.nan_to_num(ds["w_file"].isel(time=0).values.astype(float))   # positive down
     K = wf.shape[0]
     w = vel.w.reshape(K + 1, ny, nx)[:-1].astype(float)
-    wet = (np.arange(K)[:, None, None] < mesh._cgrid_nlev_raster)[:, :-1, :-1]
-    # the crop's last row / column lack the neighbour face beyond the crop
-    err = np.abs(w - wf)[:, :-1, :-1][wet].max()
+    wet = np.arange(K)[:, None, None] < mesh._cgrid_nlev_raster
+    wet[:, 0] = wet[:, :, 0] = False     # no cells of the mesh: their west / south face is outside the crop
+    err = np.abs(w - wf)[wet].max()
     assert np.abs(wf).max() > 1e-5 and err < 5e-6 * np.abs(wf).max()
 
 
