@@ -12,7 +12,9 @@ E/N (regular lat/lon or pre-rotated output) — a grid whose axes deviate > 2deg
 from E/N is rejected (``NotImplementedError``).  Vector rotation (the gate for
 true curvilinear + global ORCA grids), global ORCA (north-fold seam + east-west
 periodicity), and 3-D (deptht / e3t / partial cells / W on interfaces) are staged
-follow-ups.
+follow-ups for this T-point path.  The exact C-grid path (``mesh.nemo_grid:
+cgrid``) already handles curvilinear grids, global ORCA with halo columns and an
+F-point-pivot fold (``_detect_orca_layout``) and ``mesh.rotation``.
 
 File layout: NEMO splits output by C-grid point into ``*_grid_T.nc`` (temp/salt/
 ssh), ``*_grid_U.nc`` (u), ``*_grid_V.nc`` (v), ``*_grid_W.nc`` (w).  Point
@@ -35,8 +37,8 @@ import xarray as xr
 from ..core.io import VelocityField
 from ..core.mesh import Mesh
 from . import register, _detect_engine
-from .structured import (build_cgrid_mesh, build_structured_mesh, c_grid_to_t,
-                         field_to_nodes)
+from .structured import (SAME_POINT_CHORD, _unit_xyz, build_cgrid_mesh,
+                         build_structured_mesh, c_grid_to_t, field_to_nodes)
 
 
 # Variable-name aliases (NEMO output naming varies by config / XIOS field defs).
@@ -73,30 +75,70 @@ def _open_nemo(path) -> xr.Dataset:
     return xr.decode_cf(raw)
 
 
-def _refuse_periodic(ds, shape) -> None:
-    """cgrid v1 treats the raster edges as walls: refuse global ORCA-type grids
-    (east-west halo columns, north-fold duplicate rows)."""
-    lon_n = _first(ds, _LON_ALIASES)
-    lat_n = _first(ds, _LAT_ALIASES)
-    if lon_n is None or lat_n is None:
-        return
-    lon = _squeeze_to_2d(ds[lon_n].values)
-    lat = _squeeze_to_2d(ds[lat_n].values)
+def _detect_orca_layout(lon, lat) -> Optional[str]:
+    """Classify the T-point raster for ``mesh.nemo_grid: cgrid``.
+
+    Returns ``None`` (closed regional raster: its edges are walls), ``"ew"``
+    (east-west halo columns: ``col 0 == col nx-2``, ``col nx-1 == col 1``) or
+    ``"fpivot"`` (halo columns + F-point-pivot north fold, ``T(ny-1, i) ==
+    T(ny-2, nx-1-i)``; ORCA05 / ORCA1).  Points are "the same" within
+    :data:`SAME_POINT_CHORD` on the unit sphere (the copies are exact in
+    model output).  Raises ``NotImplementedError`` for the global layouts it
+    does not handle rather than letting them become walls: a T-point-pivot
+    fold (ORCA2 / ORCA025 / ORCA12), a fold without halo columns, and
+    halo-free periodic output (NEMO >= 4.2 without the halo columns: the
+    longitudes span 360 deg and the gap from the last column to the first is
+    about one grid spacing).
+    """
+    lon = np.asarray(lon, dtype=np.float64)
+    lat = np.asarray(lat, dtype=np.float64)
     ny, nx = lon.shape
+    if ny < 4 or nx < 4:
+        return None
+    xyz = _unit_xyz(lon, lat)
 
     def same(a, b):
-        dl = (np.asarray(a) - np.asarray(b) + 180.0) % 360.0 - 180.0
-        return bool(np.all(np.abs(dl) < 1e-6))
-    ew = nx > 4 and (same(lon[:, 0], lon[:, nx - 2]) and same(lat[:, 0], lat[:, nx - 2])
-                     and same(lon[:, nx - 1], lon[:, 1]) and same(lat[:, nx - 1], lat[:, 1]))
-    nf = ny > 4 and any(np.allclose(np.sort(lat[-1]), np.sort(lat[-k]), atol=1e-6)
-                        for k in (2, 3))
-    if ew or nf:
+        return bool((np.linalg.norm(a - b, axis=-1) <= SAME_POINT_CHORD).all())
+
+    def gap(a, b):
+        return np.linalg.norm(a - b, axis=-1)
+
+    ew = same(xyz[:, 0], xyz[:, nx - 2]) and same(xyz[:, nx - 1], xyz[:, 1])
+    i = np.arange(1, nx - 1)
+    fpivot = same(xyz[ny - 1, i], xyz[ny - 2, nx - 1 - i])
+    i2 = np.arange(2, nx - 1)
+    tpivot = same(xyz[ny - 1, i2], xyz[ny - 3, nx - i2])
+    # a self-mirrored top row (halo-free fold: the pivot row is kept whole)
+    selfmirror = (same(xyz[ny - 1, i], xyz[ny - 1, nx - 1 - i])
+                  or same(xyz[ny - 1, i2], xyz[ny - 1, nx - i2]))
+    if not ew:
+        # periodic without halo: the wrap gap (last -> first column) is about
+        # one grid spacing on the rows below the fold region
+        rows = slice(0, max(1, ny - 3))
+        wrap = gap(xyz[rows, nx - 1], xyz[rows, 0])
+        step = np.median(gap(xyz[rows, 1:], xyz[rows, :-1]), axis=1)
+        ok = step > 0
+        periodic = ok.any() and np.median(wrap[ok] / step[ok]) < 1.5
+        if periodic or fpivot or tpivot or selfmirror:
+            what = ("east-west periodic without halo columns (the last column "
+                    "is one grid spacing from the first: NEMO >= 4.2 halo-free "
+                    "output?)" if periodic else
+                    "a north fold without east-west halo columns")
+            raise NotImplementedError(
+                f"mesh.nemo_grid: cgrid: the grid is {what}; supported global "
+                "layout: ORCA with east-west halo columns (col 0 == col nx-2, "
+                "col nx-1 == col 1) and an F-point-pivot north fold. Write the "
+                "output with the halo columns, or crop a closed regional "
+                "domain.")
+        return None
+    if fpivot:
+        return "fpivot"
+    if tpivot or selfmirror:
         raise NotImplementedError(
-            "mesh.nemo_grid: cgrid does not support global/periodic grids yet "
-            f"({'east-west halo columns' if ew else 'north-fold duplicate row'} "
-            "detected); global ORCA (east-west wrap + north fold) is the next "
-            "step. Use a regional, closed-boundary domain.")
+            "mesh.nemo_grid: cgrid: T-point-pivot north fold (ORCA2 / ORCA025 / "
+            "ORCA12 type) is not supported; the F-point-pivot fold (ORCA05 / "
+            "ORCA1) is.")
+    return "ew"
 
 
 def _first(ds, aliases: Sequence[str], cfg_name: Optional[str] = None):
@@ -236,12 +278,15 @@ class NemoReader:
 
     @staticmethod
     def load_mesh(mesh_cfg) -> Mesh:
-        if getattr(mesh_cfg, "rotation", None) is not None:
-            # NEMO has no vector-rotation path here (mirrors FESOM-C). Reject
-            # rather than silently dropping a pole-safe request.
+        if (getattr(mesh_cfg, "rotation", None) is not None
+                and getattr(mesh_cfg, "nemo_grid", "tpoint") != "cgrid"):
+            # The T-point path has no vector-rotation of its averaged u/v
+            # (mirrors FESOM-C); the cgrid path needs none (its u/v come from
+            # the cell geometry in the mesh frame).
             raise ValueError(
-                "mesh.rotation is not supported by the NEMO reader "
-                "(no vector-rotation path yet); use rotation: null.")
+                "mesh.rotation is not supported by the NEMO reader with "
+                "mesh.nemo_grid: tpoint (no vector-rotation path); use "
+                "rotation: null, or mesh.nemo_grid: cgrid.")
         path = str(mesh_cfg.meshpath)
         ds = _open_nemo(path)
         try:
@@ -297,7 +342,19 @@ class NemoReader:
                 f"mesh.nemo_grid: cgrid needs glamf/gphif (F-point coordinates) "
                 f"in the mesh file {path!r}; found: {list(ds.variables)[:12]}…"
             ) from None
-        _refuse_periodic(ds, glamf.shape)
+        tl = _first(ds, ("glamt", "nav_lon"))
+        tp = _first(ds, ("gphit", "nav_lat"))
+        if tl is None or tp is None:
+            raise KeyError(
+                f"mesh.nemo_grid: cgrid needs the T-point coordinates "
+                f"(glamt/gphit or nav_lon/nav_lat) in {path!r} to classify the "
+                "grid (regional / global ORCA)")
+        orca = _detect_orca_layout(_squeeze_to_2d(ds[tl].values),
+                                   _squeeze_to_2d(ds[tp].values))
+        if orca is not None:
+            print(f"  NEMO cgrid: global ORCA layout ({orca}): east-west halo "
+                  "columns" + (" + F-pivot north fold" if orca == "fpivot"
+                               else "") + " merged")
         tmask_n = _first(ds, ("tmask",))
         if tmask_n is None:
             raise KeyError(
@@ -317,9 +374,31 @@ class NemoReader:
         else:
             print("  NEMO cgrid: e2u/e1v not in the mesh file; fluxes use plane "
                   "edge lengths (cos at each edge's mean latitude)")
-        return build_cgrid_mesh(glamf, gphif, wet, depth2d=depth2d, name="nemo",
+        from .fesom2 import POLE_WARN_LAT, _resolve_rotation_angles
+        angles = _resolve_rotation_angles(mesh_cfg)
+        max_lat = float(np.nanmax(np.abs(gphif)))
+        if angles is None and max_lat > POLE_WARN_LAT:
+            import warnings
+            warnings.warn(
+                f"NEMO cgrid mesh reaches |lat| = {max_lat:.2f} deg - the "
+                "lon/lat cell geometry degenerates near the pole (containment "
+                "and the local plane fail there); set mesh.rotation: fesom2.",
+                RuntimeWarning, stacklevel=2)
+        if angles is not None:
+            # Rotate the F-points AS POINTS; the interpolator builds u/v from
+            # the cell geometry, so it returns them in the rotated frame with
+            # no vector rotation (the face values are grid-relative normals;
+            # the widths e2u/e1v are lengths, frame-free).
+            from ..core.rotation import euler_matrix, rotate_lonlat
+            glamf, gphif = rotate_lonlat(glamf, gphif, euler_matrix(*angles))
+            print(f"    rotated frame: alpha/beta/gamma = {tuple(angles)} "
+                  "(pole-safe)")
+        mesh = build_cgrid_mesh(glamf, gphif, wet, depth2d=depth2d, name="nemo",
+                                orca=orca,
                                 r_earth=getattr(mesh_cfg, "r_earth", None),
                                 **widths)
+        mesh.rotation_angles = angles
+        return mesh
 
     @staticmethod
     def open_dataset(path, v_path=None, w_path=None, mode_cfg=None) -> xr.Dataset:

@@ -484,8 +484,9 @@ class MeshConfig:
     # grid_hash_cell_size always wins.  The resolved cell is stamped in the
     # output metadata (grid_hash_cell, grid_hash_cell_rule).
     grid_hash_cell_rule: Optional[str] = "occupancy"
-    # Coordinate-frame rotation for pole-safe tracking (FESOM2 and HEALPix;
-    # the FESOM-C and NEMO readers refuse it).
+    # Coordinate-frame rotation for pole-safe tracking (FESOM2, HEALPix,
+    # FESOM 1.4 and NEMO with nemo_grid: cgrid; FESOM-C and NEMO tpoint
+    # refuse it).
     # None (default) -> no rotation, byte-identical behaviour.
     # "fesom2"       -> the standard FESOM Euler angles (50, 15, -90):
     #                   the computational pole sits on Greenland.

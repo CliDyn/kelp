@@ -943,8 +943,6 @@ def _refuse_cgrid_unsupported(config) -> None:
         bad.append("mode.sample_vars")
     if getattr(n.beaching, "enabled", False):
         bad.append("beaching")
-    if getattr(config.mesh, "rotation", None) is not None:
-        bad.append("mesh.rotation")
     if bad:
         raise NotImplementedError(
             "numerics.uv_interp 'cgrid' (exact C-grid, v1) does not support: "
@@ -2275,7 +2273,9 @@ def run_single_realization(
             next_idx_raw = file_idx + direction
             have_next = False
             if file_times is not None:
-                if on_exhausted == "cycle":
+                if on_exhausted == "cycle" and n_time_total > 1:
+                    # (one cycled record is steady: no next snapshot, so no
+                    # "dt exceeds dt_to_next" downgrade warning every run)
                     next_idx = next_idx_raw % n_time_total
                     have_next = True
                 elif 0 <= next_idx_raw < n_time_total:
