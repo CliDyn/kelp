@@ -635,7 +635,8 @@ def test_run_variants(tmp_path, monkeypatch, variant):
 def test_start_date_before_the_first_centre_is_refused(tmp_path):
     """1 January with monthly means lies before the first record time (the
     January centre): refused as a date outside the record times, as before
-    the exact period (a cycled run starts at the first centre or later)."""
+    the exact period (a cycled run on means starts between the first and
+    the last centre)."""
     data = _monthly_data(tmp_path / "data")
     cfg = _timed(_cfg(tmp_path, data=data, out="early.nc"),
                  start_date="2001-01-01T00:00", n_steps=2,
