@@ -200,14 +200,14 @@ this file:
 
 ## Test patterns
 
-Tests use synthetic data built in `tmp_path` fixtures or small committed fixtures under `tests/data/` (e.g. `test_real_mesh.py`, `test_regression.py`) — no external data needed (exceptions: the `@slow` suites, and the data-gated HEALPix suites — see `KELP_TEST_DATA` in their docstrings).
+Tests use synthetic data built in `tmp_path` fixtures or small committed fixtures under `tests/data/` (e.g. `test_real_mesh.py`, `test_regression.py`) — no external data needed (exceptions: the `@slow` suites, and the data-gated HEALPix suites — see `KELP_TEST_DATA` in their docstrings); the data-gated NEMO suites read `KELP_TEST_NEMO_DATA`, a directory of NEMO test crops: ORCA05 and eORCA025 crops (Arctic, southern full-width band, equatorial box; grid_T/U/V/W or domain_cfg/mesh_mask files, 3 records, the equatorial ones also split in time), the ORCA05 `mesh_mask`/grid files next to it (`nemo_orca05/`) and ORCA2 CMIP5 coordinates (`esgf_orca2/data/`, topology only); `tests/test_nemo_cgrid_data.py` and `tests/test_nemo_cgrid_lagrangian.py` skip when it is unset, and skip (not error) each test whose files the directory lacks).
 
 - Canonical mesh: 3×3 grid (9 nodes, 8 triangles) centred at (5°, 5°) — interior node gets ~6 surrounding elements for robust interpolation.
 - Constant velocity fields so displacement is analytic: `Δlon ≈ U·dt / (cos(lat)·METERS_PER_DEG_LAT)`.
 - Output format 2 is pinned by `tests/test_output_format.py` (layout, CF attributes, time units per calendar, the record clock in both modes incl. backward/cycle/chain cuts, release variables, velocity NaN rule, lazy restart block, format-1 reads, concat refusals).
 
 ```bash
-python -m pytest tests/          # default: 4837 collected (4795 pass, 42 data/plot skips as of 2026-11-17), 47 slow deselected
+python -m pytest tests/          # default: 4957 collected (4901 pass, 56 data/plot skips as of 2026-11-17), 47 slow deselected
 python -m pytest tests/ -m slow  # Parcels comparison + data-gated HEALPix-twin / W-sign suites
 ```
 

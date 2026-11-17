@@ -45,10 +45,13 @@ def test_orca05_partial_cell_w_equals_model_w():
 
 def test_eorca025_zstar_warns_and_runs():
     d = Path(_d)
+    mesh_file = d / "eorca025_equatorial_domain_cfg.nc"
+    grid_t = d / "eorca025_equatorial_split" / "eorca025_1m_19760101_19760229_grid_T.nc"
+    for f in (mesh_file, grid_t):
+        if not f.exists():
+            pytest.skip(f"{f.name} missing under KELP_TEST_NEMO_DATA")
     with pytest.warns(RuntimeWarning, match="z\\*/vvl"):
-        mesh, ds, vel = _read(d / "eorca025_equatorial_domain_cfg.nc",
-                              d / "eorca025_equatorial_split" / "eorca025_1m_19760101_19760229_grid_T.nc",
-                              "uo", "vo")
+        mesh, ds, vel = _read(mesh_file, grid_t, "uo", "vo")
     assert np.isfinite(vel.w).all()
 
 
