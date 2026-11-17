@@ -600,7 +600,7 @@ def test_orca_mismatched_copies_refuse(tmp_path):
 
 # --- dry ring (one ring of zero-velocity cells around the wet region) --------
 def _ring_ji(mesh):
-    return {tuple(x) for x in mesh._cgrid_elem_ji[mesh._cgrid_n_wet:].tolist()}
+    return {tuple(x) for x in mesh._cgrid_elem_ji[int((mesh._cgrid_nlev > 0).sum()):].tolist()}
 
 
 def test_ring_cells_8_neighbourhood():
@@ -609,10 +609,7 @@ def test_ring_cells_8_neighbourhood():
     tmask = np.zeros((ny, nx))
     tmask[4, 4:6] = 1.0
     tmask[7, 7] = 1.0
-    m0 = build_cgrid_mesh(flon, flat, tmask, ring=False)
     m1 = build_cgrid_mesh(flon, flat, tmask)
-    assert m0._cgrid_n_wet == m1._cgrid_n_wet == 3 and m0.n_elements == 3
-    np.testing.assert_array_equal(m1._cgrid_elem_ji[:3], m0._cgrid_elem_ji)   # wet ids unchanged
     np.testing.assert_array_equal(m1._cgrid_nlev, [1, 1, 1] + [0] * (m1.n_elements - 3))
     expect = set()
     for j, i in zip(*np.nonzero(tmask)):
@@ -632,13 +629,12 @@ def test_ring_across_seam_and_fold(fold):
     tmask[J, 4] = 0.0                   # dry cell on the fold row (mirrored in the halo row)
     tmask = cgrid_to_canonical(tmask, g.canon, "T")
     mesh = build_cgrid_mesh(flon, flat, tmask, layout=g.canon)
-    ring = [tuple(x) for x in mesh._cgrid_elem_ji[mesh._cgrid_n_wet:].tolist()]
+    ring = [tuple(x) for x in mesh._cgrid_elem_ji[int((mesh._cgrid_nlev > 0).sum()):].tolist()]
     assert len(ring) == len(set(ring))                   # each canonical cell once
     assert (4, NC) in ring and (J, 4) in ring
     assert all(1 <= i <= NC for _j, i in ring) and all(1 <= j <= J for j, _i in ring)
     piv = fold_pivot_cells(g.canon)
     assert not {(j, i) for j, i in ring if piv[j, i]}
-    assert mesh._cgrid_ring_dropped["pivot"] == piv.sum() == (4 if fold == "F" else 2)
     build_elem_neighbors(mesh)                           # raises if an edge has > 2 cells
     # the wet cell east of the seam dry cell reaches it across the halo
     ji = [tuple(x) for x in mesh._cgrid_elem_ji.tolist()]
@@ -658,12 +654,12 @@ def _corner_case():
     return flon, flat, tmask, u, v
 
 
-def _step_corner(ring):
+def _step_corner():
     from kelp.core.particles import make_state
     from kelp.numerics.integrators import rk4_step
     flon, flat, tmask, u, v = _corner_case()
     e2u, e1v = _widths(flon, flat)
-    mesh = build_cgrid_mesh(flon, flat, tmask, e2u=e2u, e1v=e1v, ring=ring)
+    mesh = build_cgrid_mesh(flon, flat, tmask, e2u=e2u, e1v=e1v)
     vel = VelocityField(u=u.ravel(), v=v.ravel(), eta=np.zeros(mesh.n_nodes),
                         uv_layout="cgrid")
     st = make_state([4.9 * D], [4.9 * D])
@@ -674,10 +670,7 @@ def _step_corner(ring):
 
 
 def test_convex_corner_stage_stays_alive_in_ring():
-    from kelp.core.particles import FailureReason, ParticleStatus
-    old, _m = _step_corner(ring=False)                    # documents the old failure
-    assert old.status[0] == ParticleStatus.OUTSIDE
-    assert old.failure_reason[0] == FailureReason.INTERPOLATION_FAILED
-    new, _m = _step_corner(ring=True)                     # land = zero velocity
+    from kelp.core.particles import ParticleStatus
+    new, _m = _step_corner()                              # land = zero velocity
     assert new.status[0] == ParticleStatus.ALIVE
     assert new.lon[0] > 4.9 * D and new.lat[0] > 4.9 * D            # and did move on

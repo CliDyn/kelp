@@ -333,7 +333,7 @@ SAME_POINT_CHORD = 1e-6
 
 
 def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
-                     layout: Optional[CgridLayout] = None, ring: bool = True,
+                     layout: Optional[CgridLayout] = None,
                      nlev2d=None, zw=None, area=None, e3b=None, e3u0=None, e3v0=None,
                      name: str = "nemo", partial_cells: str = "shrunk",
                      r_earth: Optional[float] = None) -> Mesh:
@@ -373,14 +373,12 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         The raster layout (``readers.nemo.detect_cgrid_layout``); the arrays
         must have ``layout.shape``.  ``None`` = a closed regional raster (its
         edges are walls or open water: nothing is merged).
-    ring : bool
-        Append ONE ring of dry cells (8-neighbourhood of the wet region,
-        across the seam and the fold) as zero-velocity elements after the wet
-        ones (default; land = zero velocity, as in Parcels).  A stage or end
-        point in the ring reads zero velocity (the particle stays ALIVE);
-        beyond the ring a stage still fails.  ``ring=False`` = wet cells only.  Ring cells
-        that are non-convex or sit at a fold pivot are dropped (counted in
-        ``_cgrid_ring_dropped``).
+    The mesh always carries ONE ring of dry cells (8-neighbourhood of the wet
+    region, across the seam and the fold) as zero-velocity elements after the
+    wet ones (land = zero velocity, as in Parcels): a stage or end point in the
+    ring reads zero velocity (the particle stays ALIVE); beyond the ring a
+    stage still fails.  Ring cells that are non-convex or sit at a fold pivot
+    are dropped.
 
     nlev2d, zw, area, e3b, e3u0, e3v0 : array_like or None
         3-D (z-level, partial bottom cells): ``nlev2d (ny, nx)`` wet levels per
@@ -404,8 +402,8 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         each element) and ``_cgrid_corners (E, 4)`` (node ids, SW/SE/NE/NW —
         the interpolator reads this, not ``elem_nodes``).  ``elem_nodes`` is
         the same quad (containment is winding-agnostic).  Also
-        ``_cgrid_n_wet`` (the first ``n_wet`` elements are wet cells, the
-        rest ring cells), ``_cgrid_nlev (E,) int32`` (1 wet / 0 ring).
+        ``_cgrid_nlev (E,) int32`` (the wet levels: 1 for a wet 2-D cell; the
+        wet elements come first, the ring cells (0) after them).
     """
     lon2d = np.asarray(glamf, dtype=np.float64)
     lat2d = np.asarray(gphif, dtype=np.float64)
@@ -449,32 +447,28 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
     quad_raster = quads(ej, ei)
     n_wet = int(ej.size)
     n_ring = 0
-    ring_dropped = {"pivot": 0, "nonconvex": 0}
-    if ring:
-        # a raster point is wet when its canonical cell is (the seam / fold
-        # neighbourhoods are then seen without index arithmetic)
-        wet_full = wet[cj, ci]
-        pd_ = np.pad(wet_full, 1)
-        dil = np.zeros_like(wet_full)
-        for dj in range(3):
-            for di in range(3):
-                dil |= pd_[dj:dj + ny, di:di + nx]
-        rj, ri = np.nonzero(dil & ~wet_full)
-        rj, ri = cj[rj, ri], ci[rj, ri]
-        keep = (rj >= 1) & (ri >= 1)
-        rj, ri = np.unique(np.stack([rj[keep], ri[keep]], 1), axis=0).T
-        keep = ~piv[rj, ri]
-        ring_dropped["pivot"] = int((~keep).sum())
-        rj, ri = rj[keep], ri[keep]
-        rq = quads(rj, ri)
-        bad = find_nonconvex_quads(rq, flat_lon, flat_lat)
-        keep = np.ones(rq.shape[0], dtype=bool)
-        keep[bad] = False
-        ring_dropped["nonconvex"] = int(bad.size)
-        rj, ri, rq = rj[keep], ri[keep], rq[keep]
-        n_ring = int(rj.size)
-        ej = np.concatenate([ej, rj]); ei = np.concatenate([ei, ri])
-        quad_raster = np.concatenate([quad_raster, rq], axis=0)
+    # a raster point is wet when its canonical cell is (the seam / fold
+    # neighbourhoods are then seen without index arithmetic)
+    wet_full = wet[cj, ci]
+    pd_ = np.pad(wet_full, 1)
+    dil = np.zeros_like(wet_full)
+    for dj in range(3):
+        for di in range(3):
+            dil |= pd_[dj:dj + ny, di:di + nx]
+    rj, ri = np.nonzero(dil & ~wet_full)
+    rj, ri = cj[rj, ri], ci[rj, ri]
+    keep = (rj >= 1) & (ri >= 1)
+    rj, ri = np.unique(np.stack([rj[keep], ri[keep]], 1), axis=0).T
+    keep = ~piv[rj, ri]
+    rj, ri = rj[keep], ri[keep]
+    rq = quads(rj, ri)
+    bad = find_nonconvex_quads(rq, flat_lon, flat_lat)
+    keep = np.ones(rq.shape[0], dtype=bool)
+    keep[bad] = False
+    rj, ri, rq = rj[keep], ri[keep], rq[keep]
+    n_ring = int(rj.size)
+    ej = np.concatenate([ej, rj]); ei = np.concatenate([ei, ri])
+    quad_raster = np.concatenate([quad_raster, rq], axis=0)
     referenced = np.unique(quad_raster)
     n_nodes = int(referenced.size)
     remap = np.full(ny * nx, -1, dtype=np.int64)
@@ -533,7 +527,6 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
     mesh._cgrid_partial = partial_cells
     mesh._cgrid_elem_ji = np.stack([ej, ei], axis=1).astype(np.int64)
     mesh._cgrid_corners = corners
-    mesh._cgrid_n_wet = n_wet
     nl = (np.ones(n_wet) if nlev2d is None
           else np.asarray(nlev2d)[ej[:n_wet], ei[:n_wet]])
     mesh._cgrid_nlev = np.r_[nl, np.zeros(n_ring)].astype(np.int32)
@@ -561,7 +554,6 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
             kb, th = _partial_level(mesh._cgrid_zw, e3, (ny, nx))
             setattr(mesh, f"_cgrid_kb{nm}", kb)
             setattr(mesh, f"_cgrid_e3{nm}", th)
-    mesh._cgrid_ring_dropped = dict(ring_dropped)
     if (e2u is None) != (e1v is None):
         raise ValueError("pass both e2u and e1v, or neither")
     # the faces the kept cells read: W/E (u at (j, i-1), (j, i)), S/N (v at

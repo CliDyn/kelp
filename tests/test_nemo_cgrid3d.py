@@ -329,7 +329,7 @@ def test_halo_free_fold_3d_load_flux_w_and_sampling(tmp_path, fold):
     np.testing.assert_array_equal(V, v)
     E3u = cgrid_thickness(zw, mesh._cgrid_kbu.reshape(ny, nx), mesh._cgrid_e3u.reshape(ny, nx))
     E3v = cgrid_thickness(zw, mesh._cgrid_kbv.reshape(ny, nx), mesh._cgrid_e3v.reshape(ny, nx))
-    nw = mesh._cgrid_n_wet
+    nw = int((mesh._cgrid_nlev > 0).sum())
     j, i = mesh._cgrid_elem_ji[:nw].T
     nb = build_elem_neighbors(mesh)[:nw]
     e2, e1 = mesh._cgrid_e2u.reshape(ny, nx), mesh._cgrid_e1v.reshape(ny, nx)

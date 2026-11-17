@@ -76,15 +76,16 @@ def _flux_balance_and_special_edges(mesh, ds, mode):
     from kelp.core.mesh import build_elem_neighbors
     vel = get_reader("nemo").read_velocities(ds, 0, mesh, mode_cfg=mode)
     nx = mesh._structured_shape[1]
-    ji = mesh._cgrid_elem_ji[:mesh._cgrid_n_wet]
-    nb = build_elem_neighbors(mesh)[:mesh._cgrid_n_wet]
+    nw = int((mesh._cgrid_nlev > 0).sum())
+    ji = mesh._cgrid_elem_ji[:nw]
+    nb = build_elem_neighbors(mesh)[:nw]
     j, i = ji[:, 0], ji[:, 1]
     fi = np.stack([(j - 1) * nx + i, j * nx + i, j * nx + i, j * nx + i - 1], 1)
     uf, vf = vel.u.astype(float), vel.v.astype(float)
     e2u, e1v = mesh._cgrid_e2u, mesh._cgrid_e1v
     out = np.stack([-vf[fi[:, 0]] * e1v[fi[:, 0]], uf[fi[:, 1]] * e2u[fi[:, 1]],
                     vf[fi[:, 2]] * e1v[fi[:, 2]], -uf[fi[:, 3]] * e2u[fi[:, 3]]], 1)
-    e, k = np.nonzero((nb >= 0) & (nb < mesh._cgrid_n_wet))
+    e, k = np.nonzero((nb >= 0) & (nb < nw))
     n = nb[e, k]
     k2 = np.array([int(np.flatnonzero(nb[b] == a)[0]) for a, b in zip(e, n)])
     special = (np.abs(i[e] - i[n]) > 1) | (np.abs(j[e] - j[n]) > 1)
@@ -92,18 +93,12 @@ def _flux_balance_and_special_edges(mesh, ds, mode):
 
 
 def test_orca05_full_mesh_counts_unchanged_by_the_canonical_rewrite():
-    import functools
     from kelp.core.mesh import build_elem_neighbors
-    from kelp.readers import nemo
-    mf = _sib("nemo_orca05", "mesh_mask.nc")
-    orig = nemo.build_cgrid_mesh
-    nemo.build_cgrid_mesh = functools.partial(orig, ring=False)      # the wet cells only
-    try:
-        mesh = _mesh(mf, "fesom2")
-    finally:
-        nemo.build_cgrid_mesh = orig
-    assert (mesh.n_nodes, mesh.n_elements) == (229958, 224514)
-    assert int((build_elem_neighbors(mesh) >= 0).sum()) // 2 == 443446
+    mesh = _mesh(_sib("nemo_orca05", "mesh_mask.nc"), "fesom2")
+    nw = int((mesh._cgrid_nlev > 0).sum())               # the wet cells (the ring follows them)
+    assert (np.unique(mesh._cgrid_corners[:nw]).size, nw) == (229958, 224514)
+    nb = build_elem_neighbors(mesh)[:nw]
+    assert int(((nb >= 0) & (nb < nw)).sum()) // 2 == 443446
     lay = mesh._cgrid_layout
     assert (lay.fold, lay.halo_cols, lay.halo_row, lay.periodic) == ("F", True, True, True)
 
