@@ -1694,7 +1694,8 @@ def run_single_realization(
         ``on_exhausted="cycle"`` the forcing period is read from it (the
         sum of the windows when they differ in length, and discrete mode is
         then refused); a dataset without it keeps the legacy period, the
-        span of the records plus the last interval.
+        span of the records plus the last interval, and so does the axis
+        synthesised from ``file_dt`` when ``file_times`` is not given.
     reader : reader class
         Must have ``read_velocities(ds, timestep, mesh, mode)``.
     init_state : ParticleState
@@ -1957,10 +1958,12 @@ def run_single_realization(
         # a direct caller passed no record times: read them from the dataset
         # (run_tracking always passes them, midpoint-shifted when averaged)
         file_times, file_dt = extract_time_info(ds)
+    declared_axis = False
     if temporal_interp and file_times is None and file_dt:
         # the caller declared the snapshot interval (as run_tracking does
         # with numerics.file_dt): synthesise the axis (review 2026-09-23)
         file_times = np.arange(n_time_total, dtype=np.float64) * float(file_dt)
+        declared_axis = True
     if temporal_interp and file_times is None:
         raise ValueError(
             "temporal_interp is on but the dataset has no usable time axis "
@@ -1984,9 +1987,11 @@ def run_single_realization(
             _chk_times, _chk_dt = _ax_times, (_ax_dt if file_dt is None else file_dt)
     # the cycle rule of this call, once: the exact period and seam when the
     # dataset carries averaging windows of unequal length, else None (the
-    # legacy rule; always None under stop)
+    # legacy rule; always None under stop).  An axis synthesised from the
+    # caller's file_dt declares equally spaced records: the windows belong
+    # to the decoded axis, not to it, so it keeps the legacy rule.
     cyc = (exact_cycle(ds, _chk_times, n_time_total)
-           if on_exhausted == "cycle" else None)
+           if on_exhausted == "cycle" and not declared_axis else None)
     if not temporal_interp:
         _refuse_discrete_exact_cycle(cyc)        # the backstop for direct callers
     _check_discrete_dt(numerics.dt, temporal_interp, _chk_dt, _chk_times,
@@ -3980,7 +3985,8 @@ def track_particles(
         ``on_exhausted="cycle"`` the forcing period is read from it (the
         sum of the windows when they differ in length, and discrete mode is
         then refused); a dataset without it keeps the legacy period, the
-        span of the records plus the last interval.
+        span of the records plus the last interval, and so does the axis
+        synthesised from ``file_dt`` when ``file_times`` is not given.
     reader : reader class
     lon0, lat0 : np.ndarray
         Initial particle positions.

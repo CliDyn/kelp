@@ -725,3 +725,49 @@ def test_equal_windows_and_legacy_axes_keep_the_legacy_period(tmp_path, case):
         ds.close()
     assert len(ft) == n
     assert _period(out) == float(ft[-1] - ft[0] + (ft[-1] - ft[-2]))
+
+
+def test_declared_file_dt_keeps_the_legacy_rule(tmp_path):
+    """A direct caller that passes ``file_dt`` without ``file_times`` declares
+    equally spaced records: the run synthesises that axis and cycles it with
+    the legacy rule, whatever windows the dataset carries (the windows belong
+    to the decoded axis, not to the declared one; a seam taken from them and
+    the declared span would be meaningless, even negative)."""
+    from kelp.readers import TIME_WINDOWS
+
+    mode = ModeConfig(Fdrift2D=False, Fdrift3D=True)
+    num = NumericsConfig(dt=DAY, integrator="rk2", uv_interp="barycentric",
+                         w_interp="barycentric", temporal_interp=True,
+                         output_freq=1)
+    data = _monthly_data(tmp_path / "data")
+    mesh = _quiet(Fesom14Reader.load_mesh,
+                  MeshConfig(type="fesom14", meshpath=str(data)), mode_cfg=mode)
+    ds = _quiet(Fesom14Reader.open_dataset, str(data), mode_cfg=mode)
+    lon, lat, z = (np.array(c, dtype=np.float64) for c in zip(*SEEDS))
+    init = make_state(lon, lat, z)
+    init = init.replace(nearest_node=find_nearest_nodes(mesh, lon, lat))
+
+    def _go(dset, name):
+        path = str(tmp_path / f"{name}.nc")
+        w = TrajectoryWriter(path, init.n_particles).open()
+        try:
+            _quiet(tracking.run_single_realization,
+                   mesh, dset, Fesom14Reader, init, mode, num,
+                   start_time_idx=0, n_steps=400,
+                   n_time_total=dset.sizes["time"], on_exhausted="cycle",
+                   writer=w, temporal_interp=True, file_dt=30 * DAY)
+        finally:
+            w.close()
+        return path
+
+    try:
+        assert TIME_WINDOWS in ds.coords
+        with_windows = _go(ds, "with_windows")
+        without = _go(ds.drop_vars(TIME_WINDOWS), "without")
+    finally:
+        ds.close()
+    a, b = load_trajectories(with_windows), load_trajectories(without)
+    for k in ("time", "lon", "lat", "z", "status"):
+        assert_bitwise(a[k], b[k], k)
+    # twelve declared 30 d intervals: the legacy period of that axis
+    assert _period(with_windows) == _period(without) == 360 * DAY

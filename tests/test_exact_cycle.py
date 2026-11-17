@@ -357,6 +357,9 @@ def test_cycle_keyword_is_required():
         tr._resolve_time_bracket(0.0, FT, 12, "stop")
     with pytest.raises(TypeError):
         tr._index_to_sim_time(0, FT, 12, "stop")
+    with pytest.raises(TypeError):
+        tr._eta_at_time(0.0, FT, 12, "stop", 1, None, None, None, None,
+                        None, None, None)
 
     names = {"_resolve_time_bracket", "_index_to_sim_time", "_eta_at_time"}
     calls, constant_none = [], set()
