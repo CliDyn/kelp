@@ -251,6 +251,8 @@ that decide the campaign live HERE, not in a comment of the config check):**
 import os, sys, yaml, numpy as np
 from kelp.readers import get_reader
 # START_IDX: the RAW record of START_DATE on the forcing axis, resolved once here
+# (with data.time_stamp / time_window in place of time_averaging, look START_DATE up on the axis
+#  after readers.apply_time_options with the run's data block: the axis the run sees)
 _ax = get_reader("healpix").open_dataset(STORE)["time"].values
 START_IDX = int(np.flatnonzero(_ax == np.datetime64(START_DATE))[0])   # IndexError = START_DATE is not a record
 NODE_TMPFS = sys.argv[1] if len(sys.argv) > 1 else ""       # the node-local in-memory root of the target partition, same path on every node

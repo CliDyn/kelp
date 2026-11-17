@@ -144,7 +144,10 @@ an earlier run. Two of them concern the additions of \cref{sec:vert-uvdepth,sec:
 the default layer mode has no such attribute, so its output is unchanged. The attribute is the proof that
 the option was on: a misspelled key is ignored silently, like every unknown key, and leaves no attribute
 behind. A FESOM~1.4 run, whose velocities are always depth-linear and which refuses the option, has no
-\code{uv\_vertical} attribute; its time averaging reads \code{"resolved\_by\_reader"}.
+\code{uv\_vertical} attribute; its time averaging reads \code{"resolved\_by\_reader"}. A run with the
+stamp options writes each of \conf{data.time\_stamp}, \conf{data.time\_window} and
+\conf{data.time\_offset} that is set as a string attribute of that name, and for a reader other than
+FESOM~1.4 its time averaging reads \code{"resolved\_from\_options"}.
 
 \section{Checkpoints and restart}\label{sec:out-restart}
 

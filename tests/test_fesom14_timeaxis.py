@@ -910,7 +910,8 @@ def test_resolve_stamps_month_centres_by_hand():
     TimeOptions("start", "calendar_day"), TimeOptions("end", "calendar_day"),
     TimeOptions("instant", "calendar_day"), TimeOptions("start", "1 d"),
     TimeOptions("centre", "1 d"), TimeOptions("end", "1 d"),
-    TimeOptions("instant", "1 d"), TimeOptions("end", "1 d", "+6 h")])
+    TimeOptions("instant", "1 d"), TimeOptions("end", "1 d", "+6 h"),
+    TimeOptions("instant", "1 d", "+6 h")])
 def test_resolve_stamps_equals_the_file_path(opts):
     """One arithmetic for both entries: the same stamps through a file axis
     and through resolve_stamps give the same instants and windows."""

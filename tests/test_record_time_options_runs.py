@@ -257,10 +257,11 @@ def test_offset_run_equals_reference_and_stamps_three_keys(tmp_path):
     start = {"start_date": "1958-01-02T06:00:00"}
     ref, _ = _case(tmp_path, world, "ref", STAMPS["centre"], time=start,
                    time_averaging="instant")
-    cfg, _ = _case(tmp_path, world, "late", None, time=start,
-                   time_stamp="end", time_window="calendar_day",
-                   time_offset="+45 min")
+    cfg, out = _case(tmp_path, world, "late", None, time=start,
+                     time_stamp="end", time_window="calendar_day",
+                     time_offset="+45 min")
     _same_run(cfg.data.output_path, ref.data.output_path)
+    assert "data.time_offset=+45 min" in out, out
     attrs = _global_attrs(cfg.data.output_path)
     assert attrs["time_offset"] == "+45 min"
     assert attrs["time_stamp"] == "end"

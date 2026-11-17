@@ -783,7 +783,8 @@ def test_kelp_info_options(tmp_path, capsys):
     cfg["mesh"]["type"] = "fesom2"
     rc, out, err = _info(tmp_path, "other", cfg, capsys)
     assert rc == 1, (out, err)
-    assert "data.time_averaging" in err, err
+    assert "is set together with" in err, err
+    assert "Remove data.time_averaging" in err, err
     assert "could not load mesh" not in err, err
 
 
