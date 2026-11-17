@@ -80,7 +80,12 @@ campaign order-of-operations and the setup pitfalls.
    - Sub-stepping (`temporal_interp: true`): `dt` < file step, velocity
      interpolated linearly between snapshots.
    - `n_steps` counts *integration* steps (dt-sized), not file records.
-   - Short forcing + long run → `on_exhausted: cycle`.
+   - Short forcing + long run → `on_exhausted: cycle`. For monthly or yearly
+     means set `temporal_interp: true` and, on a mesh type other than
+     `fesom14`, `data.time_stamp` + `data.time_window`, so that the period is
+     the sum of the windows (365 d for twelve months, not 364.5); snapshots
+     (`time_stamp: instant`) on calendar months or years cannot cycle on any
+     reader.
 4. **Check cross-key constraints** (full list in `docs/configuration.md`):
    - `var_u: unod`/`vnod` (node-layout velocities), HEALPix and NEMO require
      `numerics.uv_interp: barycentric` — `leastsq`/`edge_leastsq` fail at

@@ -81,8 +81,10 @@ the segments of a resumed chain carry exactly the labels of an uninterrupted run
 label advances by $\dt$ per step; the time-step check of \cref{sec:temp-modes} admits a small difference
 between $\dt$ and the record spacing, by which the label may drift from the stored stamps. When the forcing is
 cycled the time does not wrap: past the first period the dates lie beyond the end of the forcing, and an
-attribute records the period. A forcing without a calendar epoch --- a bare unit, or an index axis with a
-declared spacing --- gives plain seconds from its first record, with an attribute saying so.
+attribute records the period: the sum of the averaging windows where the records' windows are known and differ
+in length (monthly or yearly means), otherwise the span of the records plus the last interval. A forcing
+without a calendar epoch --- a bare unit, or an index axis with a declared spacing --- gives plain seconds from
+its first record, with an attribute saying so.
 
 \paragraph{Release positions and times.} For every particle the output holds its release longitude, latitude
 and depth --- the seed position, after the fold into a periodic window when one is set --- and its release

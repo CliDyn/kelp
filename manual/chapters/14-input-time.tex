@@ -203,9 +203,15 @@ arithmetic and the refusals of the FESOM~1.4 reader. Calendar windows are comput
 the axis, so monthly means stamped on the first of the month at midnight, declared \conf{start} and
 \conf{calendar\_month}, sit at 12:00 on 16 January and at 00:00 on 15 February of a common year; a stamp off
 its window boundary, a gap, an overlap or a broken snapshot cadence refuses the run. Here the offset needs the
-other two keys, since these readers have no time bounds or schedule for it to act on, and
-\conf{time.on\_exhausted: cycle} is refused with calendar-month or calendar-year windows, because the cycle
-period assumes equally spaced records. From then on the axis is treated like the FESOM~1.4 reader's: no midpoint
+other two keys, since these readers have no time bounds or schedule for it to act on. With
+\conf{time.on\_exhausted: cycle}, means over calendar months or years repeat after the sum of their averaging
+windows --- 365~days for the twelve monthly means of a common year, where the span of the records plus the last
+interval would give 364.5~days --- and the interval from the last record to the first record of the next pass
+is the period less the span of the records, 31~days from December to January; the FESOM~1.4 reader gives its
+means the same period from the windows it resolves. Such a cycle needs the interpolated mode and is refused in
+the discrete mode. Snapshots (\conf{instant}) on a calendar-month or calendar-year cadence carry no window, so
+the period after which they repeat is not known, and \conf{cycle} is refused for them with every reader, the
+FESOM~1.4 reader included. From then on the axis is treated like the FESOM~1.4 reader's: no midpoint
 shift, a \conf{start\_date} matched against the resolved instants (a daily mean stamped at the start of its day
 sits at 12:00), the summary line in the run and in \code{kelp info}, and
 \code{time\_averaging = "resolved\_from\_options"} in the output, next to each of the three keys that is set.

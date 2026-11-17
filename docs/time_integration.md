@@ -139,6 +139,12 @@ time and builds a velocity field blended between them. Two helpers in
   allocation. It also handles the end-of-range and cycling behaviour
   (`on_exhausted`) and the subtle case of a backward step that starts exactly on
   a snapshot, which must bracket the interval *below* it rather than degenerate.
+  Under `cycle` the period and the seam (the bracket from the last snapshot to
+  the first one of the next pass) come from its `cycle` argument where the
+  records' averaging windows are known and differ in length — the sum of the
+  windows, e.g. 365 days and a 31-day seam for twelve monthly means — and are
+  otherwise the span of the snapshots plus the last interval, with that interval
+  as the seam (`io_and_time.md` §3).
 - `_build_vel_payload` turns that bracket into the actual payload. It reads the
   two snapshots through the snapshot cache, computes the blend fraction `alpha`
   from where the query time sits in the interval, and returns the blended

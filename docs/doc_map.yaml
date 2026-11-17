@@ -27,6 +27,7 @@ configuration:
   - src/kelp/core/config.py:ModeConfig
   - src/kelp/readers/fesom14/reader.py:Fesom14Reader
   - src/kelp/readers/__init__.py:apply_time_options
+  - src/kelp/readers/__init__.py:exact_cycle
   doc: docs/configuration.md
   verified_at: 8165ac2
 coordinate_frame:
@@ -113,6 +114,7 @@ dev_readers:
   - src/kelp/readers/fesom14/
   - src/kelp/readers/fesom2.py:_elem_level_metadata
   - src/kelp/readers/__init__.py:apply_time_options
+  - src/kelp/readers/__init__.py:exact_cycle
   doc: docs/dev/readers.md
   verified_at: 8165ac2
 dev_tracking:
@@ -126,6 +128,7 @@ dev_tracking:
   - src/kelp/readers/__init__.py:_open_run_dataset
   - src/kelp/readers/__init__.py:_prepare_dataset
   - src/kelp/tracking.py:_check_linear_element_mesh
+  - src/kelp/readers/__init__.py:exact_cycle
   doc: docs/dev/tracking.md
   verified_at: 8165ac2
 dev_visualization:
@@ -177,6 +180,7 @@ healpix:
   - src/kelp/numerics/integrators.py:_bary_fused_anchor_exact
   - src/kelp/core/mesh.py:grid_hash_dense_for_elements
   - src/kelp/readers/__init__.py:apply_time_options
+  - src/kelp/readers/__init__.py:exact_cycle
   doc: docs/healpix.md
   verified_at: 8165ac2
 interpolation:
@@ -210,6 +214,7 @@ io_and_time:
   - src/kelp/readers/fesom14/_timeaxis.py:resolve_axis
   - src/kelp/readers/__init__.py:apply_time_options
   - src/kelp/readers/fesom14/_timeaxis.py:resolve_stamps
+  - src/kelp/readers/__init__.py:exact_cycle
   doc: docs/io_and_time.md
   verified_at: 8165ac2
 localization:

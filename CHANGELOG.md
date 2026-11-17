@@ -36,9 +36,11 @@ the tracker was developed privately from 2026-06.
   boundary with `calendar_day`), when a record is missing, when
   `data.time_averaging` is set next to the keys, when `data.time_offset` is
   given without the other two, when the time axis carries no calendar dates,
-  and when `time.on_exhausted: cycle` is combined with a `calendar_month` or
-  `calendar_year` window, whose records are not equally spaced as the cycle
-  period assumes.
+  and, under `time.on_exhausted: cycle`, when snapshots (`time_stamp: instant`)
+  come on a `calendar_month` or `calendar_year` cadence, since a snapshot
+  carries no averaging window and the period after which such records repeat
+  is not known, or when a discrete-mode run (`numerics.temporal_interp: false`)
+  would cycle means whose averaging windows differ in length.
 - `kelp info` prints the resolved first and last instants, and the run summary
   prints the same line.
 - Output files of such a run carry `time_averaging = "resolved_from_options"`

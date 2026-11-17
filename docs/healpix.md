@@ -155,8 +155,9 @@ them with the stamp the store shows for the same record. The settings:
   `time.start_date` names 12:00;
 - stamps at the window start, monthly means: `data.time_stamp: start` with
   `data.time_window: calendar_month` and `numerics.temporal_interp: true`
-  (months differ in length; `time.on_exhausted: cycle` is refused with this
-  window).
+  (months differ in length); with `time.on_exhausted: cycle` such records
+  repeat after the sum of the months, 365 d for a common year
+  (`io_and_time.md` §3).
 
 A wrong choice does not fail: under `mean`, daily means stamped at the window
 start are placed 24 h early and monthly means a month early (a January mean in
