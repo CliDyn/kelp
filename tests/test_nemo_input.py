@@ -184,3 +184,12 @@ def test_yaml_list_of_inputs_is_resolved_fingerprinted_and_labelled(tmp_path):
 def test_ncinput_w_is_refused(tmp_path):
     with pytest.raises(ValueError, match="ncinput_w"):
         get_reader("nemo").open_dataset(str(tmp_path / "x_grid_T.nc"), w_path=str(tmp_path / "w.nc"))
+
+
+def test_3d_mesh_without_face_widths_is_refused_but_2d_loads(tmp_path):
+    p = _domain_cfg(tmp_path)
+    ds = xr.open_dataset(p).load(); ds.close()
+    p.unlink()
+    ds.drop_vars(["e2u", "e1v"]).to_netcdf(p)
+    with pytest.raises(KeyError, match="e2u and e1v"):
+        _load(p)

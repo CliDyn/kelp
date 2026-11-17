@@ -658,6 +658,10 @@ class NemoReader:
                 depth2d = rd(dn, "T", check=False)
                 break
         widths = {}
+        if vert and not ("e2u" in ds.variables and "e1v" in ds.variables):
+            raise KeyError(
+                f"mesh.nemo_grid: cgrid 3-D needs the face widths e2u and e1v in the "
+                f"mesh file {path!r} (mesh_mask.nc / domain_cfg.nc carry them)")
         if "e2u" in ds.variables and "e1v" in ds.variables:
             widths = dict(e2u=rd("e2u", "U"), e1v=rd("e1v", "V"))
             print("  NEMO cgrid: fluxes use the model face widths e2u/e1v")

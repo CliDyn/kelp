@@ -69,8 +69,8 @@ the `e3t` of the z*/vvl check are canonicalised silently.
 
 - always `glamf`, `gphif`, `tmask` (a `domain_cfg` without `tmask`: the mask is
   `level <= bottom_level`), the T coordinates `glamt/gphit` or
-  `nav_lon/nav_lat` (layout detection), `e2u`, `e1v` (face widths; absent: plane
-  lengths, logged);
+  `nav_lon/nav_lat` (layout detection), `e2u`, `e1v` (face widths; absent in 2-D: plane
+  lengths, logged; required in 3-D);
 - for 3-D also `e3t_1d`, `e1t`, `e2t`, and `e3t_0`, `e3u_0`, `e3v_0` for
   partial cells (absent: full reference cells).
 
