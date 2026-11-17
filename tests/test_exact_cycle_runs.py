@@ -19,12 +19,22 @@ six levels, node u, v constant in depth and varying in space and from record
 to record) with twelve monthly means given by ``data.time_stamp`` and
 ``data.time_window: calendar_month``; snapshots on calendar windows stay
 refused, for every reader; and a ``cycle`` run on irregularly spaced records
-without known windows warns that its period is the legacy one.  All data is
+without known windows warns that its period is the legacy one.  The other
+consumers of the period follow the seam too: a sampled scalar
+(``mode.sample_vars``), the surface elevation of a FESOM-C sigma run (the
+file of ``tests/test_uv_vertical_sigma_run.py`` restamped to the month
+starts), the start of a later realization (with and without
+``time.start_date``), a run resumed from a checkpoint after the seam,
+prefetched reads and PCHIP in time.  Equal windows and axes without known
+windows keep the legacy period, and their runs are meant to be compared
+bit for bit with the code before the exact period.  All data is
 synthetic, written in ``tmp_path``.  The names of the exact period are
 imported inside the tests, so the file also runs on code that lacks them.
 """
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import warnings
 from pathlib import Path
 
@@ -40,21 +50,27 @@ from kelp import tracking  # noqa: E402
 from kelp.core.config import MeshConfig, ModeConfig, NumericsConfig, TimeConfig  # noqa: E402
 from kelp.core.mesh import find_nearest_nodes  # noqa: E402
 from kelp.core.particles import make_state  # noqa: E402
+from kelp.readers import extract_time_info, get_reader  # noqa: E402
 from kelp.readers.fesom14 import Fesom14Reader  # noqa: E402
-from kelp.writers import load_trajectories  # noqa: E402
+from kelp.writers import (TrajectoryWriter, load_restart,  # noqa: E402
+                          load_trajectories)
 
 from kelp.cli.main import main as cli_main  # noqa: E402
 
+from tests._bitwise import assert_bitwise  # noqa: E402
 from tests.test_depth_linear_analytic import (LEVELS_C, NC,  # noqa: E402
                                               _col_beds, _const_field,
                                               _elem_centres, _quadrant_beds,
                                               _write_data, _write_mesh)
 from tests.test_fesom14_tracking import (DAY, LAT, LAT_B, LEVELS, LON,  # noqa: E402
-                                         LON_B, SEEDS, WET, _cfg, _quiet,
-                                         _run, _write_nc)
-from tests.test_record_time_options_runs import (_case, _restamp,  # noqa: E402
-                                                 _same_run, _world)
+                                         LON_B, SEEDS, WET, _cfg, _data,
+                                         _quiet, _run, _write_nc)
+from tests.test_record_time_options_runs import (STAMPS, _case,  # noqa: E402
+                                                 _restamp, _same_run, _world)
 from tests.test_uv_vertical_elements_run import _load_mesh  # noqa: E402
+from tests.test_uv_vertical_sigma_run import DT as SIGMA_DT  # noqa: E402
+from tests.test_uv_vertical_sigma_run import _cfg as _sigma_cfg  # noqa: E402
+from tests.test_uv_vertical_sigma_run import _file as _sigma_file  # noqa: E402
 
 #: month edges of one noleap year, days since 2001-01-01
 EDGES = np.array([0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365],
@@ -397,3 +413,315 @@ def test_irregular_legacy_axis_cycle_warns(tmp_path):
     _, got = _warned("v_two", days, np.array([0.0, 31.0]) * DAY, n_rec=2,
                      time=cyc, time_averaging="instant")
     assert not got, [str(w.message) for w in got]
+
+
+# ---------------------------------------------------------------------------
+# the other consumers of the period
+# ---------------------------------------------------------------------------
+
+def _timed(cfg, **time_kw):
+    """``cfg`` with its time block replaced by ``TimeConfig(**time_kw)``."""
+    cfg.time = TimeConfig(**time_kw)
+    return cfg
+
+
+def test_sampled_scalar_follows_the_exact_seam(tmp_path):
+    """A sampled scalar (``tracer = k`` for record ``k``, uniform in space)
+    is blended in the seam bracket December -> January (31 d): from the
+    December centre two steps of 15.5 d reach 1 January, the middle of the
+    seam (11 / 2 = 5.5; the legacy 30.5 d bracket gives 5.41), and the
+    January centre of the next pass (0; the legacy period of 364.5 d puts
+    it half a day into January: 0.017)."""
+    data = _monthly_data(tmp_path / "data", tracer=True)
+    cfg = _timed(_cfg(tmp_path, data=data, out="sampled.nc",
+                      mode={"sample_vars": ["tracer"]},
+                      numerics={"dt": 15.5 * DAY}),
+                 start_date="2001-12-16T12:00", n_steps=2,
+                 on_exhausted="cycle")
+    _run(cfg)
+    tracer = load_trajectories(cfg.data.output_path)["tracer"]
+    assert tracer.shape == (len(SEEDS), 2)
+    assert tracer[:, 0] == pytest.approx(5.5, abs=1e-9), tracer
+    assert tracer[:, 1] == pytest.approx(0.0, abs=1e-9), tracer
+
+
+def _sigma_months(work: Path, copies: int) -> Path:
+    """The FESOM-C file of ``tests/test_uv_vertical_sigma_run.py`` with
+    twelve records (a surface rising from record to record) stamped at the
+    twelve month starts of 2001 (``noleap``), written ``copies`` times along
+    time, each copy 365 d later."""
+    src = _sigma_file(work / "src", n_rec=12)
+    with xr.open_dataset(src, decode_times=False) as d:
+        one = d.load()
+    attrs = {"units": "seconds since 2001-01-01", "calendar": "noleap"}
+    parts = [one.assign_coords(time=("time", (EDGES[:12] + 365.0 * c) * DAY,
+                                     attrs))
+             for c in range(copies)]
+    # the mesh arrays are data variables without time: "minimal" keeps them
+    # out of the concatenation (a time axis on them fails the mesh loader)
+    out = parts[0] if copies == 1 else xr.concat(
+        parts, dim="time", data_vars="minimal", coords="minimal",
+        compat="equals")
+    path = work / "fesomc.nc"
+    out.to_netcdf(path)
+    return path
+
+
+def _sigma_month_cfg(path: Path, out: str, on_exhausted: str):
+    """Monthly means stamped at the month starts, temporal interpolation,
+    eight steps of the fixture's ``DT`` from record 11 (December)."""
+    cfg = _sigma_cfg(path, start=11, n_steps=8, dt=SIGMA_DT, out=out,
+                     temporal_interp=True)
+    cfg.data = dataclasses.replace(cfg.data, time_averaging=None,
+                                   time_stamp="start",
+                                   time_window="calendar_month")
+    cfg.time.on_exhausted = on_exhausted
+    return cfg
+
+
+def test_sigma_eta_follows_the_exact_seam(tmp_path):
+    """FESOM-C sigma 3-D from the December centre: the surface elevation
+    that turns the sigma fractions into depths is blended in the seam
+    bracket December -> January (31 d), as on the records written twice."""
+    year = _sigma_months(tmp_path / "year", copies=1)
+    twice = _sigma_months(tmp_path / "twice", copies=2)
+    cfg = _sigma_month_cfg(year, "cycle.nc", "cycle")
+    ref = _sigma_month_cfg(twice, "ref.nc", "stop")
+    _run(cfg)
+    _run(ref)
+    got, want = (load_trajectories(c.data.output_path) for c in (cfg, ref))
+    _assert_doubled_reference(got, want)
+    assert np.array_equal(got["time"], want["time"])
+    assert np.ptp(got["z"], axis=1).min() > 1e-3          # every z moves
+
+
+@pytest.mark.parametrize("start_date", [None, "2001-02-01T00:00"],
+                         ids=["index", "start_date"])
+def test_realizations_start_whole_exact_periods_apart(tmp_path, start_date):
+    """Two realizations twelve records apart start one exact period (365 d)
+    apart and follow the same forcing; thirteen records apart (index start)
+    the second starts at the February centre of the next pass (394.5 d)."""
+    data = _monthly_data(tmp_path / "data")
+
+    def _pair(name, run_interval):
+        cfg = _timed(_cfg(tmp_path, data=data, out=f"{name}.nc"),
+                     start_date=start_date, n_steps=40, on_exhausted="cycle",
+                     num_runs=2, run_interval=run_interval)
+        _run(cfg)
+        out = Path(cfg.data.output_path)
+        return [load_trajectories(str(out.with_stem(f"{out.stem}_r{i}")))
+                for i in range(2)]
+
+    r0, r1 = _pair("real", 12)
+    t0, t1 = r0["time"], r1["time"]
+    assert np.array_equal(t1 - t0, np.full_like(t0, 365 * DAY)), t1 - t0
+    for key in ("lon", "lat", "z"):
+        assert np.allclose(r1[key], r0[key], rtol=0, atol=1e-9), (
+            key, np.max(np.abs(r1[key] - r0[key])))
+    if start_date is None:
+        r0, r1 = _pair("real13", 13)
+        assert r1["time"][0] - r0["time"][0] == 394.5 * DAY, (
+            r1["time"][0] - r0["time"][0])
+
+
+def test_resume_across_the_seam_equals_the_uncut_run(tmp_path):
+    """A run from 320 d (after the November centre) cut at a checkpoint
+    after the seam (370 d) and resumed equals the uncut run bit for bit;
+    both segments carry the exact period, and the uncut run equals the
+    doubled reference from the same start."""
+    mode = ModeConfig(Fdrift2D=False, Fdrift3D=True)
+    num = NumericsConfig(dt=DAY, integrator="rk2", uv_interp="barycentric",
+                         w_interp="barycentric", temporal_interp=True,
+                         output_freq=1)
+    t_start = 320 * DAY
+
+    def _open(data):
+        mesh = _quiet(Fesom14Reader.load_mesh,
+                      MeshConfig(type="fesom14", meshpath=str(data)),
+                      mode_cfg=mode)
+        return mesh, _quiet(Fesom14Reader.open_dataset, str(data),
+                            mode_cfg=mode)
+
+    def _go(mesh, ds, name, state, n, step0, idx0, on_exhausted):
+        ft, fdt = extract_time_info(ds)
+        path = str(tmp_path / f"{name}.nc")
+        w = TrajectoryWriter(path, state.n_particles).open()
+        try:
+            _quiet(tracking.run_single_realization,
+                   mesh, ds, Fesom14Reader, state, mode, num,
+                   start_time_idx=idx0, n_steps=n,
+                   n_time_total=ds.sizes["time"], on_exhausted=on_exhausted,
+                   writer=w, checkpoint_freq=10, temporal_interp=True,
+                   file_times=ft, file_dt=fdt,
+                   sim_time_start=t_start + step0 * DAY, start_step_i=step0)
+        finally:
+            w.close()
+        return path
+
+    mesh, ds = _open(_monthly_data(tmp_path / "year"))
+    mesh2, ds2 = _open(_monthly_data(tmp_path / "twice", copies=2))
+    lon, lat, z = (np.array(c, dtype=np.float64) for c in zip(*SEEDS))
+    init = make_state(lon, lat, z)
+    init = init.replace(nearest_node=find_nearest_nodes(mesh, lon, lat))
+    try:
+        whole = _go(mesh, ds, "whole", init, 60, 0, 10, "cycle")
+        a = _go(mesh, ds, "a", init, 50, 0, 10, "cycle")
+        r = load_restart(a)
+        n = r["step_i"] + 1
+        assert n == 50
+        b = _go(mesh, ds, "b", r["state"], 10, n, r["file_idx"], "cycle")
+        ref = _go(mesh2, ds2, "ref", init, 60, 0, 10, "stop")
+    finally:
+        ds.close()
+        ds2.close()
+    tw, ta, tb = (load_trajectories(p) for p in (whole, a, b))
+    assert_bitwise(np.concatenate([ta["time"], tb["time"]]), tw["time"],
+                   "time")
+    for k in ("lon", "lat", "z", "status"):
+        assert_bitwise(np.concatenate([ta[k], tb[k]], axis=1), tw[k], k)
+    assert _period(whole) == 365 * DAY
+    assert _period(b) == 365 * DAY
+    want = load_trajectories(ref)
+    _assert_doubled_reference(tw, want)
+    assert np.array_equal(tw["time"], want["time"])
+    assert np.ptp(tw["lon"]) > 0.01                       # it moves
+
+
+@pytest.mark.parametrize("variant", ["prefetch", "pchip"])
+def test_run_variants(tmp_path, monkeypatch, variant):
+    """Prefetched reads: under ``cycle`` the prefetch is forced to one
+    record, so the window path is pinned on the doubled ``stop`` reference
+    (its windows carry the averaging windows) — the same run as without
+    prefetch.  PCHIP in time with ``cycle``: the run goes through the seam
+    (where the bracket falls back to linear) with every record finite and
+    the exact period."""
+    num = {"dt": DAY, "n_steps": 450}
+    if variant == "prefetch":
+        twice = _year_world(tmp_path, copies=2)
+        kw = dict(calendar="noleap", n_rec=24, time_stamp="centre",
+                  time_window="calendar_month")
+        ref, _ = _case(tmp_path, twice, "ref", _month_stamps("centre", 2),
+                       numerics=num, **kw)
+        reader = get_reader("fesom2")
+        read = reader.read_velocities
+        windows = []
+
+        def _spy(ds, timestep, *args, **kwargs):
+            if ds.sizes["time"] <= 3:                     # a prefetch window
+                windows.append(set(ds.coords))
+            return read(ds, timestep, *args, **kwargs)
+
+        with monkeypatch.context() as m:
+            m.setattr(reader, "read_velocities", staticmethod(_spy))
+            got, _ = _case(tmp_path, twice, "prefetch",
+                           _month_stamps("centre", 2),
+                           numerics={**num, "prefetch_size": 3}, **kw)
+        _same_run(got.data.output_path, ref.data.output_path)
+        from kelp.readers import TIME_WINDOWS
+        assert windows and all(TIME_WINDOWS in c for c in windows), windows
+        return
+    world = _year_world(tmp_path)
+    cfg, _ = _case(tmp_path, world, "pchip", _month_stamps("start"),
+                   calendar="noleap", n_rec=12, time={"on_exhausted": "cycle"},
+                   numerics={**num, "temporal_reconstruction": "pchip"},
+                   time_stamp="start", time_window="calendar_month")
+    got = load_trajectories(cfg.data.output_path)
+    assert got["time"].shape == (450,)
+    for key in ("time", "lon", "lat", "z"):
+        assert np.isfinite(got[key]).all(), key
+    assert _period(cfg.data.output_path) == 365 * DAY
+
+
+def test_start_date_before_the_first_centre_is_refused(tmp_path):
+    """1 January with monthly means lies before the first record time (the
+    January centre): refused as a date outside the record times, as before
+    the exact period (a cycled run starts at the first centre or later)."""
+    data = _monthly_data(tmp_path / "data")
+    cfg = _timed(_cfg(tmp_path, data=data, out="early.nc"),
+                 start_date="2001-01-01T00:00", n_steps=2,
+                 on_exhausted="cycle")
+    with pytest.raises(ValueError) as info:
+        _run(cfg)
+    assert "start_date" in str(info.value), str(info.value)
+    assert not Path(cfg.data.output_path).exists()
+
+
+# ---------------------------------------------------------------------------
+# equal windows and axes without known windows: the legacy period
+# ---------------------------------------------------------------------------
+
+#: records 3600.1 s apart (seconds since 1958-01-01)
+FRAC = np.arange(6, dtype=np.float64) * 3600.1
+
+
+def _legacy_run(tmp_path, case):
+    """Run one legacy case; return its config."""
+    cyc = {"on_exhausted": "cycle"}
+    if case == "fesom14_daily":
+        cfg = _timed(_cfg(tmp_path, data=_data(tmp_path / "daily"),
+                          out=f"{case}.nc"), n_steps=9, on_exhausted="cycle")
+        _run(cfg)
+        return cfg
+    if case == "mean_monthly":
+        cfg, _ = _case(tmp_path, _year_world(tmp_path), case,
+                       MONTH_EDGES[1:] * DAY, calendar="noleap", n_rec=12,
+                       time=cyc, numerics={"dt": DAY, "n_steps": 400},
+                       time_averaging="mean")
+        return cfg
+    world = _world(tmp_path)
+    six_h = {"dt": DAY / 4, "n_steps": 32}
+    if case == "day":
+        cfg, _ = _case(tmp_path, world, case, STAMPS["start"], time=cyc,
+                       numerics=six_h, time_stamp="start",
+                       time_window="calendar_day")
+    elif case == "frac_interp":
+        cfg, _ = _case(tmp_path, world, case, FRAC, time=cyc,
+                       numerics={"dt": 900.0, "n_steps": 32},
+                       time_stamp="start", time_window="3600.1 s")
+    elif case == "frac_discrete_back":
+        cfg, _ = _case(tmp_path, world, case, FRAC, interp=False,
+                       time={"on_exhausted": "cycle", "start_time_idx": 5},
+                       numerics={"dt": 3600.1, "n_steps": 8},
+                       mode={"time_dir": -1.0}, time_stamp="start",
+                       time_window="3600.1 s")
+    elif case == "mean_daily":
+        cfg, _ = _case(tmp_path, world, case, STAMPS["end"], time=cyc,
+                       numerics=six_h, time_averaging="mean")
+    else:
+        raise AssertionError(case)
+    return cfg
+
+
+@pytest.mark.parametrize("case", ["day", "frac_interp", "frac_discrete_back",
+                                  "fesom14_daily", "mean_daily",
+                                  "mean_monthly"])
+def test_equal_windows_and_legacy_axes_keep_the_legacy_period(tmp_path, case):
+    """Windows of equal length (calendar days, 3600.1 s, FESOM 1.4 daily
+    bounds) and axes without known windows (``time_averaging: mean``, daily
+    and monthly) keep the legacy period, the span of the run's records plus
+    the last interval, computed as before; the dataset opened as the run
+    opens it gives ``exact_cycle(...) is None``.  The runs come first and
+    the new names are imported after them, so these outputs can be compared
+    bit for bit with the code before the exact period."""
+    cfg = _legacy_run(tmp_path, case)
+    out = cfg.data.output_path
+    # the run completes, and it is longer than one period (it wraps)
+    assert load_trajectories(out)["time"].shape == (cfg.time.n_steps,)
+    assert cfg.time.n_steps * cfg.numerics.dt > _period(out)
+    from kelp.readers import _open_run_dataset, exact_cycle
+    reader = get_reader(cfg.mesh.type)
+    kw = ({"mode_cfg": cfg.mode}
+          if "mode_cfg" in inspect.signature(reader.load_mesh).parameters
+          else {})
+    mesh = _quiet(reader.load_mesh, cfg.mesh, **kw)
+    ds = _quiet(_open_run_dataset, reader, mesh, cfg)
+    try:
+        ft, _ = extract_time_info(ds)
+        n = ds.sizes["time"]
+        if case.startswith("mean_"):
+            ft = tracking._shift_to_midpoints(ft)
+        assert exact_cycle(ds, ft, n) is None
+    finally:
+        ds.close()
+    assert len(ft) == n
+    assert _period(out) == float(ft[-1] - ft[0] + (ft[-1] - ft[-2]))
