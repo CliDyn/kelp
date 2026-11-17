@@ -82,8 +82,12 @@ refuses) or a list; several files per grid are joined along time (each file may
 have its own time epoch; the joined axis must be strictly increasing; grid_U/V
 must share grid_T's time axis). Velocity names `uo`/`vozocrtx`, `vo`/`vomecrty`
 are found by alias, others by `mode.var_u`/`var_v`; `sample_vars` take exact
-names. `time_averaging`, or `time_stamp`/`time_window`, set the record times as
-for every reader.
+names. Record times are set as for every reader. NEMO/XIOS stamps a mean at the
+CENTRE of its averaging window (`time_counter` == `time_centered`), so for means
+use `time_stamp: centre` with `time_window` (`calendar_month`, `"5 d"`, ...);
+`time_averaging: mean` assumes window-end stamps and would place the records
+half a window early. Snapshots: `time_averaging: instant`, or `time_stamp:
+instant` with the cadence as `time_window`.
 
 Land values in the velocity files (0 or NaN) are irrelevant: the faces a
 `tmask` closes are zeroed from the mask, never from the file.

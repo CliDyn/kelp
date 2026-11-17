@@ -27,9 +27,13 @@ data:
   ncinput: path/to/EXP_grid_T.nc     # thetao, so, (e3t: z*/vvl check)
   inicloud: particles_3d.dat
   output_path: ./.tmp/nemo_tracks_3d.zarr
-  time_averaging: mean
+  # NEMO/XIOS stamps a record at the CENTRE of its averaging window (time_counter ==
+  # time_centered), so say so; `time_averaging: mean` would shift it half a window early.
+  time_stamp: centre
+  time_window: calendar_month            # monthly means; "5 d" etc. for fixed windows
+                                         # (snapshots: time_stamp: instant + the cadence)
 
 time:
   start_time_idx: 0
   n_steps: 720
-  on_exhausted: cycle
+  on_exhausted: stop           # cycle is refused with calendar_month windows

@@ -37,7 +37,7 @@ data:
   # ncinput_v: path/to/EXP_V_*.nc
   inicloud: particles.dat                # seeds: "lon lat [depth] [release_sec]"
   output_path: ./.tmp/nemo_tracks.zarr
-  time_averaging: instant                # snapshots; `mean` for window-end stamped means
+  time_averaging: instant                # snapshots; means: time_stamp: centre + time_window (XIOS stamps window centres)
 
 time:
   start_time_idx: 0

@@ -77,9 +77,11 @@ return the T-cell value, NaN on land.
 - **Calendars**: XIOS spellings `360d`, `365d`, `366d` are accepted and mapped
   to `360_day`, `noleap`, `all_leap`. A 360-day run starts with the model's
   dates: use `time.start_date` in the same calendar, and a record step that is
-  a whole number of days (`time_averaging`: monthly means are stamped at
-  month end, `mean` for window-end stamps; a start-stamped store needs
-  `time_stamp: start`).
+  a whole number of days (NEMO/XIOS stamps a mean at the CENTRE of its window,
+  `time_counter == time_centered`: use `time_stamp: centre` + `time_window:
+  calendar_month` (or e.g. `"5 d"`), not `time_averaging: mean`, which assumes
+  window-end stamps and places records half a window early; snapshots:
+  `time_stamp: instant` + `time_window` = the cadence).
 - **Stale halos** (older NEMO, copies in `e3t_0`, u, v): a halo or fold copy that
   differs from its canonical point refuses the mesh or the record; it means a
   wrong grid file for the output, not a kelp problem.
@@ -112,7 +114,7 @@ data:
   # ncinput_v: /path/EXP_V_*.nc
   inicloud: seeds.dat
   output_path: ./.tmp/nemo_tracks.zarr
-  time_averaging: instant               # or mean for window-end means
+  time_averaging: instant               # means: time_stamp: centre + time_window instead
 time: {start_time_idx: 0, n_steps: 240, on_exhausted: stop}
 ```
 
