@@ -56,14 +56,14 @@ def test_domain_cfg_refusals(tmp_path, kw, match):
         _load(_domain_cfg(tmp_path, **kw))
 
 
-def _with_misf(tmp_path, wet_val, land_val):
+def _with_misf(tmp_path, wet_val, land_val, draft=0.0):
     import xarray as xr
     p = _domain_cfg(tmp_path, tmask=True)
     ds = xr.open_dataset(p).load()
     ds.close()
     m = np.where(np.asarray(ds["bottom_level"]) > 0, wet_val, land_val)
     ds["misf"] = (("y", "x"), m)
-    ds["isfdraft"] = (("y", "x"), np.where(m > 0, 0.0, 50.0) * (wet_val == 99))
+    ds["isfdraft"] = (("y", "x"), np.where(np.asarray(ds["bottom_level"]) > 0, draft, 0.0))
     p.unlink()
     ds.to_netcdf(p)
     return p
@@ -77,6 +77,11 @@ def test_misf_presence_and_land_values_are_not_cavities(tmp_path):
 def test_misf_above_one_at_wet_columns_is_a_cavity(tmp_path):
     with pytest.raises(NotImplementedError, match="ice-shelf cavities"):
         _load(_with_misf(tmp_path, 2, 0))
+
+
+def test_isfdraft_at_wet_columns_is_a_cavity(tmp_path):
+    with pytest.raises(NotImplementedError, match="ice-shelf cavities"):
+        _load(_with_misf(tmp_path, 1, 0, draft=50.0))
 
 
 # --- several files per grid ---------------------------------------------------

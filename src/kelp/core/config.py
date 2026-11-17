@@ -904,6 +904,14 @@ def load_config(path: str) -> AppConfig:
     """
     config_path = Path(path).resolve()
     data = _validate_config_dict(_load_yaml(config_path))
+    # AppConfig cannot tell an explicit ``uv_interp: leastsq`` from the default,
+    # so the contradiction with ``nemo_grid: cgrid`` is refused on the raw dict
+    named = (data.get("numerics") or {}).get("uv_interp")
+    if ((data.get("mesh") or {}).get("nemo_grid") == "cgrid"
+            and named is not None and named != "cgrid"):
+        raise ValueError(
+            "mesh.nemo_grid: cgrid uses numerics.uv_interp: cgrid (set "
+            f"automatically); got {named!r}")
     cfg = AppConfig(
         mode=_build_section(ModeConfig, data, "mode"),
         numerics=_build_section(NumericsConfig, data, "numerics"),

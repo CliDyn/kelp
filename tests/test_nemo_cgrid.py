@@ -684,3 +684,21 @@ def test_cgrid_mesh_derives_uv_interp_and_refuses_contradictions():
     assert mk(uv_interp="cgrid").numerics.uv_interp == "cgrid"
     with pytest.raises(ValueError, match="uv_interp: cgrid"):
         mk(uv_interp="barycentric")
+
+
+@pytest.mark.parametrize("named,ok", [("leastsq", False), ("barycentric", False), ("cgrid", True), (None, True)])
+def test_load_config_refuses_an_explicit_other_uv_interp_with_cgrid(tmp_path, named, ok):
+    from kelp.core.config import load_config
+    num = f", uv_interp: {named}" if named else ""
+    p = tmp_path / "c.yaml"
+    p.write_text(f"""mode: {{}}
+numerics: {{dt: 3600.0{num}}}
+mesh: {{type: nemo, meshpath: m.nc, nemo_grid: cgrid}}
+data: {{path: d.nc}}
+time: {{n_steps: 1}}
+""")
+    if ok:
+        assert load_config(str(p)).numerics.uv_interp == "cgrid"
+    else:
+        with pytest.raises(ValueError, match="uv_interp: cgrid"):
+            load_config(str(p))
