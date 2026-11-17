@@ -113,7 +113,8 @@ Land values in the velocity files (0 or NaN) are irrelevant: the faces a
   `u e2u e3u`, `v e1v e3v` (integrated up from 0 at the floor); it equals the
   model's W to float32 rounding on ORCA05. A `grid_W` file is never read (`ncinput_w` is
   refused); the data-gated tests open it themselves to compare. W is linear in the
-  fractional level inside a cell.
+  fractional level inside a cell. The output `vel_w` is the physical dz/dt in m/s
+  (the level rate times the start cell's thickness).
 - **Surface.** `s` is clamped at 0 (the continuity W leaves a small surface
   residual, as the model's free surface does); never at the bottom.
 - **z\*/vvl output.** If `e3t` in grid_T differs from `e3t_0` the reader warns
