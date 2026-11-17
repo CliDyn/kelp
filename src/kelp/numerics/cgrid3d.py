@@ -40,13 +40,12 @@ _BUTCHER = {"euler": ((0.0,), (1.0,)),
             "rk4": ((0.0, 0.5, 0.5, 1.0), (1 / 6, 1 / 3, 1 / 3, 1 / 6))}
 
 
-def _level_coord(mesh, lon, lat, nn, z=None, s=None):
-    """Metres <-> fractional level in the cell containing ``(lon, lat)``:
+def _level_coord(mesh, e, ok, z=None, s=None):
+    """Metres <-> fractional level in the cell ``e`` (``ok``: found):
     ``z -> s`` (given ``z``) or ``s -> z`` (given ``s``).  The cell's own
     thickness is ``e3b`` at its bottom level (``shrunk``; ``porous``: the
     reference layer there too), else the reference layer."""
     zw = mesh._cgrid_zw
-    e, ok = find_containing_elements(mesh, lon, lat, nn)
     c = np.where(ok, mesh._cgrid_elem_ji[e, 0] * mesh._structured_shape[1]
                  + mesh._cgrid_elem_ji[e, 1], 0)
     nl, e3b = mesh._cgrid_nlev_raster.reshape(-1)[c], mesh._cgrid_e3b[c]
@@ -66,8 +65,9 @@ def cgrid3d_step(state, vel, mesh, dt, time_dir, scheme, kwargs):
     stages = I._make_stage_vels(vel, kwargs.get("vel_next"),
                                 kwargs.get("dt_to_next"), dt, a)
     ok = alive.copy()
-    s0 = _level_coord(mesh, state.lon, state.lat, find_nearest_nodes(mesh, state.lon, state.lat),
-                      z=state.z)
+    nn0 = find_nearest_nodes(mesh, state.lon, state.lat)     # fresh: a carried nearest_node may be stale (-1)
+    e0, ok0 = find_containing_elements(mesh, state.lon, state.lat, nn0)   # start cell: s0 and stage 1
+    s0 = _level_coord(mesh, e0, ok0, z=state.z)
     ks, first = [], None
     for n, sv in enumerate(stages):
         if n:
@@ -76,8 +76,9 @@ def cgrid3d_step(state, vel, mesh, dt, time_dir, scheme, kwargs):
             s = s0 + a[n] * ks[-1][2]
         else:
             lon, lat, s = state.lon, state.lat, s0
-        U, V, W, ok_n = interp_cgrid3d(lon, lat, s, ok, mesh, sv,
-                                       find_nearest_nodes(mesh, lon, lat), time_dir)
+        U, V, W, ok_n = interp_cgrid3d(
+            lon, lat, s, ok, mesh, sv, nn0 if n == 0 else find_nearest_nodes(mesh, lon, lat),
+            time_dir, elems=np.where(ok0, e0, -1) if n == 0 else None)
         if n == 0:
             first = (U, V, W)
         ok = ok & ok_n
@@ -87,17 +88,18 @@ def cgrid3d_step(state, vel, mesh, dt, time_dir, scheme, kwargs):
     lat = np.where(ok, clamp_lat(state.lat + d[1]), state.lat)
     s = np.where(ok, np.maximum(s0 + d[2], 0.0), s0)
     nn = find_nearest_nodes(mesh, lon, lat)
-    in_dom = I._check_in_domain(mesh, lon, lat, nn)
+    e1, in_dom = find_containing_elements(mesh, lon, lat, nn)       # end cell: the domain check and s -> z
     interp_failed = alive & ~ok
     domain_failed = ok & ~in_dom
     failed = interp_failed | domain_failed
     lon, lat, s = (np.where(failed, o, n_) for o, n_ in
                    ((state.lon, lon), (state.lat, lat), (s0, s)))
-    nn = np.where(failed, find_nearest_nodes(mesh, state.lon, state.lat), nn)
+    nn = np.where(failed, nn0, nn)
     status = state.status.copy()
     status[failed] = ParticleStatus.OUTSIDE
     # unchanged s keeps z (a particle at rest, or on land, is not re-measured)
-    z = np.where(s == s0, state.z, _level_coord(mesh, lon, lat, nn, s=s))
+    z = np.where(s == s0, state.z,
+                 _level_coord(mesh, np.where(failed, e0, e1), np.where(failed, ok0, in_dom), s=s))
     reason = I._update_failure_reason(
         state.failure_reason, {FailureReason.INTERPOLATION_FAILED: interp_failed,
                                FailureReason.OUT_OF_BOUNDS: domain_failed})

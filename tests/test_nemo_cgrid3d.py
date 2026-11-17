@@ -220,7 +220,7 @@ def test_zstar_thicknesses_warn_and_use_the_reference():
 
 
 def test_porous_changes_metres_only_in_partial_bottom_cells():
-    from kelp.core.mesh import find_nearest_nodes
+    from kelp.core.mesh import find_containing_elements, find_nearest_nodes
     from kelp.numerics.cgrid3d import _level_coord
     nl = np.full((NY, NX), K); nl[2:4, 3:6] = 3
     e3b = np.full((NY, NX), DZ); e3b[2:4, 3:6] = 4.0
@@ -238,7 +238,7 @@ def test_porous_changes_metres_only_in_partial_bottom_cells():
         st = make_state(lon, lat, z0)
         for _ in range(5):
             st = cgrid3d_step(st, vel, mesh, 60.0, 1.0, "rk4", {})
-        s = _level_coord(mesh, st.lon, st.lat, find_nearest_nodes(mesh, st.lon, st.lat), z=st.z)
+        s = _level_coord(mesh, *find_containing_elements(mesh, st.lon, st.lat, find_nearest_nodes(mesh, st.lon, st.lat)), z=st.z)
         res[pc] = (st, s)
     (a, sa), (b, sb) = res["shrunk"], res["porous"]
     assert (a.lon == b.lon).all() and (a.lat == b.lat).all()    # dynamics unchanged
