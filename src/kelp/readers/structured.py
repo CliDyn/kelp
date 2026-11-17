@@ -16,6 +16,8 @@ and feed this builder.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional, Tuple
 
 import numpy as np
@@ -129,6 +131,193 @@ def build_structured_mesh(lon2d, lat2d, wet_mask, *,
     mesh._structured_node_id = node_id
     build_search(mesh)
     return mesh
+
+
+# --- C-grid raster layouts: E-W periodicity and the north fold -----------------
+# NEMO's global grids repeat points: E-W halo columns (col 0 == col nx-2, col
+# nx-1 == col 1) and, north of the last real row, a fold that maps every point
+# to its image under a 180 degree rotation about the fold centre (T-point pivot:
+# ORCA2 / ORCA025 / ORCA12; F-point pivot: ORCA05 / ORCA1).  The reader brings
+# every raster to ONE canonical form -- NEMO's halo form: halo columns when
+# periodic, the halo row above the fold row when folded, every copy overwritten
+# from its canonical point (the vector sign flips across the fold) -- so the
+# kernels, the thickness / W helpers and the ring read each face as a plain
+# raster neighbour, at the seam and across the fold alike.
+_KIND_OFFSET = {"T": (0, 0), "U": (0, 1), "V": (1, 0), "F": (1, 1)}   # (oy, ox) on the doubled lattice
+
+
+@dataclass(frozen=True)
+class CgridLayout:
+    """What a raw ``(ny, nx)`` NEMO raster contains and its canonical form.
+
+    ``halo_cols``: the input carries the E-W halo columns; ``halo_row``: it
+    carries the north halo row above the fold row; ``periodic``: east-west
+    periodic (always with ``halo_cols`` or ``fold``); ``fold``: ``None``,
+    ``"T"`` or ``"F"`` (the pivot type).  The canonical raster has the halo
+    columns (padded when absent) and the halo row (padded when absent);
+    ``J`` is its fold row (the last real T row)."""
+    raw_shape: Tuple[int, int]
+    halo_cols: bool = False
+    halo_row: bool = False
+    periodic: bool = False
+    fold: Optional[str] = None
+
+    def __post_init__(self):
+        if self.fold not in (None, "T", "F"):
+            raise ValueError(f"fold must be None, 'T' or 'F', got {self.fold!r}")
+        if (self.halo_cols or self.fold) and not self.periodic:
+            raise ValueError("halo columns and a fold imply E-W periodicity")
+        if self.halo_row and not self.fold:
+            raise ValueError("a halo row needs a fold")
+
+    @property
+    def pad_cols(self) -> bool:
+        return self.periodic and not self.halo_cols
+
+    @property
+    def pad_row(self) -> bool:
+        return self.fold is not None and not self.halo_row
+
+    @property
+    def shape(self) -> Tuple[int, int]:
+        ny, nx = self.raw_shape
+        return ny + self.pad_row, nx + 2 * self.pad_cols
+
+    @property
+    def c0(self) -> int:           # first interior column
+        return 1 if self.periodic else 0
+
+    @property
+    def ni(self) -> int:           # periodic width (0 = not periodic)
+        return self.shape[1] - 2 if self.periodic else 0
+
+    @property
+    def J(self) -> int:            # fold row = last real T row
+        return self.shape[0] - 2 if self.fold else self.shape[0] - 1
+
+    def label(self) -> str:
+        """One line for the log, ``kelp info`` and the output metadata."""
+        parts = [f"{self.fold}-pivot north fold" + (" (halo row)" if self.halo_row else " (halo-free, padded)")
+                 if self.fold else "no fold"]
+        if self.periodic:
+            parts.append("E-W periodic" + (" (halo columns)" if self.halo_cols else " (halo-free, padded)"))
+        edges = "S" + ("" if self.fold else ", N") + ("" if self.periodic else ", E, W")
+        shape = ("" if self.shape == tuple(self.raw_shape) else
+                 f"; {self.raw_shape[0]}x{self.raw_shape[1]} -> {self.shape[0]}x{self.shape[1]}")
+        return f"{', '.join(parts)}; raster edges open to the outside: {edges}{shape}"
+
+
+def _centre(layout: CgridLayout, kind: str):
+    """Fold centre ``(Y2, X2)``: the mirror of ``kind`` point ``(j, i)`` is
+    ``(Y2 - j - oy, X2 - i - ox)`` (columns modulo the period)."""
+    f = layout.fold == "F"
+    return 2 * layout.J + f, 2 * layout.c0 + layout.ni - f
+
+
+def _mirror(kind: str, j, i, layout: CgridLayout):
+    oy, ox = _KIND_OFFSET[kind]
+    Y2, X2 = _centre(layout, kind)
+    c0, ni = layout.c0, layout.ni
+    return Y2 - j - oy, c0 + ((X2 - i - ox) - c0) % ni
+
+
+def cgrid_canonical(kind: str, j, i, layout: CgridLayout):
+    """Canonical ``(j, i, sign)`` of the canonical-raster points ``(j, i)`` of
+    ``kind`` (``"T"``, ``"U"``, ``"V"``, ``"F"``): the E-W wrap, then the fold
+    (a point beyond the fold line, or on it with the larger column, maps to its
+    mirror image, ``sign = -1``: vectors flip there).  Idempotent."""
+    j = np.asarray(j, dtype=np.int64)
+    i = np.asarray(i, dtype=np.int64)
+    sign = np.ones(j.shape)
+    if layout.periodic:
+        i = layout.c0 + (i - layout.c0) % layout.ni
+    if layout.fold:
+        oy, _ = _KIND_OFFSET[kind]
+        mj, mi = _mirror(kind, j, i, layout)
+        beyond = (2 * j + oy > _centre(layout, kind)[0]) | (
+            (2 * j + oy == _centre(layout, kind)[0]) & (mi < i))
+        j, i = np.where(beyond, mj, j), np.where(beyond, mi, i)
+        sign = np.where(beyond, -1.0, 1.0)
+    return j, i, sign
+
+
+@lru_cache(maxsize=64)
+def _copy_sets(layout: CgridLayout, kind: str):
+    """``(dst, src, sign, present)``: flat canonical indices of every copy point
+    (E-W halo columns, the fold row's mirrored half, the halo row), the flat
+    index of its canonical point, the vector sign, and the mask of canonical
+    points the raw raster carries."""
+    nr, nc = layout.shape
+    ny, nx = layout.raw_shape
+    cand = np.zeros((nr, nc), dtype=bool)
+    if layout.periodic:
+        cand[:, [0, nc - 1]] = True
+    if layout.fold:
+        cand[layout.J:, :] = True
+    jj, ii = np.nonzero(cand)
+    cj, ci, s = cgrid_canonical(kind, jj, ii, layout)
+    if ((cj < 0) | (cj >= nr) | (ci < 0) | (ci >= nc)).any():
+        raise ValueError("the raster is too small for its fold / halo layout")
+    moved = (cj != jj) | (ci != ii)
+    present = np.zeros((nr, nc), dtype=bool)
+    pc = int(layout.pad_cols)
+    present[:ny, pc:pc + nx] = True
+    return ((jj * nc + ii)[moved], (cj * nc + ci)[moved], s[moved], present.reshape(-1))
+
+
+def cgrid_to_canonical(a, layout: CgridLayout, kind: str, *, vector: bool = False,
+                       check: bool = False, name: str = "raster") -> np.ndarray:
+    """Canonical float64 raster of ``a (..., ny, nx)`` (NaN / inf -> 0): padded
+    to the halo form, every copy overwritten from its canonical point (``vector``:
+    times the fold sign -- only u and v).  ``check=True`` first compares the
+    copies the raw raster carries with their canonical points (exact: NEMO
+    writes bit copies) and raises ``ValueError`` naming ``name`` on a mismatch
+    -- a stale halo, a wrong layout or the wrong grid file."""
+    a = np.asarray(a)
+    ny, nx = layout.raw_shape
+    if a.ndim < 2 or a.shape[-2:] != (ny, nx):
+        raise ValueError(f"{name}: raster shape {a.shape[-2:]} != the mesh grid {(ny, nx)}")
+    nr, nc = layout.shape
+    pc = int(layout.pad_cols)
+    out = np.zeros(a.shape[:-2] + (nr, nc))
+    out[..., :ny, pc:pc + nx] = a
+    np.nan_to_num(out, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    flat = out.reshape(a.shape[:-2] + (-1,))
+    dst, src, sgn, present = _copy_sets(layout, kind)
+    if not vector:
+        sgn = np.ones_like(sgn)
+    if check:
+        k = present[dst]
+        bad = flat[..., dst[k]] != flat[..., src[k]] * sgn[k]
+        if bad.any():
+            first = np.argwhere(bad)[0]
+            d = int(dst[k][first[-1]])
+            diff = np.abs(flat[..., dst[k]] - flat[..., src[k]] * sgn[k])
+            raise ValueError(
+                f"{name}: {int(bad.sum())} halo / fold copies differ from their "
+                f"canonical points (max |diff| {float(diff.max()):.3g}, first at "
+                f"{tuple(int(x) for x in first[:-1]) + divmod(d, nc)} of the "
+                f"canonical raster): stale copies, a wrong layout, or a field "
+                f"from another grid file")
+    flat[..., dst] = flat[..., src] * sgn
+    return out
+
+
+def fold_pivot_cells(layout: CgridLayout) -> np.ndarray:
+    """Canonical-raster mask of the cells at a fold pivot (their mirror image is
+    themselves): the self-mapped T cells (T-point pivot, degenerate quads) or the
+    cells with a self-mapped F corner (F-point pivot).  Must be land."""
+    piv = np.zeros(layout.shape, dtype=bool)
+    if not layout.fold:
+        return piv
+    J, c0, ni = layout.J, layout.c0, layout.ni
+    i = np.arange(c0, c0 + ni)
+    mj, mi = _mirror(layout.fold, J, i, layout)
+    hit = i[(mj == J) & (mi == i)]
+    for k in hit:
+        for c in ((k,) if layout.fold == "T" else (k, k + 1)):
+            piv[J, c0 + (c - c0) % ni] = True
+    return piv
 
 
 def _unit_xyz(lon_deg, lat_deg):
