@@ -335,7 +335,7 @@ SAME_POINT_CHORD = 1e-6
 def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
                      layout: Optional[CgridLayout] = None, ring: bool = True,
                      nlev2d=None, zw=None, area=None, e3b=None, e3u0=None, e3v0=None,
-                     name: str = "nemo",
+                     name: str = "nemo", partial_cells: str = "shrunk",
                      r_earth: Optional[float] = None) -> Mesh:
     """Build the exact-C-grid quad :class:`Mesh`: nodes = F-points, elements =
     wet T-cells (the cell a ``numerics.uv_interp: cgrid`` particle lives in).
@@ -528,6 +528,9 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
     mesh._structured_shape = (ny, nx)
     mesh._cgrid = True
     mesh._cgrid_layout = layout
+    if partial_cells not in ("shrunk", "porous"):
+        raise ValueError(f"partial_cells must be 'shrunk' or 'porous', got {partial_cells!r}")
+    mesh._cgrid_partial = partial_cells
     mesh._cgrid_elem_ji = np.stack([ej, ei], axis=1).astype(np.int64)
     mesh._cgrid_corners = corners
     mesh._cgrid_n_wet = n_wet

@@ -553,6 +553,7 @@ class NemoReader:
                   "(pole-safe)")
         mesh = build_cgrid_mesh(glamf, gphif, wet, depth2d=depth2d, name="nemo",
                                 layout=layout,
+                                partial_cells=getattr(mesh_cfg, "nemo_partial_cells", "shrunk"),
                                 r_earth=getattr(mesh_cfg, "r_earth", None),
                                 **widths, **vert)
         mesh.rotation_angles = angles

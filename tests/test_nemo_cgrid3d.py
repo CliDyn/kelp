@@ -25,7 +25,7 @@ def _zps(nl, e3b):
     return e3t, e3u, e3v
 
 
-def _box(nlev=None, e3b=None):
+def _box(nlev=None, e3b=None, partial="shrunk"):
     """Closed box, wet cells j = 1..NY-2, i = 1..NX-2 (the rest dry), K layers
     (or ``nlev`` (NY, NX) levels per column, ``e3b`` the bottom-cell thicknesses)."""
     (flon, flat), _ = _grid(NY, NX)
@@ -36,7 +36,7 @@ def _box(nlev=None, e3b=None):
     eb = np.full((NY, NX), DZ) if e3b is None else e3b
     _, e3u, e3v = _zps(nl, eb)
     mesh = build_cgrid_mesh(flon, flat, nl > 0, e2u=e2u, e1v=e1v, nlev2d=nl, zw=ZW, e3b=eb,
-                            e3u0=e3u, e3v0=e3v, area=e2u * e1v)
+                            e3u0=e3u, e3v0=e3v, area=e2u * e1v, partial_cells=partial)
     return mesh, e2u, e1v, nl
 
 
@@ -213,3 +213,41 @@ def test_zstar_thicknesses_warn_and_use_the_reference():
     with warnings.catch_warnings():
         warnings.simplefilter("error")                    # reference thicknesses: silent
         NemoReader.prepare(mesh, ds.assign(e3t_file=(dims, np.stack([ref, ref]))))
+
+
+def test_porous_changes_metres_only_in_partial_bottom_cells():
+    from kelp.core.mesh import find_nearest_nodes
+    from kelp.numerics.cgrid3d import _level_coord
+    nl = np.full((NY, NX), K); nl[2:4, 3:6] = 3
+    e3b = np.full((NY, NX), DZ); e3b[2:4, 3:6] = 4.0
+    rng = np.random.default_rng(2)
+    kk = np.arange(K)[:, None, None]
+    u = 1e-3 * rng.normal(size=(K, NY, NX)) * (kk < nl)
+    v = 1e-3 * rng.normal(size=(K, NY, NX)) * (kk < nl)
+    lon = np.full(3, 3.5 * D); lat = np.full(3, 2.5 * D)   # T(3, 4): nlev 3, e3b 4
+    s0 = np.array([0.5, 2.25, 2.75])               # a full cell, then two inside the bottom cell
+    res = {}
+    for pc, e3 in (("shrunk", 4.0), ("porous", DZ)):
+        mesh, e2u, e1v, _ = _box(nl, e3b, pc)
+        vel = _vel(mesh, u, v, _w(mesh, u, v, e2u, e1v))
+        z0 = np.array([5.0, 20 + 0.25 * e3, 20 + 0.75 * e3])   # the same s in either metres
+        st = make_state(lon, lat, z0)
+        for _ in range(5):
+            st = cgrid3d_step(st, vel, mesh, 60.0, 1.0, "rk4", {})
+        s = _level_coord(mesh, st.lon, st.lat, find_nearest_nodes(mesh, st.lon, st.lat), z=st.z)
+        res[pc] = (st, s)
+    (a, sa), (b, sb) = res["shrunk"], res["porous"]
+    assert (a.lon == b.lon).all() and (a.lat == b.lat).all()    # dynamics unchanged
+    assert np.allclose(sa, sb, atol=1e-12)                      # same s-trajectories
+    assert a.z[0] == b.z[0] or abs(a.z[0] - b.z[0]) < 1e-12 * 10  # full cell: same metres
+    assert np.allclose(a.z[1:], 20 + (sa[1:] - 2) * 4.0)        # shrunk: top + s*e3t_0
+    assert np.allclose(b.z[1:], 20 + (sb[1:] - 2) * DZ)         # porous: top + s*e3t_1d
+
+
+def test_partial_cells_refused_when_invalid():
+    import pytest
+    from kelp.core.config import MeshConfig
+    with pytest.raises(ValueError, match="nemo_partial_cells"):
+        MeshConfig(type="nemo", nemo_grid="cgrid", nemo_partial_cells="bogus")
+    with pytest.raises(ValueError, match="nemo_partial_cells"):
+        MeshConfig(type="fesom2", nemo_partial_cells="porous")

@@ -514,6 +514,10 @@ class MeshConfig:
     # uv_interp barycentric) or "cgrid" (exact Arakawa C-grid: F-point cells,
     # needs glamf/gphif in meshpath, uv_interp cgrid).
     nemo_grid: str = "tpoint"
+    # NEMO cgrid 3-D: metres of the fractional level in a partial bottom cell:
+    # "shrunk" (NEMO <= 4.2: the cell spans e3t_0) or "porous" (NEMO 5: the
+    # full reference layer e3t_1d).  Only depth in metres differs.
+    nemo_partial_cells: str = "shrunk"
     # --- fesom14-only key (refused for the other mesh types) ------------
     # Euler angles [alpha, beta, gamma] (degrees, as in the run's namelist)
     # of the rotated frame a FESOM 1.4 ASCII mesh is stored in; the reader
@@ -560,6 +564,12 @@ class MeshConfig:
                 f"{self.nemo_grid!r}")
         if self.nemo_grid != "tpoint" and self.type != "nemo":
             raise ValueError("mesh.nemo_grid applies to mesh.type 'nemo' only")
+        if self.nemo_partial_cells not in ("shrunk", "porous"):
+            raise ValueError(
+                "mesh.nemo_partial_cells must be 'shrunk' or 'porous', got "
+                f"{self.nemo_partial_cells!r}")
+        if self.nemo_partial_cells != "shrunk" and self.type != "nemo":
+            raise ValueError("mesh.nemo_partial_cells applies to mesh.type 'nemo' only")
         if self.healpix_geometry not in ("dual", "pixel"):
             raise ValueError(
                 "mesh.healpix_geometry must be 'dual' or 'pixel', got "

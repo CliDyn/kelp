@@ -12,7 +12,9 @@ below the neighbour's floor.  ``state.z`` stays metres everywhere else: ``z``
 measured on ``mesh._cgrid_zw`` (cumulative ``e3t_1d``; a diagnostic of ``s``,
 the dynamics use the thicknesses), plus the partial bottom cell's own
 thickness; depth in metres therefore jumps at a face between cells of
-different bottom thickness (bottom level only).
+different bottom thickness (bottom level only).  ``mesh.nemo_partial_cells:
+porous`` (NEMO 5) measures the bottom cell on the full reference layer instead
+of ``e3t_0``: only metres change, never ``s``, lon or lat.
 
 Each stage reads ``(U, V, ds/dt)`` from ONE containment search.  No stage
 clamping, no pull-back: a stage or end point in a dry ring cell reads zero
@@ -41,7 +43,8 @@ _BUTCHER = {"euler": ((0.0,), (1.0,)),
 def _level_coord(mesh, lon, lat, nn, z=None, s=None):
     """Metres <-> fractional level in the cell containing ``(lon, lat)``:
     ``z -> s`` (given ``z``) or ``s -> z`` (given ``s``).  The cell's own
-    thickness is ``e3b`` at its bottom level, else the reference layer."""
+    thickness is ``e3b`` at its bottom level (``shrunk``; ``porous``: the
+    reference layer there too), else the reference layer."""
     zw = mesh._cgrid_zw
     e, ok = find_containing_elements(mesh, lon, lat, nn)
     c = np.where(ok, mesh._cgrid_elem_ji[e, 0] * mesh._structured_shape[1]
@@ -50,7 +53,7 @@ def _level_coord(mesh, lon, lat, nn, z=None, s=None):
     k = (np.searchsorted(zw, z, side="right") - 1 if s is None
          else np.floor(s).astype(int))
     k = np.clip(k, 0, len(zw) - 2)
-    e3 = np.where(k == nl - 1, e3b, zw[k + 1] - zw[k])
+    e3 = np.where((k == nl - 1) & (mesh._cgrid_partial == "shrunk"), e3b, zw[k + 1] - zw[k])
     return k + (z - zw[k]) / e3 if s is None else zw[k] + (s - k) * e3
 
 

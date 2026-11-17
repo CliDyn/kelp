@@ -3666,6 +3666,7 @@ def run_tracking(
             }
             if getattr(mesh, "_cgrid_layout", None) is not None:
                 meta["cgrid_layout"] = mesh._cgrid_layout.label()    # incl. the open edges
+                meta["nemo_partial_cells"] = mesh._cgrid_partial
             if getattr(config.mode, "Fdrift3D", False):
                 meta["w_interp"] = str(config.numerics.w_interp)
                 # the file-side W convention and the 2026-09-23 reader
