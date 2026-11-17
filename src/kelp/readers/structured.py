@@ -131,7 +131,7 @@ def build_structured_mesh(lon2d, lat2d, wet_mask, *,
     return mesh
 
 
-def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None,
+def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
                      name: str = "nemo",
                      r_earth: Optional[float] = None) -> Mesh:
     """Build the exact-C-grid quad :class:`Mesh`: nodes = F-points, elements =
@@ -151,6 +151,10 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None,
         Surface T-point land-sea mask (truthy = wet).
     depth2d : array_like (ny, nx) or None
         T-point bottom depth (m); a node takes the max over its wet neighbours.
+    e2u, e1v : array_like (ny, nx) or None
+        Model widths of the u faces (e2u) and v faces (e1v), m.  Both given:
+        the interpolator forms fluxes ``u*e2u`` / ``v*e1v`` (the model's own
+        continuity); otherwise it uses plane edge lengths.
 
     Returns
     -------
@@ -219,6 +223,16 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None,
     mesh._cgrid = True
     mesh._cgrid_elem_ji = np.stack([ej, ei], axis=1).astype(np.int64)
     mesh._cgrid_corners = corners
+    if (e2u is None) != (e1v is None):
+        raise ValueError("pass both e2u and e1v, or neither")
+    for nm, a in (("_cgrid_e2u", e2u), ("_cgrid_e1v", e1v)):
+        if a is None:
+            setattr(mesh, nm, np.empty(0, dtype=np.float64))
+        else:
+            a = np.asarray(a, dtype=np.float64)
+            if a.shape != (ny, nx) or not (a > 0).all():
+                raise ValueError(f"{nm[1:]} must be positive, shape {(ny, nx)}")
+            setattr(mesh, nm, np.ascontiguousarray(a.reshape(-1)))
     build_search(mesh)
     return mesh
 

@@ -3362,8 +3362,14 @@ def interp_edge_leastsq(
 def _interp_cgrid_core(xp, yp, nn_node, elem_hint, time_dir,
                        node_to_elems, node_to_elems_count, elem_nodes,
                        nodes_lon, nodes_lat, cgrid_corners, cgrid_ji, nx,
-                       u_f, v_f):
+                       e2u_f, e1v_f, u_f, v_f):
     """C-grid u/v at one point; ``u_f``/``v_f`` are ``(ny*nx,)`` face rasters.
+
+    ``e2u_f``/``e1v_f`` are the model face widths (same raster; empty = absent):
+    the fluxes are then ``u*e2u`` (W/E faces) and ``v*e1v`` (S/N faces), so the
+    model's discrete continuity carries over (the Jacobian stays that of the
+    local plane).  Without them the fluxes use plane edge lengths, each edge at
+    the cosine of ITS OWN mean latitude.
 
     Returns ``(U, V, ok)`` in geographic m/s (east, north), consistent with
     the integrators' ``METERS_PER_DEG_LAT`` metric.
@@ -3422,11 +3428,19 @@ def _interp_cgrid_core(xp, yp, nn_node, elem_hint, time_dir,
         xi = (0.0 - b0 - b2 * eta) / den2
     xi = min(max(xi, 0.0), 1.0)
     # edge lengths and normal fluxes (positive towards +xi / +eta)
-    LS = np.hypot(px[1] - px[0], py[1] - py[0])
-    LE = np.hypot(px[2] - px[1], py[2] - py[1])
-    LN = np.hypot(px[3] - px[2], py[3] - py[2])
-    LW = np.hypot(px[0] - px[3], py[0] - py[3])
-    U0 = uW * LW; U1 = uE * LE; V0 = vS * LS; V1 = vN * LN
+    if e2u_f.shape[0] > 0:
+        U0 = uW * e2u_f[j * nx + i - 1]; U1 = uE * e2u_f[j * nx + i]
+        V0 = vS * e1v_f[(j - 1) * nx + i]; V1 = vN * e1v_f[j * nx + i]
+    else:
+        # true edge lengths: each edge at the cosine of its mean latitude
+        L = np.empty(4)
+        for k in range(4):
+            na = int(cgrid_corners[e, k]); nb = int(cgrid_corners[e, (k + 1) % 4])
+            dl = ((nodes_lon[nb] - nodes_lon[na] + 180.0) % 360.0) - 180.0
+            cm = np.cos(0.5 * (nodes_lat[na] + nodes_lat[nb]) * DEG2RAD)
+            L[k] = np.hypot(dl * cm * M, (nodes_lat[nb] - nodes_lat[na]) * M)
+        # edges: 0 = S (c0-c1), 1 = E (c1-c2), 2 = N (c2-c3), 3 = W (c3-c0)
+        U0 = uW * L[3]; U1 = uE * L[1]; V0 = vS * L[0]; V1 = vN * L[2]
     dxdxi = (1.0 - eta) * a1 + eta * (px[2] - px[3])
     dydxi = (1.0 - eta) * b1 + eta * (py[2] - py[3])
     dxdeta = (1.0 - xi) * a2 + xi * (px[2] - px[1])
@@ -3446,14 +3460,14 @@ def _interp_cgrid_core(xp, yp, nn_node, elem_hint, time_dir,
 def _loop_interp_cgrid(P, alive_mask, lons, lats, nn_nodes, elems, time_dir,
                        node_to_elems, node_to_elems_count, elem_nodes,
                        nodes_lon, nodes_lat, cgrid_corners, cgrid_ji, nx,
-                       u_f, v_f, U, V, ok):
+                       e2u_f, e1v_f, u_f, v_f, U, V, ok):
     for i in prange(P):
         if not alive_mask[i]:
             continue
         u, v, success = _interp_cgrid_core(
             lons[i], lats[i], int(nn_nodes[i]), int(elems[i]), time_dir,
             node_to_elems, node_to_elems_count, elem_nodes, nodes_lon,
-            nodes_lat, cgrid_corners, cgrid_ji, nx, u_f, v_f)
+            nodes_lat, cgrid_corners, cgrid_ji, nx, e2u_f, e1v_f, u_f, v_f)
         U[i] = u
         V[i] = v
         ok[i] = success
@@ -3469,7 +3483,8 @@ def _cgrid_args(mesh, vel):
             f"uv_interp 'cgrid' needs uv_layout='cgrid', got {vel.uv_layout!r}")
     return (mesh.node_to_elems, mesh.node_to_elems_count, mesh.elem_nodes,
             mesh.nodes_lon, mesh.nodes_lat, mesh._cgrid_corners,
-            mesh._cgrid_elem_ji, int(mesh._structured_shape[1]))
+            mesh._cgrid_elem_ji, int(mesh._structured_shape[1]),
+            mesh._cgrid_e2u, mesh._cgrid_e1v)
 
 
 def interp_cgrid_single(xp, yp, layer, mesh, vel, node_idx,

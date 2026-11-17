@@ -73,6 +73,32 @@ def _open_nemo(path) -> xr.Dataset:
     return xr.decode_cf(raw)
 
 
+def _refuse_periodic(ds, shape) -> None:
+    """cgrid v1 treats the raster edges as walls: refuse global ORCA-type grids
+    (east-west halo columns, north-fold duplicate rows)."""
+    lon_n = _first(ds, _LON_ALIASES)
+    lat_n = _first(ds, _LAT_ALIASES)
+    if lon_n is None or lat_n is None:
+        return
+    lon = _squeeze_to_2d(ds[lon_n].values)
+    lat = _squeeze_to_2d(ds[lat_n].values)
+    ny, nx = lon.shape
+
+    def same(a, b):
+        dl = (np.asarray(a) - np.asarray(b) + 180.0) % 360.0 - 180.0
+        return bool(np.all(np.abs(dl) < 1e-6))
+    ew = nx > 4 and (same(lon[:, 0], lon[:, nx - 2]) and same(lat[:, 0], lat[:, nx - 2])
+                     and same(lon[:, nx - 1], lon[:, 1]) and same(lat[:, nx - 1], lat[:, 1]))
+    nf = ny > 4 and any(np.allclose(np.sort(lat[-1]), np.sort(lat[-k]), atol=1e-6)
+                        for k in (2, 3))
+    if ew or nf:
+        raise NotImplementedError(
+            "mesh.nemo_grid: cgrid does not support global/periodic grids yet "
+            f"({'east-west halo columns' if ew else 'north-fold duplicate row'} "
+            "detected); global ORCA (east-west wrap + north fold) is the next "
+            "step. Use a regional, closed-boundary domain.")
+
+
 def _first(ds, aliases: Sequence[str], cfg_name: Optional[str] = None):
     """Return the variable name to use: an explicit ``cfg_name`` override if set,
     else the first present alias (``None`` if no alias matches).
@@ -271,6 +297,7 @@ class NemoReader:
                 f"mesh.nemo_grid: cgrid needs glamf/gphif (F-point coordinates) "
                 f"in the mesh file {path!r}; found: {list(ds.variables)[:12]}…"
             ) from None
+        _refuse_periodic(ds, glamf.shape)
         tmask_n = _first(ds, ("tmask",))
         if tmask_n is None:
             raise KeyError(
@@ -282,8 +309,17 @@ class NemoReader:
             if dn in ds.variables:
                 depth2d = _squeeze_to_2d(ds[dn].values)
                 break
+        widths = {}
+        if "e2u" in ds.variables and "e1v" in ds.variables:
+            widths = dict(e2u=_squeeze_to_2d(ds["e2u"].values),
+                          e1v=_squeeze_to_2d(ds["e1v"].values))
+            print("  NEMO cgrid: fluxes use the model face widths e2u/e1v")
+        else:
+            print("  NEMO cgrid: e2u/e1v not in the mesh file; fluxes use plane "
+                  "edge lengths (cos at each edge's mean latitude)")
         return build_cgrid_mesh(glamf, gphif, wet, depth2d=depth2d, name="nemo",
-                                r_earth=getattr(mesh_cfg, "r_earth", None))
+                                r_earth=getattr(mesh_cfg, "r_earth", None),
+                                **widths)
 
     @staticmethod
     def open_dataset(path, v_path=None, w_path=None, mode_cfg=None) -> xr.Dataset:
