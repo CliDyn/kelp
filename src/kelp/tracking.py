@@ -39,7 +39,7 @@ from .readers import (get_reader, extract_time_info, time_axis_epoch,
                       NO_EPOCH_NOTE, _apply_max_levels,
                       _describe_record_times, _open_run_dataset,
                       _prepare_dataset, _record_time_mode,
-                      _time_metadata, _time_option_kwargs)
+                      _time_metadata, _time_option_kwargs, exact_cycle)
 
 
 # ---------------------------------------------------------------------------
@@ -1180,8 +1180,10 @@ def _record_clock_origin(*, use_tinterp, sim_time, start_time_idx, axis,
             # one record repeated with period dt (the advertised
             # forcing_cycle_period): record idx0 of the unwrapped axis
             return float(axis[0]) + float(idx0) * float(dt), True
+        # discrete mode only, which an exact cycle never reaches (refused
+        # by _refuse_discrete_exact_cycle): the legacy rule
         return _index_to_sim_time(idx0, axis, n_time_total,
-                                  on_exhausted), True
+                                  on_exhausted, cycle=None), True
     return float(idx0) * float(dt), False
 
 
@@ -1621,6 +1623,30 @@ def _check_discrete_dt(dt, temporal_interp, file_dt, file_times, n_records=None)
         "file step, or set temporal_interp: true to sub-step between records")
 
 
+def _refuse_discrete_exact_cycle(cycle) -> None:
+    """Refuse discrete mode on a cycle whose records have unequal windows.
+
+    ``cycle`` is the run's value of :func:`~kelp.readers.exact_cycle`
+    (None under ``stop`` or for the legacy rule: nothing to refuse).  A
+    ``(period, seam)`` tuple means the forcing repeats after the sum of the
+    averaging windows, with a seam unlike the record spacing; discrete mode
+    reads one record per step of ``dt`` and cannot follow it.  Called by
+    ``run_tracking`` before any output exists and by
+    ``run_single_realization`` for direct callers, both before
+    :func:`_check_discrete_dt`.
+    """
+    if cycle is None:
+        return
+    period, seam = cycle
+    raise ValueError(
+        "time.on_exhausted: cycle with numerics.temporal_interp: false is "
+        "refused: the records' averaging windows differ in length, so the "
+        f"forcing repeats after {period / 86400.0:g} d with a seam of "
+        f"{seam / 86400.0:g} d between the last and the first record, which "
+        "a discrete run (one record per step of dt) cannot follow. Set "
+        "numerics.temporal_interp: true")
+
+
 def run_single_realization(
     mesh: Mesh,
     ds,
@@ -1662,7 +1688,13 @@ def run_single_realization(
         not resolve its record times, call
         ``readers.apply_time_options(ds, config.data, config.mesh.type)``
         once before (a second call shifts again); ``run_tracking`` and
-        ``readers._open_run_dataset`` do it.
+        ``readers._open_run_dataset`` do it.  A dataset resolved by
+        ``apply_time_options`` or by the FESOM 1.4 reader carries the
+        averaging windows (the coordinate ``readers.TIME_WINDOWS``); with
+        ``on_exhausted="cycle"`` the forcing period is read from it (the
+        sum of the windows when they differ in length, and discrete mode is
+        then refused); a dataset without it keeps the legacy period, the
+        span of the records plus the last interval.
     reader : reader class
         Must have ``read_velocities(ds, timestep, mesh, mode)``.
     init_state : ParticleState
@@ -1950,6 +1982,13 @@ def run_single_realization(
         _ax_times, _ax_dt = extract_time_info(ds)
         if _ax_times is not None:
             _chk_times, _chk_dt = _ax_times, (_ax_dt if file_dt is None else file_dt)
+    # the cycle rule of this call, once: the exact period and seam when the
+    # dataset carries averaging windows of unequal length, else None (the
+    # legacy rule; always None under stop)
+    cyc = (exact_cycle(ds, _chk_times, n_time_total)
+           if on_exhausted == "cycle" else None)
+    if not temporal_interp:
+        _refuse_discrete_exact_cycle(cyc)        # the backstop for direct callers
     _check_discrete_dt(numerics.dt, temporal_interp, _chk_dt, _chk_times,
                        n_records=n_time_total)
     use_tinterp = temporal_interp and file_times is not None
@@ -1973,7 +2012,8 @@ def run_single_realization(
             # a later realization's start (start + k·run_interval) wraps by
             # whole forcing periods, as the discrete reads do
             sim_time = _index_to_sim_time(start_time_idx, file_times,
-                                          n_time_total, on_exhausted, dt=dt)
+                                          n_time_total, on_exhausted, dt=dt,
+                                          cycle=cyc)
         else:
             # past the end was an IndexError; a negative index silently
             # read the end of the axis
@@ -2120,7 +2160,7 @@ def run_single_realization(
         epoch = time_axis_epoch(ds) if on_axis else None
         cycle_period = None
         if on_exhausted == "cycle":
-            cycle_period = (
+            cycle_period = cyc[0] if cyc is not None else (
                 float(_axis[-1] - _axis[0] + (_axis[-1] - _axis[-2]))
                 if on_axis and _axis is not None and len(_axis) > 1
                 else float(n_time_total) * float(dt))
@@ -2185,7 +2225,7 @@ def run_single_realization(
             # on-snapshot backward query bracket downward.
             bracket = _resolve_time_bracket(
                 sim_time, file_times, n_time_total, on_exhausted,
-                direction=direction,
+                direction=direction, cycle=cyc,
             )
             if bracket is None:
                 if verbose:
@@ -2330,10 +2370,11 @@ def run_single_realization(
                 _ea = (on_exhausted, direction, vel_cache, reader, ds, mesh,
                        mode, diff_cfg, sample_vars)
                 sigma_eta_start = _eta_at_time(
-                    sim_time, file_times, n_time_total, *_ea, pchip=_pch)
+                    sim_time, file_times, n_time_total, *_ea, pchip=_pch,
+                    cycle=cyc)
                 sigma_eta_end = _eta_at_time(
                     sim_time + dt * direction, file_times, n_time_total, *_ea,
-                    pchip=_pch)
+                    pchip=_pch, cycle=cyc)
             else:
                 # discrete mode: the step starts at this record and ends at
                 # the next one
@@ -2453,7 +2494,7 @@ def run_single_realization(
                     # re-lerped field value at sim_time is direction-free.
                     rec_bracket = _resolve_time_bracket(
                         sim_time, file_times, n_time_total, on_exhausted,
-                        direction=direction,
+                        direction=direction, cycle=cyc,
                     )
                     if rec_bracket is not None:
                         # keep the PCHIP stencil of this bracket — the next
@@ -2621,17 +2662,22 @@ def _index_to_sim_time(
     n_time_total: int,
     on_exhausted: str,
     dt: Optional[float] = None,
+    *,
+    cycle: Optional[Tuple[float, float]],
 ) -> float:
     """Return the sim-time corresponding to file index ``idx``.
 
     For ``on_exhausted == "cycle"`` indices outside ``[0, n_time_total)``
     wrap with full-period offset, where the period equals
-    ``file_times[-1] - file_times[0] + trailing_interval``; a single record
-    repeats with the period ``dt`` (the run's step, the output's
-    ``forcing_cycle_period``) when given, else 1 s.  For ``"stop"``
-    out-of-range indices are clamped to the valid range (``run_tracking``
-    refuses such a start before it gets here; direct discrete calls still
-    reach the clamp through ``_record_clock_origin``).
+    ``file_times[-1] - file_times[0] + trailing_interval`` (``cycle`` None)
+    or ``cycle[0]`` (a ``(period, seam)`` tuple of
+    :func:`~kelp.readers.exact_cycle`: the sum of the averaging windows); a
+    single record repeats with the period ``dt`` (the run's step, the
+    output's ``forcing_cycle_period``) when given, else 1 s, whatever
+    ``cycle`` says.  For ``"stop"`` out-of-range indices are clamped to the
+    valid range and ``cycle`` is not read (``run_tracking`` refuses such a
+    start before it gets here; direct discrete calls still reach the clamp
+    through ``_record_clock_origin``).
     """
     if n_time_total <= 0:
         return 0.0
@@ -2640,6 +2686,8 @@ def _index_to_sim_time(
         # _resolve_time_bracket's treatment of the same degenerate case.
         if n_time_total == 1:
             period = float(dt) if dt is not None else 1.0
+        elif cycle is not None:
+            period = cycle[0]
         else:
             period = (file_times[-1] - file_times[0]
                       + (file_times[-1] - file_times[-2]))
@@ -2656,11 +2704,22 @@ def _resolve_time_bracket(
     n_time_total: int,
     on_exhausted: str,
     direction: int = 1,
+    *,
+    cycle: Optional[Tuple[float, float]],
 ):
     """Resolve (idx_a, idx_b, ta, tb, wrapped_time) for sim_time.
 
     Returns None if sim_time is out of range in stop mode.
     Pure index math — no I/O, no caching, no field allocation.
+
+    ``cycle`` (keyword, required) is read only for ``on_exhausted ==
+    "cycle"``: None keeps the legacy rule — the forcing repeats after the
+    span of the records plus the trailing interval, and the bracket from
+    the last record to the first record of the next pass is the trailing
+    interval long; a ``(period, seam)`` tuple of
+    :func:`~kelp.readers.exact_cycle` (records that are means over windows
+    of unequal length) wraps with ``period`` (the sum of the windows) and
+    makes that bracket ``seam`` long.
 
     ``direction`` only matters when ``sim_time`` sits exactly ON a snapshot:
     a forward step moves into ``[t_k, t_{k+1}]`` (today's behaviour, the
@@ -2677,7 +2736,9 @@ def _resolve_time_bracket(
     t_start = file_times[0]
     t_end = file_times[-1]
 
-    if on_exhausted == "cycle":
+    if on_exhausted == "cycle" and cycle is not None:
+        sim_time_wrapped = t_start + ((sim_time - t_start) % cycle[0])
+    elif on_exhausted == "cycle":
         last_dt = file_times[-1] - file_times[-2] if n_time_total > 1 else 1.0
         total_span = t_end - t_start + last_dt
         sim_time_wrapped = t_start + ((sim_time - t_start) % total_span)
@@ -2699,8 +2760,13 @@ def _resolve_time_bracket(
     ta = file_times[idx_a_mod]
     tb = file_times[idx_b_mod]
     if on_exhausted == "cycle" and tb <= ta:
-        last_dt = file_times[-1] - file_times[-2] if n_time_total > 1 else 1.0
-        tb = ta + last_dt
+        if cycle is not None:
+            # the seam: from the last record to the first of the next pass
+            tb = ta + cycle[1]
+        else:
+            last_dt = (file_times[-1] - file_times[-2]
+                       if n_time_total > 1 else 1.0)
+            tb = ta + last_dt
 
     # Backward on-snapshot shift (tolerance matches the range check above).
     # Covers both shapes the forward resolution produces at a snapshot:
@@ -2720,11 +2786,15 @@ def _resolve_time_bracket(
         tb_new = file_times[idx_b_new]
         if tb_new <= ta_new:
             # Cycle wrap (standing on file_times[0]): the bracket is the
-            # trailing interval, the position its top end — express the
-            # wrapped time in that bracket's coordinate so alpha = 1.
-            last_dt = (file_times[-1] - file_times[-2]
-                       if n_time_total > 1 else 1.0)
-            tb_new = ta_new + last_dt
+            # trailing interval (the seam for an exact cycle), the position
+            # its top end — express the wrapped time in that bracket's
+            # coordinate so alpha = 1.
+            if on_exhausted == "cycle" and cycle is not None:
+                tb_new = ta_new + cycle[1]
+            else:
+                last_dt = (file_times[-1] - file_times[-2]
+                           if n_time_total > 1 else 1.0)
+                tb_new = ta_new + last_dt
         return idx_a_new, idx_b_new, ta_new, tb_new, tb_new
 
     return idx_a_mod, idx_b_mod, ta, tb, sim_time_wrapped
@@ -2754,13 +2824,14 @@ def _resolve_recon_stencil(bracket, n_time_total: int):
 
 def _eta_at_time(t, file_times, n_time_total, on_exhausted, direction,
                  vel_cache, reader, ds, mesh, mode, diffusion, sample_vars,
-                 pchip=False):
+                 pchip=False, *, cycle):
     """Surface elevation at time ``t`` as a step starting there would see it
     — the PCHIP stage at c = 0 where ``pchip`` and a 4-snapshot stencil
     exist (bit-identical to ``reconstruct_pchip``), else the linear payload
-    blend (``_build_vel_payload``) — or None outside the data."""
+    blend (``_build_vel_payload``) — or None outside the data.  ``cycle``
+    is the run's cycle rule, as for :func:`_resolve_time_bracket`."""
     bracket = _resolve_time_bracket(t, file_times, n_time_total, on_exhausted,
-                                    direction=direction)
+                                    direction=direction, cycle=cycle)
     if bracket is None:
         return None
     idx_a, idx_b, ta, tb, tw = bracket
@@ -2876,9 +2947,15 @@ def _interp_velocity_at_time(
     vel_next and dt_to_next as well.  ``direction`` is forwarded so an
     on-snapshot backward query brackets downward like the main loop
     (review follow-up: the accepted-but-ignored parameter was an API trap).
+    Under ``on_exhausted == "cycle"`` the cycle rule is read from ``ds``
+    (:func:`~kelp.readers.exact_cycle`; ``ds`` may be None: the legacy
+    rule).
     """
-    bracket = _resolve_time_bracket(sim_time, file_times, n_time_total,
-                                    on_exhausted, direction=direction)
+    bracket = _resolve_time_bracket(
+        sim_time, file_times, n_time_total, on_exhausted,
+        direction=direction,
+        cycle=(exact_cycle(ds, file_times, n_time_total)
+               if on_exhausted == "cycle" else None))
     if bracket is None:
         return None, -1
     vel_step, _vel_next, _dt_to_next, file_idx = _build_vel_payload(
@@ -3155,6 +3232,16 @@ def run_tracking(
     # -- Summary --
     dt = config.numerics.dt
 
+    # The cycle rule of the run, once: the exact period and seam when the
+    # dataset carries averaging windows of unequal length (the stamp
+    # options, the FESOM 1.4 reader), else None (the legacy rule; always
+    # None under stop).  Discrete mode cannot follow such a seam: refused
+    # before any output exists (run_single_realization repeats it).
+    cyc = (exact_cycle(ds, file_times, n_time_total)
+           if config.time.on_exhausted == "cycle" else None)
+    if not temporal_interp:
+        _refuse_discrete_exact_cycle(cyc)
+
     # Discrete mode reads one record per step while the particles move by
     # dt: refuse a dt unlike the record spacing before any output exists
     # (run_single_realization repeats the check for direct callers).
@@ -3266,9 +3353,9 @@ def run_tracking(
                     t_run += (
                         _index_to_sim_time(idx + config.time.run_interval,
                                            file_times, n_time_total,
-                                           on_exhausted, dt=dt)
+                                           on_exhausted, dt=dt, cycle=cyc)
                         - _index_to_sim_time(idx, file_times, n_time_total,
-                                             on_exhausted, dt=dt))
+                                             on_exhausted, dt=dt, cycle=cyc))
                     idx += config.time.run_interval
                 if not (file_times[0] - 1e-6 <= t_run
                         <= file_times[-1] + 1e-6):
@@ -3785,9 +3872,9 @@ def run_tracking(
         ):
             sim_time_start += (
                 _index_to_sim_time(start_idx, file_times, n_time_total,
-                                   on_exhausted, dt=dt)
+                                   on_exhausted, dt=dt, cycle=cyc)
                 - _index_to_sim_time(prev_idx, file_times, n_time_total,
-                                     on_exhausted, dt=dt)
+                                     on_exhausted, dt=dt, cycle=cyc)
             )
 
     ds.close()
@@ -3861,7 +3948,13 @@ def track_particles(
         (``data.time_stamp`` / ``data.time_window``) of a reader that does
         not resolve its record times, call
         ``readers.apply_time_options(ds, config.data, config.mesh.type)``
-        once before (a second call shifts again).
+        once before (a second call shifts again).  A dataset resolved by
+        ``apply_time_options`` or by the FESOM 1.4 reader carries the
+        averaging windows (the coordinate ``readers.TIME_WINDOWS``); with
+        ``on_exhausted="cycle"`` the forcing period is read from it (the
+        sum of the windows when they differ in length, and discrete mode is
+        then refused); a dataset without it keeps the legacy period, the
+        span of the records plus the last interval.
     reader : reader class
     lon0, lat0 : np.ndarray
         Initial particle positions.

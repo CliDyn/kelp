@@ -316,3 +316,149 @@ def test_fesom14_dataset_carries_its_windows(tmp_path, monkeypatch):
         assert TIME_WINDOW_EDGE not in ds.dims
     finally:
         ds.close()
+
+
+# ---------------------------------------------------------------------------
+# the run's time functions: the keyword ``cycle`` (None or (period, seam))
+# ---------------------------------------------------------------------------
+
+D = DAY
+
+
+class _Stub:
+    """A reader whose record ``idx`` holds ``u = eta = idx`` at one node."""
+
+    @staticmethod
+    def read_velocities(ds, idx, mesh, mode, diffusion=None):
+        from kelp.core.io import VelocityField
+        return VelocityField(u=np.full(1, float(idx)), v=np.zeros(1),
+                             eta=np.full(1, float(idx)), w=None)
+
+
+def test_cycle_keyword_is_required():
+    import ast
+    import inspect
+
+    import kelp.tracking as tr
+    with pytest.raises(TypeError):
+        tr._resolve_time_bracket(0.0, FT, 12, "stop")
+    with pytest.raises(TypeError):
+        tr._index_to_sim_time(0, FT, 12, "stop")
+
+    names = {"_resolve_time_bracket", "_index_to_sim_time", "_eta_at_time"}
+    calls, constant_none = [], set()
+
+    def visit(node, func):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, child.name)
+                continue
+            if (isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Name)
+                    and child.func.id in names):
+                kw = {k.arg: k.value for k in child.keywords}
+                calls.append((func, child.func.id, "cycle" in kw))
+                value = kw.get("cycle")
+                if isinstance(value, ast.Constant) and value.value is None:
+                    constant_none.add(func)
+            visit(child, func)
+
+    visit(ast.parse(inspect.getsource(tr)), None)
+    missing = [c for c in calls if not c[2]]
+    assert calls and not missing, missing
+    assert {"run_single_realization", "run_tracking", "_eta_at_time",
+            "_interp_velocity_at_time",
+            "_record_clock_origin"} <= {c[0] for c in calls}
+    assert constant_none == {"_record_clock_origin"}
+
+
+def test_bracket_exact_seam_forward():
+    from kelp.tracking import _resolve_recon_stencil, _resolve_time_bracket
+    exact = _resolve_time_bracket(340 * D, FT, 12, "cycle", cycle=YEAR)
+    assert exact == (11, 0, 334 * D, 365 * D, 340 * D)
+    assert _resolve_time_bracket(340 * D, FT, 12, "cycle", cycle=None) == (
+        11, 0, 334 * D, 364.5 * D, 340 * D)
+    # the seam bracket has no 4-record stencil: PCHIP falls back to linear
+    assert _resolve_recon_stencil(exact, 12) is None
+
+
+def test_bracket_exact_wrap():
+    from kelp.tracking import _resolve_time_bracket
+    assert _resolve_time_bracket(364.75 * D, FT, 12, "cycle", cycle=YEAR) == (
+        11, 0, 334 * D, 365 * D, 364.75 * D)
+    assert _resolve_time_bracket(364.75 * D, FT, 12, "cycle", cycle=None) == (
+        0, 1, 0.0, 29.5 * D, 0.25 * D)
+    assert _resolve_time_bracket(375 * D, FT, 12, "cycle", cycle=YEAR) == (
+        0, 1, 0.0, 29.5 * D, 10 * D)
+    assert _resolve_time_bracket(375 * D, FT, 12, "cycle", cycle=None) == (
+        0, 1, 0.0, 29.5 * D, 10.5 * D)
+
+
+def test_bracket_exact_backward():
+    from kelp.tracking import _resolve_time_bracket
+    seam_top = (11, 0, 334 * D, 365 * D, 365 * D)
+    for t in (0.0, 365 * D):
+        assert _resolve_time_bracket(t, FT, 12, "cycle", direction=-1,
+                                     cycle=YEAR) == seam_top
+    assert _resolve_time_bracket(0.0, FT, 12, "cycle", direction=-1,
+                                 cycle=None) == (
+        11, 0, 334 * D, 364.5 * D, 364.5 * D)
+    # below the first record (a negative run clock): the seam from its top
+    assert _resolve_time_bracket(-1 * D, FT, 12, "cycle", direction=-1,
+                                 cycle=YEAR) == (
+        11, 0, 334 * D, 365 * D, 364 * D)
+
+
+def test_stop_ignores_the_cycle_value():
+    from kelp.tracking import _index_to_sim_time, _resolve_time_bracket
+    assert _resolve_time_bracket(340 * D, FT, 12, "stop", cycle=YEAR) is None
+    assert (_resolve_time_bracket(100 * D, FT, 12, "stop", cycle=YEAR)
+            == _resolve_time_bracket(100 * D, FT, 12, "stop", cycle=None))
+    assert _index_to_sim_time(20, FT, 12, "stop", cycle=YEAR) == 334 * D
+
+
+def test_bracket_legacy_keeps_trailing_interval_verbatim():
+    """``cycle=None`` keeps the trailing interval itself: ``period - span``
+    differs from it in the last bit on this axis (264607.35000000003)."""
+    from kelp.tracking import _resolve_time_bracket, _shift_to_midpoints
+    ft = _shift_to_midpoints(np.arange(74) * 3600.1)
+    n = 74
+    last = ft[-1] + (ft[-1] - ft[-2])
+    assert _resolve_time_bracket(ft[-1] + 0.1, ft, n, "cycle",
+                                 cycle=None)[3] == last
+    assert _resolve_time_bracket(ft[0], ft, n, "cycle", direction=-1,
+                                 cycle=None)[3] == last
+
+
+def test_index_to_sim_time_exact():
+    from kelp.tracking import _index_to_sim_time
+    assert _index_to_sim_time(12, FT, 12, "cycle", cycle=YEAR) == 365 * D
+    assert _index_to_sim_time(13, FT, 12, "cycle", cycle=YEAR) == 394.5 * D
+    assert _index_to_sim_time(-1, FT, 12, "cycle", cycle=YEAR) == -31 * D
+    assert _index_to_sim_time(12, FT, 12, "cycle", cycle=None) == 364.5 * D
+    # one record: the period is dt, whatever the tuple
+    assert _index_to_sim_time(3, FT[:1], 1, "cycle", dt=3600.0,
+                              cycle=YEAR) == 10800.0
+
+
+def test_eta_at_time_follows_the_exact_seam():
+    from kelp.tracking import _eta_at_time, _VelCache
+    eta = _eta_at_time(349.5 * D, FT, 12, "cycle", 1, _VelCache(), _Stub,
+                       None, None, None, None, None, cycle=YEAR)
+    assert eta == pytest.approx([5.5], abs=1e-12)   # half way 11 -> 0
+    eta = _eta_at_time(349.5 * D, FT, 12, "cycle", 1, _VelCache(), _Stub,
+                       None, None, None, None, None, cycle=None)
+    assert eta == pytest.approx([11 * 15 / 30.5])
+
+
+def test_interp_velocity_at_time_reads_the_dataset():
+    from kelp.tracking import _interp_velocity_at_time, _VelCache
+    ds = _opened(_months(NL, 2001))
+    vel = _interp_velocity_at_time(340 * D, FT, 12, "cycle", 1, _VelCache(),
+                                   _Stub, ds, None, None)[0]
+    assert vel.u[0] == pytest.approx(11 * 25 / 31)
+    vel = _interp_velocity_at_time(340 * D, FT, 12, "cycle", 1, _VelCache(),
+                                   _Stub, None, None, None)[0]
+    assert vel.u[0] == pytest.approx(11 * 24.5 / 30.5)
+    assert _interp_velocity_at_time(340 * D, FT, 12, "stop", 1, _VelCache(),
+                                    _Stub, ds, None, None) == (None, -1)

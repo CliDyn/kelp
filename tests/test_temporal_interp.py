@@ -554,7 +554,7 @@ class TestTimeBracketAndPayload:
     def test_resolve_bracket_exact_snapshot(self):
         from kelp.tracking import _resolve_time_bracket
         file_times = np.array([0.0, 3600.0, 7200.0, 10800.0])
-        br = _resolve_time_bracket(3600.0, file_times, 4, "stop")
+        br = _resolve_time_bracket(3600.0, file_times, 4, "stop", cycle=None)
         idx_a, idx_b, ta, tb, wrapped = br
         # searchsorted(side="right") places an exact hit on the right,
         # so idx_a/idx_b straddle it and ta == sim_time → alpha=0.
@@ -563,7 +563,7 @@ class TestTimeBracketAndPayload:
     def test_resolve_bracket_between_snapshots(self):
         from kelp.tracking import _resolve_time_bracket
         file_times = np.array([0.0, 3600.0, 7200.0])
-        br = _resolve_time_bracket(1800.0, file_times, 3, "stop")
+        br = _resolve_time_bracket(1800.0, file_times, 3, "stop", cycle=None)
         idx_a, idx_b, ta, tb, wrapped = br
         assert idx_a == 0 and idx_b == 1
         assert ta == 0.0 and tb == 3600.0
@@ -572,13 +572,14 @@ class TestTimeBracketAndPayload:
     def test_resolve_bracket_out_of_range_stop(self):
         from kelp.tracking import _resolve_time_bracket
         file_times = np.array([0.0, 3600.0])
-        assert _resolve_time_bracket(7200.0, file_times, 2, "stop") is None
+        assert _resolve_time_bracket(7200.0, file_times, 2, "stop",
+                                     cycle=None) is None
 
     def test_resolve_bracket_cycle_wrap(self):
         from kelp.tracking import _resolve_time_bracket
         file_times = np.array([0.0, 3600.0, 7200.0])  # span 7200 + last_dt=3600 = 10800
         # sim_time=10800 wraps to 0
-        br = _resolve_time_bracket(10800.0, file_times, 3, "cycle")
+        br = _resolve_time_bracket(10800.0, file_times, 3, "cycle", cycle=None)
         assert br is not None
         _, _, _, _, wrapped = br
         assert wrapped == pytest.approx(0.0, abs=1e-6)
@@ -589,7 +590,7 @@ class TestTimeBracketAndPayload:
         # Irregular spacing: [0, 1000, 5000] — last interval = 4000
         file_times = np.array([0.0, 1000.0, 5000.0])
         # sim_time=6000 is past end; cycle wraps via total_span = 5000 + 4000 = 9000
-        br = _resolve_time_bracket(6000.0, file_times, 3, "cycle")
+        br = _resolve_time_bracket(6000.0, file_times, 3, "cycle", cycle=None)
         assert br is not None
 
     def test_build_payload_at_end_snapshot(self):
@@ -617,7 +618,7 @@ class TestTimeBracketAndPayload:
         # n_total, clamped to n_total-1 = 1; idx_a = 0 still, so not exact.
         # Use sim_time > file_times[-1] in stop mode to return None, not
         # relevant here.  Instead pick sim_time past last snap with cycle.
-        br = _resolve_time_bracket(3600.0, file_times, 2, "stop")
+        br = _resolve_time_bracket(3600.0, file_times, 2, "stop", cycle=None)
         cache = _VelCache()
         vs, vn, dtn, idx = _build_vel_payload(
             br, cache, _StubReader, None, None, None,
@@ -646,7 +647,7 @@ class TestTimeBracketAndPayload:
                 )
 
         file_times = np.array([0.0, 3600.0])
-        br = _resolve_time_bracket(900.0, file_times, 2, "stop")
+        br = _resolve_time_bracket(900.0, file_times, 2, "stop", cycle=None)
         cache = _VelCache()
         vs, vn, dtn, idx = _build_vel_payload(
             br, cache, _StubReader, None, None, None,
@@ -795,16 +796,18 @@ class TestMultiRunSimTimeShift:
 
         # Start at idx 1, run_interval = n (full cycle) → new idx = n+1
         prev_idx, new_idx = 1, 1 + n
-        delta = (_index_to_sim_time(new_idx, file_times, n, "cycle")
-                 - _index_to_sim_time(prev_idx, file_times, n, "cycle"))
+        delta = (_index_to_sim_time(new_idx, file_times, n, "cycle", cycle=None)
+                 - _index_to_sim_time(prev_idx, file_times, n, "cycle",
+                                      cycle=None))
         assert delta == pytest.approx(14400.0), (
             f"expected one full period (14400s), got {delta}"
         )
 
         # Crossing twice: run_interval = 2*n+2 starting from idx 0
         prev_idx, new_idx = 0, 2 * n + 2
-        delta = (_index_to_sim_time(new_idx, file_times, n, "cycle")
-                 - _index_to_sim_time(prev_idx, file_times, n, "cycle"))
+        delta = (_index_to_sim_time(new_idx, file_times, n, "cycle", cycle=None)
+                 - _index_to_sim_time(prev_idx, file_times, n, "cycle",
+                                      cycle=None))
         # Two periods (28800) plus jump from idx 0 to idx 2 inside the cycle (7200)
         assert delta == pytest.approx(2 * 14400.0 + 7200.0)
 
@@ -815,6 +818,8 @@ class TestMultiRunSimTimeShift:
         file_times = np.array([0.0, 3600.0, 7200.0, 10800.0])
         n = len(file_times)
         # Past the end: clamped to last
-        assert _index_to_sim_time(n + 5, file_times, n, "stop") == pytest.approx(10800.0)
+        assert _index_to_sim_time(n + 5, file_times, n, "stop",
+                                  cycle=None) == pytest.approx(10800.0)
         # Before the start: clamped to 0
-        assert _index_to_sim_time(-3, file_times, n, "stop") == pytest.approx(0.0)
+        assert _index_to_sim_time(-3, file_times, n, "stop",
+                                  cycle=None) == pytest.approx(0.0)

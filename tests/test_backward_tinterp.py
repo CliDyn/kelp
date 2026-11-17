@@ -176,7 +176,7 @@ class TestBackwardBracket:
         from kelp.tracking import _resolve_time_bracket
         file_times = np.array([0.0, 3600.0, 7200.0, 10800.0])
         br = _resolve_time_bracket(7200.0, file_times, 4, "stop",
-                                   direction=-1)
+                                   direction=-1, cycle=None)
         idx_a, idx_b, ta, tb, wrapped = br
         # Backward from t=7200 moves INTO [3600, 7200] — that is the bracket.
         assert (idx_a, idx_b) == (1, 2)
@@ -189,7 +189,7 @@ class TestBackwardBracket:
         from kelp.tracking import _resolve_time_bracket
         file_times = np.array([0.0, 3600.0])
         br = _resolve_time_bracket(3600.0, file_times, 2, "stop",
-                                   direction=-1)
+                                   direction=-1, cycle=None)
         idx_a, idx_b, ta, tb, wrapped = br
         assert (idx_a, idx_b) == (0, 1)
         assert ta == 0.0 and tb == 3600.0
@@ -200,7 +200,8 @@ class TestBackwardBracket:
         # (steady fallback), mirroring forward behaviour at file_times[-1].
         from kelp.tracking import _resolve_time_bracket
         file_times = np.array([0.0, 3600.0])
-        br = _resolve_time_bracket(0.0, file_times, 2, "stop", direction=-1)
+        br = _resolve_time_bracket(0.0, file_times, 2, "stop", direction=-1,
+                                   cycle=None)
         idx_a, idx_b, ta, tb, wrapped = br
         assert idx_a == idx_b
 
@@ -209,9 +210,9 @@ class TestBackwardBracket:
         # direction (only the payload's vel_next/dt_to_next do).
         from kelp.tracking import _resolve_time_bracket
         file_times = np.array([0.0, 3600.0, 7200.0])
-        br_f = _resolve_time_bracket(1800.0, file_times, 3, "stop")
+        br_f = _resolve_time_bracket(1800.0, file_times, 3, "stop", cycle=None)
         br_b = _resolve_time_bracket(1800.0, file_times, 3, "stop",
-                                     direction=-1)
+                                     direction=-1, cycle=None)
         assert br_f == br_b
 
     def test_cycle_wrap_at_period_start(self):
@@ -220,7 +221,8 @@ class TestBackwardBracket:
         # with the position at its TOP (alpha = 1 → vel_step = snapshot 0).
         from kelp.tracking import _resolve_time_bracket
         file_times = np.array([0.0, 3600.0, 7200.0])
-        br = _resolve_time_bracket(0.0, file_times, 3, "cycle", direction=-1)
+        br = _resolve_time_bracket(0.0, file_times, 3, "cycle", direction=-1,
+                                   cycle=None)
         idx_a, idx_b, ta, tb, wrapped = br
         assert (idx_a, idx_b) == (2, 0)
         assert ta == 7200.0
@@ -232,9 +234,10 @@ class TestBackwardBracket:
         # an exact snapshot brackets UPWARD (alpha = 0).
         from kelp.tracking import _resolve_time_bracket
         file_times = np.array([0.0, 3600.0, 7200.0, 10800.0])
-        br_default = _resolve_time_bracket(7200.0, file_times, 4, "stop")
+        br_default = _resolve_time_bracket(7200.0, file_times, 4, "stop",
+                                           cycle=None)
         br_plus = _resolve_time_bracket(7200.0, file_times, 4, "stop",
-                                        direction=1)
+                                        direction=1, cycle=None)
         assert br_default == br_plus
         idx_a, idx_b, ta, tb, wrapped = br_plus
         assert ta == 7200.0 and wrapped == 7200.0
@@ -263,7 +266,7 @@ class TestBackwardPayload:
         )
         file_times = np.array([0.0, 3600.0])
         br = _resolve_time_bracket(900.0, file_times, 2, "stop",
-                                   direction=-1)
+                                   direction=-1, cycle=None)
         cache = _VelCache()
         vs, vn, dtn, idx = _build_vel_payload(
             br, cache, _StubReader, None, None, None, direction=-1,
@@ -281,7 +284,7 @@ class TestBackwardPayload:
         )
         file_times = np.array([0.0, 3600.0, 7200.0])
         br = _resolve_time_bracket(3600.0, file_times, 3, "stop",
-                                   direction=-1)
+                                   direction=-1, cycle=None)
         cache = _VelCache()
         vs, vn, dtn, idx = _build_vel_payload(
             br, cache, _StubReader, None, None, None, direction=-1,
@@ -298,7 +301,8 @@ class TestBackwardPayload:
             _resolve_time_bracket, _build_vel_payload, _VelCache,
         )
         file_times = np.array([0.0, 3600.0])
-        br = _resolve_time_bracket(0.0, file_times, 2, "stop", direction=-1)
+        br = _resolve_time_bracket(0.0, file_times, 2, "stop", direction=-1,
+                                   cycle=None)
         cache = _VelCache()
         vs, vn, dtn, idx = _build_vel_payload(
             br, cache, _StubReader, None, None, None, direction=-1,
@@ -311,7 +315,7 @@ class TestBackwardPayload:
             _resolve_time_bracket, _build_vel_payload, _VelCache,
         )
         file_times = np.array([0.0, 3600.0])
-        br = _resolve_time_bracket(900.0, file_times, 2, "stop")
+        br = _resolve_time_bracket(900.0, file_times, 2, "stop", cycle=None)
         cache = _VelCache()
         vs, vn, dtn, idx = _build_vel_payload(
             br, cache, _StubReader, None, None, None,
