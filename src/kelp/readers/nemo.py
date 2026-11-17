@@ -37,7 +37,7 @@ import xarray as xr
 from ..core.io import VelocityField
 from ..core.mesh import Mesh
 from . import register, _detect_engine
-from .structured import (cgrid_w_from_continuity, cgrid_thickness, SAME_POINT_CHORD, _unit_xyz, build_cgrid_mesh,
+from .structured import (CgridLayout, _copy_sets, cgrid_to_canonical, cgrid_w_from_continuity, cgrid_thickness, SAME_POINT_CHORD, _unit_xyz, build_cgrid_mesh,
                          build_structured_mesh, c_grid_to_t, field_to_nodes)
 
 
@@ -139,6 +139,145 @@ def _detect_orca_layout(lon, lat) -> Optional[str]:
             "ORCA12 type) is not supported; the F-point-pivot fold (ORCA05 / "
             "ORCA1) is.")
     return "ew"
+
+
+def _read_layout_flags(ds) -> dict:
+    """NEMO 4.2 topology attributes (global attributes or scalar variables):
+    ``Iperio`` / ``Jperio`` / ``NFold`` (ints) and ``NFtype`` (``"T"`` / ``"F"``).
+    Only a cross-check of what the coordinates show (NEMO <= 4.0 mesh files
+    carry none of them)."""
+    out = {}
+    for k in ("Iperio", "Jperio", "NFold", "NFtype"):
+        v = ds.attrs.get(k)
+        if v is None and k in ds.variables and ds[k].size == 1:
+            v = ds[k].values.reshape(-1)[0]
+        if v is None:
+            continue
+        if isinstance(v, bytes):
+            v = v.decode()
+        out[k] = str(v).strip().upper() if k == "NFtype" else int(v)
+    return out
+
+
+#: neighbouring columns this many median spacings apart across the wrap still
+#: count as one periodic raster
+_WRAP_SPACINGS = 1.5
+
+
+def _wrap_ratio(xyz) -> float:
+    """Median distance from the last to the first column over the median column
+    spacing, on the rows below the fold region."""
+    ny = xyz.shape[0]
+    rows = slice(0, max(1, ny - 3))
+    wrap = np.linalg.norm(xyz[rows, -1] - xyz[rows, 0], axis=-1)
+    step = np.median(np.linalg.norm(xyz[rows, 1:] - xyz[rows, :-1], axis=-1), axis=1)
+    ok = step > 0
+    return float(np.median(wrap[ok] / step[ok])) if ok.any() else np.inf
+
+
+def detect_cgrid_layout(tlon, tlat, flon, flat, flags=None):
+    """Classify the raw raster for ``mesh.nemo_grid: cgrid`` -> ``(CgridLayout, notes)``.
+
+    The coordinates decide what the raster contains: the E-W halo columns, the
+    north halo row and the fold are identities between points (the copies NEMO's
+    ``lbc_lnk`` writes), checked exactly for the T points and the F points of
+    the real rows (the halo-row F is not reliable in ORCA05), no thresholds.
+    The nine candidates ``{halo columns, none} x {no fold, T / F fold, with /
+    without the halo row}`` are tried; the passing one with the most copies wins
+    (no-halo and halo F-pivot share a fold centre, so the count is the
+    tie-break); equal counts refuse.  ``flags`` (:func:`_read_layout_flags`) only
+    cross-check: a contradiction refuses; flags that claim MORE than the raster
+    shows (all of our crops inherit the parent file's) make it a crop -- the
+    missing topology is an open edge, noted in ``notes``.  Periodicity without
+    halo columns (halo-free fold or ``Iperio``) must also pass the wrap-gap test
+    (last -> first column within 1.5 median spacings): fold identities on a
+    partial-width crop symmetric about a pivot would otherwise join its edges.
+    Also refuses zero-filled tiles (land-processor elimination) and a pole row.
+    """
+    flags = flags or {}
+    tlon, tlat, flon, flat = (np.asarray(a, dtype=np.float64) for a in (tlon, tlat, flon, flat))
+    ny, nx = tlon.shape
+    raw = (ny, nx)
+    if flon.shape != raw or flat.shape != raw or tlat.shape != raw:
+        raise ValueError("glamt/gphit and glamf/gphif must share one (ny, nx) shape")
+    if ((tlon == 0) & (tlat == 0)).sum() + ((flon == 0) & (flat == 0)).sum() > 1:
+        raise ValueError(
+            "the mesh file has zero-filled tiles (land-processor elimination when "
+            "it was assembled): regenerate it without land elimination or use domain_cfg.nc")
+    if flags.get("Jperio", 0) == 1:
+        raise NotImplementedError("mesh.nemo_grid: cgrid: N-S periodic grids (Jperio = 1) are not supported")
+    xt, xf = _unit_xyz(tlon, tlat), _unit_xyz(flon, flat)
+    if np.linalg.norm(xt[-1] - xt[-1, :1], axis=-1).max() <= SAME_POINT_CHORD:
+        raise ValueError("the top row of T points collapses to one point (a pole row): "
+                         "crop below it")
+    notes = []
+    if ny < 4 or nx < 4:
+        return CgridLayout(raw), notes
+
+    def copies(lay):
+        """Number of copy pairs compared, or None when one does not coincide."""
+        n = 0
+        for kind, xyz in (("T", xt), ("F", xf)):
+            dst, src, _s, present = _copy_sets(lay, kind)
+            nc, pc = lay.shape[1], int(lay.pad_cols)
+            k = present[dst]
+            if kind == "F" and lay.fold:
+                k &= dst // nc <= lay.J
+            d, s_ = dst[k], src[k]
+            a = xyz[d // nc, d % nc - pc]
+            b = xyz[s_ // nc, s_ % nc - pc]
+            if d.size and np.linalg.norm(a - b, axis=-1).max() > SAME_POINT_CHORD:
+                return None
+            n += int(d.size)
+        return n
+
+    found = []
+    for halo_cols in (True, False):
+        for fold, halo_row in ((None, False), ("T", True), ("T", False), ("F", True), ("F", False)):
+            if fold is None and not halo_cols:
+                continue                                   # implies no copy at all
+            lay = CgridLayout(raw, halo_cols, halo_row, True, fold)
+            n = copies(lay)
+            if n:
+                found.append((n, lay))
+    found.sort(key=lambda t: -t[0])
+    if len(found) > 1 and found[0][0] == found[1][0]:
+        raise ValueError("the raster matches two layouts equally well: "
+                         f"{found[0][1].label()} / {found[1][1].label()}")
+    iperio, nfold, nftype = flags.get("Iperio"), flags.get("NFold"), flags.get("NFtype")
+    ratio = _wrap_ratio(xt)
+    if found:
+        lay = found[0][1]
+        if lay.fold and (nfold == 0 or nftype not in (None, lay.fold)):
+            raise ValueError(f"the coordinates show a {lay.fold}-pivot fold, the file's flags say "
+                             f"NFold={nfold}, NFtype={nftype!r}")
+        if iperio == 0:
+            raise ValueError("the coordinates show E-W periodicity, the file's flag says Iperio=0")
+        if not lay.halo_cols and ratio > _WRAP_SPACINGS:
+            raise ValueError(
+                f"the fold identities hold, but the raster is not full width (the last column is "
+                f"{ratio:.1f} grid spacings from the first): a partial-width crop through the fold "
+                "cannot be joined; crop the full width")
+        if not lay.fold and nfold == 1:
+            notes.append("the flags claim a north fold the raster does not show: treated as a crop "
+                         "(the north edge is open)")
+        return lay, notes
+    looks_periodic = ratio <= _WRAP_SPACINGS
+    if iperio == 1:
+        if looks_periodic:
+            if nfold == 1:
+                notes.append("the flags claim a north fold the raster does not show: treated as a crop "
+                             "(the north edge is open)")
+            return CgridLayout(raw, False, False, True, None), notes
+        notes.append("the flags claim E-W periodicity the raster does not show (not full width): "
+                     "treated as a crop (the east and west edges are open)")
+    elif looks_periodic and iperio is None:
+        raise ValueError(
+            "the raster looks E-W periodic without halo columns (the last column is "
+            f"{ratio:.1f} grid spacings from the first) but the file says nothing: add Iperio=1 "
+            "(and NFold / NFtype for a fold) to the mesh file's attributes, or crop it")
+    return CgridLayout(raw), notes
+
 
 
 def _first(ds, aliases: Sequence[str], cfg_name: Optional[str] = None):
