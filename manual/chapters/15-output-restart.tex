@@ -74,7 +74,8 @@ $t_{\text{first}}$ the time at which the call's first step starts (the requested
 start snapshot); in the discrete mode $\tau_{\text{run}}$ is the time of the snapshot $g_{\text{s}}$ records before
 the call's start snapshot, the one the run started from. Under time-averaged forcing these
 are the shifted midpoints (\cref{sec:input-timeavg}), so the dates are window centres, while the epoch stays
-the first unshifted record. Because $\tau_g$ depends only on the global step and the start of the whole run,
+the first unshifted record. With the FESOM~1.4 reader or the stamp keys the forcing axis already holds the
+resolved instants, and the epoch is the first of them (the centre of its window for a mean). Because $\tau_g$ depends only on the global step and the start of the whole run,
 the segments of a resumed chain carry exactly the labels of an uninterrupted run. In the discrete mode the
 label advances by $\dt$ per step; the time-step check of \cref{sec:temp-modes} admits a small difference
 between $\dt$ and the record spacing, by which the label may drift from the stored stamps. When the forcing is
@@ -168,7 +169,8 @@ Resuming is done by the calling program rather than by a configuration key. It l
 counts of re-wetted steps and the forcing position; in the interpolated mode it also supplies the simulation
 time, which the checkpoint does not store. For the record times of the continuation to equal those of the
 uninterrupted run (\cref{eq:out-time}), the program passes the same forcing times as the first call ---
-under time-averaged forcing the shifted midpoints --- and, when a cycled forcing is read in the discrete
+under time-averaged forcing the shifted midpoints, with the FESOM~1.4 reader or the stamp keys the times
+resolved when the forcing was opened --- and, when a cycled forcing is read in the discrete
 mode, the start index counted on without wrapping (in the discrete mode the forcing index stored in the
 checkpoint is that unwrapped index, so the index after it continues the run).
 The release positions need no step of their own: they come back with the particle state. A program that

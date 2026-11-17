@@ -55,6 +55,11 @@ data:
   inicloud: seeds.dat         # "lon lat" per line
   output_path: tracks_healpix_2d.zarr
   time_averaging: mean        # daily means, stamped at the END of the window
+  # A store stamped at the window START (written from GRIB by a polytope or
+  # earthkit download) needs these two keys instead of time_averaging
+  # (docs/healpix.md):
+  # time_stamp: start
+  # time_window: calendar_day
 
 time:
   start_time_idx: 0

@@ -232,7 +232,9 @@ gate (ask, then wait for an explicit yes) holds for every run.
    kelp run config.yaml -v               # then a short n_steps smoke
    ```
    Read the startup summary lines (resolved `dt`, file step, `time_averaging`
-   shift, diffusion composition, which files/areas were used). **3-D: confirm
+   shift — or, with `data.time_stamp` / `time_window`, the `Record times:` line
+   with the first and last resolved record — diffusion composition, which
+   files/areas were used). **3-D: confirm
    W was actually read** — FESOM2 proceeds SILENTLY without vertical velocity
    when the W name does not resolve (even a misspelled explicit `var_w`); pin
    `mode.var_w` and check that `vel_w` in the smoke output exists and is non-zero where finite

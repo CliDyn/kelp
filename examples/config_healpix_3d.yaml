@@ -48,7 +48,9 @@ data:
   # avg_zos comes from the auto-derived 2D sibling store
   inicloud: seeds_3d.dat      # "lon lat depth" per line (metres, positive-down)
   output_path: tracks_healpix_3d.zarr
-  time_averaging: mean
+  time_averaging: mean        # stamps at the window END; START-stamped stores:
+                              # time_stamp: start + time_window: calendar_day
+                              # in its place (docs/healpix.md)
 
 time:
   start_time_idx: 0

@@ -95,7 +95,9 @@ set and the grid-hash cell is chosen --- pinned, measured or the reader's (\cref
 dimensions the vertical interfaces are trimmed to \conf{max\_levels}. The forcing is opened lazily, so that
 snapshots are read from disk only as they are needed, and the release positions are read. The time axis is
 resolved: the interval between stored snapshots is detected, the step is set, and for time-averaged forcing
-each timestamp is shifted from the end of its averaging window to its midpoint (\cref{ch:input}). Only then is
+each timestamp is shifted from the end of its averaging window to its midpoint (\cref{ch:input}), unless the
+records already sit at their window centres, placed there when the forcing was opened by the FESOM~1.4 reader
+or by the stamp keys \conf{data.time\_stamp} and \conf{data.time\_window} (\cref{sec:input-timeavg}). Only then is
 the release schedule built, since release steps are offsets divided by the step; it pre-allocates the full
 particle array and freezes not-yet-released particles (\cref{ch:lifecycle}). The seeds are rotated into the
 computational frame (\cref{ch:frame}). A set of probes then checks, before any output file exists, the
