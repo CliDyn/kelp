@@ -206,9 +206,9 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
     ring : bool
         Append ONE ring of dry cells (8-neighbourhood of the wet region,
         across the ORCA halo / fold) as zero-velocity elements after the wet
-        ones (default).  A Runge-Kutta stage that lands just on land then
-        gets zero velocity instead of killing the particle; a stage beyond
-        the ring still fails.  ``ring=False`` = wet cells only.  Ring cells
+        ones (default; land = zero velocity, as in Parcels).  A stage or end
+        point in the ring reads zero velocity (the particle stays ALIVE);
+        beyond the ring a stage still fails.  ``ring=False`` = wet cells only.  Ring cells
         that are non-convex or sit at a fold pivot are dropped (counted in
         ``_cgrid_ring_dropped``).
 
@@ -221,8 +221,7 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
         the interpolator reads this, not ``elem_nodes``).  ``elem_nodes`` is
         the same quad (containment is winding-agnostic).  Also
         ``_cgrid_n_wet`` (the first ``n_wet`` elements are wet cells, the
-        rest ring cells), ``_cgrid_nlev (E,) int32`` (1 wet / 0 ring) and
-        ``_cgrid_kallow (E,) int32`` (1; reserved for the 3-D ring).
+        rest ring cells), ``_cgrid_nlev (E,) int32`` (1 wet / 0 ring).
     """
     if orca not in CGRID_ORCA_LAYOUTS:
         raise ValueError(f"orca must be one of {CGRID_ORCA_LAYOUTS}, got {orca!r}")
@@ -373,7 +372,6 @@ def build_cgrid_mesh(glamf, gphif, tmask2d, *, depth2d=None, e2u=None, e1v=None,
     mesh._cgrid_corners = corners
     mesh._cgrid_n_wet = n_wet
     mesh._cgrid_nlev = np.r_[np.ones(n_wet), np.zeros(n_ring)].astype(np.int32)
-    mesh._cgrid_kallow = np.ones(n_wet + n_ring, dtype=np.int32)
     mesh._cgrid_ring_dropped = dict(ring_dropped)
     if (e2u is None) != (e1v is None):
         raise ValueError("pass both e2u and e1v, or neither")

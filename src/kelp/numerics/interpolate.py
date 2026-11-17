@@ -3383,8 +3383,7 @@ def _interp_cgrid_core(xp, yp, nn_node, elem_hint, time_dir,
         if not in_dom:
             return 0.0, 0.0, False
     if cgrid_nlev[e] <= 0:
-        # dry-ring cell: zero velocity (the particle keeps its position; the
-        # step's end-of-step pull-back decides whether it may stay)
+        # dry-ring cell: zero velocity (land, as in Parcels)
         return 0.0, 0.0, True
     j = int(cgrid_ji[e, 0])
     i = int(cgrid_ji[e, 1])
@@ -3526,9 +3525,6 @@ def interp_cgrid(state, mesh, vel, nn_nodes, time_dir=1.0, layer=0, *,
             U[i], V[i], ok[i] = _interp_cgrid_core(
                 state.lon[i], state.lat[i], int(nn_nodes[i]),
                 int(elems_arr[i]), time_dir, *a, vel.u, vel.v)
-    from .cgrid_step import CGRID_STATS, count_ring_evals
-    CGRID_STATS["ring_stage_evals"] += count_ring_evals(
-        mesh, state.lon, state.lat, U, V, ok, state.alive_mask)
     return U, V, ok
 
 

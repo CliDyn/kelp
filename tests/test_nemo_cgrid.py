@@ -219,11 +219,6 @@ def test_closed_basin_gyre_stays_inside(tmp_path):
     # they really circulate (not parked): many revolutions of the gyre
     tot = np.abs(np.diff(tr["lon"], axis=1)).sum(axis=1)
     assert tot.min() > 20 * D
-    # every recorded position is in a wet cell (the dry ring is never recorded)
-    from kelp.numerics.cgrid_step import cgrid_classify
-    wet, _e = cgrid_classify(get_reader("nemo").load_mesh(cfg.mesh),
-                             tr["lon"].ravel(), tr["lat"].ravel())
-    assert wet.all()
 
 
 # (d) flow into a wall: approach, never cross ---------------------------------
@@ -611,47 +606,11 @@ def _step_corner(ring):
     return rk4_step(st, vel, mesh, dt, 1.0, uv_interp="cgrid"), mesh
 
 
-def test_convex_corner_stage_no_longer_kills():
+def test_convex_corner_stage_stays_alive_in_ring():
     from kelp.core.particles import FailureReason, ParticleStatus
-    from kelp.numerics.cgrid_step import CGRID_STATS, cgrid_classify, reset_stats
     old, _m = _step_corner(ring=False)                    # documents the old failure
     assert old.status[0] == ParticleStatus.OUTSIDE
     assert old.failure_reason[0] == FailureReason.INTERPOLATION_FAILED
-    reset_stats()
-    new, mesh = _step_corner(ring=True)
+    new, _m = _step_corner(ring=True)                     # land = zero velocity
     assert new.status[0] == ParticleStatus.ALIVE
-    assert cgrid_classify(mesh, new.lon, new.lat)[0].all()          # ends wet
     assert new.lon[0] > 4.9 * D and new.lat[0] > 4.9 * D            # and did move on
-    assert CGRID_STATS["ring_stage_evals"] > 0 and CGRID_STATS["pullbacks"] == 1
-
-
-def test_settle_unit():
-    from kelp.core.particles import make_state
-    from kelp.numerics.cgrid_step import cgrid_classify, cgrid_post_step
-    flon, flat, tmask, u, v = _corner_case()
-    mesh = build_cgrid_mesh(flon, flat, tmask)
-    # the land block starts at row 6: a step from T(5,5) toward T(7,6) ends in the ring
-    st = make_state([4.5 * D, 4.5 * D], [4.5 * D, 4.5 * D])
-    st = st.replace(nearest_node=np.array([_nearest(mesh, 4.5 * D, 4.5 * D)] * 2, np.int32))
-    # particle 0: wet -> wet (untouched); particle 1: ends in a ring cell
-    res = st.replace(lon=np.array([4.6 * D, 5.5 * D]), lat=np.array([4.6 * D, 6.5 * D]))
-    out = cgrid_post_step(st, res, mesh)
-    assert out.lon[0] == res.lon[0] and out.lat[0] == res.lat[0]
-    # particle 1 moved along the segment, stopped just short of the land boundary
-    f = (out.lon[1] - 4.5 * D) / (1.0 * D)
-    assert 0.0 < f < 1.0 and out.lat[1] == pytest.approx(4.5 * D + f * 2.0 * D, abs=1e-12)
-    assert cgrid_classify(mesh, out.lon[1:], out.lat[1:])[0].all()
-    eps = 1e-6 * D
-    assert not cgrid_classify(mesh, out.lon[1:] + eps, out.lat[1:] + 2 * eps)[0].all()
-
-
-def test_start_in_ring_dies_out_of_bounds():
-    from kelp.core.particles import FailureReason, ParticleStatus, make_state
-    from kelp.numerics.cgrid_step import cgrid_pre_step
-    flon, flat, tmask, u, v = _corner_case()
-    mesh = build_cgrid_mesh(flon, flat, tmask)
-    st = make_state([4.5 * D, 5.5 * D], [4.5 * D, 5.5 * D])      # wet cell, land (ring) cell
-    st = st.replace(failure_reason=np.zeros(2, np.int8))
-    out = cgrid_pre_step(st, mesh)
-    assert list(out.status) == [ParticleStatus.ALIVE, ParticleStatus.OUTSIDE]
-    assert out.failure_reason[1] == FailureReason.OUT_OF_BOUNDS

@@ -1806,9 +1806,6 @@ def run_single_realization(
         n_time_total = ds.sizes["time"]
 
     step_fn = get_integrator(numerics.integrator)
-    if numerics.uv_interp == "cgrid":
-        from .numerics.cgrid_step import reset_stats as _cgrid_reset
-        _cgrid_reset()
     dt = numerics.dt
     time_dir = mode.time_dir
     output_freq = numerics.output_freq
@@ -2620,10 +2617,6 @@ def run_single_realization(
         print(f"  [time-aware] {_downgrade_count}/{n_steps} step(s) "
               f"fell back to steady RK (dt > dt_to_next)")
 
-    if verbose and numerics.uv_interp == "cgrid":
-        from .numerics.cgrid_step import stats_line as _cgrid_stats_line
-        print(_cgrid_stats_line())
-
     # Timing summary
     if verbose and _step_times:
         arr = np.array(_step_times) * 1000  # ms
@@ -3339,12 +3332,6 @@ def run_tracking(
         n_pulses=config.time.n_pulses, pulse_interval=config.time.pulse_interval,
         dt=dt, start_step_i=0)
     init_state = _maybe_rotate_seeds(init_state, mesh)
-    if config.numerics.uv_interp == "cgrid" and getattr(mesh, "_cgrid", False):
-        from .numerics.cgrid_step import count_ring_seeds
-        n_ring = count_ring_seeds(mesh, init_state.lon, init_state.lat)
-        if n_ring:
-            print(f"  cgrid: {n_ring} seed(s) lie in a dry ring cell (land); "
-                  "they die OUT_OF_BOUNDS at step 1")
     # Opt-in failure_reason tracking (mode.track_failure_reason): allocate
     # the int8 array on the seed state — every integrator path stamps it,
     # the writer lazily creates the output variable, checkpoints carry it.
