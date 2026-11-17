@@ -29,7 +29,7 @@ configuration:
   - src/kelp/readers/__init__.py:apply_time_options
   - src/kelp/readers/nemo.py:NemoReader
   doc: docs/configuration.md
-  verified_at: 8f43f9d
+  verified_at: 9efa103
 coordinate_frame:
   code:
   - src/kelp/core/rotation.py:euler_matrix
