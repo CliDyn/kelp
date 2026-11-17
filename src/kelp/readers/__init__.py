@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
+import functools
 import warnings
 
 import numpy as np
@@ -417,6 +418,17 @@ def time_axis_epoch(ds) -> Optional[Tuple[str, str]]:
 #: dataset's axis from them
 _TIME_OPTION_KEYS = ("time_stamp", "time_window", "time_offset")
 
+#: name of the dataset coordinate ``(time, TIME_WINDOW_EDGE)`` that holds each
+#: record's averaging window ``[start, end]``, attached where the record times
+#: are resolved (:func:`apply_time_options`, the FESOM 1.4 reader) and read by
+#: :func:`exact_cycle`; private to KELP, so that a store's own ``time_bnds``
+#: is never mistaken for it
+TIME_WINDOWS = "kelp_time_windows"
+
+#: the edge dimension of ``TIME_WINDOWS`` (length 2: start, end); private to
+#: KELP, so that a CF ``nv`` dimension of another size never collides with it
+TIME_WINDOW_EDGE = "kelp_time_window_edge"
+
 #: mesh types whose reader resolves what time each record represents (the
 #: centre of its averaging window for means, the stamp for snapshots): no
 #: midpoint shift, no ``data.time_averaging``, the stamp options above
@@ -736,6 +748,16 @@ def _time_axis_label(ds, data_cfg) -> str:
     return str(source) if source else "the dataset"
 
 
+@functools.lru_cache(maxsize=None)
+def _xarray_keeps_us() -> bool:
+    """Whether the xarray in use keeps a ``datetime64[us]`` coordinate at
+    ``us`` (older versions store every datetime64 at ``ns``, which cannot
+    hold a date beyond 2262-04-11)."""
+    import xarray as xr
+    t = np.array(["2000-01-01"], dtype="datetime64[us]")
+    return xr.Dataset(coords={"t": t})["t"].dtype == np.dtype("datetime64[us]")
+
+
 def apply_time_options(ds, data_cfg, mesh_type: str) -> xr.Dataset:
     """The dataset with its ``time`` coordinate resolved from the stamp
     options, for a reader that does not resolve its record times itself.
@@ -767,7 +789,15 @@ def apply_time_options(ds, data_cfg, mesh_type: str) -> xr.Dataset:
         instant fits that range, else at ``us`` (never coarser, so a
         half-window centre is exact), with the input's
         ``encoding["calendar"]`` and attributes; the data variables are
-        shared, the close hook is kept.
+        shared, the close hook is kept.  For means (every
+        ``data.time_stamp`` but ``instant``) the new dataset also carries
+        the coordinate ``TIME_WINDOWS`` with dimensions ``("time",
+        TIME_WINDOW_EDGE)``: each record's averaging window ``[start,
+        end]``, cftime of the axis's calendar on a cftime axis,
+        ``datetime64[us]`` on a datetime64 axis whatever the unit of
+        ``time``.  It is what :func:`exact_cycle` reads.  It is left out for
+        snapshots, and when a window edge lies outside the ``ns`` range and
+        the xarray in use stores datetime64 coordinates only at ``ns``.
 
     Raises
     ------
@@ -812,8 +842,12 @@ def apply_time_options(ds, data_cfg, mesh_type: str) -> xr.Dataset:
             "axis (datetime64 or cftime), i.e. time units of the form "
             "'<unit> since <date>' in the files. Remove the stamp options")
     ax = resolve_stamps(stamps, opts, label=label)
+    windows = (ax.windows if ax.windows is not None and len(ax.windows) > 0
+               else None)
+    win = None
     if vals.dtype == object:
         new = ax.instants
+        win = windows
     else:
         us = np.array([np.datetime64(datetime(t.year, t.month, t.day, t.hour,
                                               t.minute, t.second,
@@ -831,12 +865,95 @@ def apply_time_options(ds, data_cfg, mesh_type: str) -> xr.Dataset:
         unit = ("ns" if np.datetime_data(vals.dtype)[0] == "ns" and fits_ns
                 else "us")
         new = us.astype(f"datetime64[{unit}]")
+        if windows is not None:
+            # the windows always at us, whatever the unit of time: an edge
+            # can lie beyond the ns range where no instant does
+            win = np.array([[np.datetime64(datetime(t.year, t.month, t.day,
+                                                    t.hour, t.minute, t.second,
+                                                    t.microsecond), "us")
+                             for t in row] for row in windows],
+                           dtype="datetime64[us]")
+            if not _xarray_keeps_us():
+                # this xarray would store the edges at ns: leave them out
+                # when one does not fit (the run keeps the legacy period)
+                try:
+                    edges_fit = bool((win.astype("datetime64[ns]")
+                                      .astype("datetime64[us]") == win).all())
+                except OverflowError:
+                    edges_fit = False
+                if not edges_fit:
+                    win = None
     enc = {k: tv.encoding[k] for k in ("calendar",) if k in tv.encoding}
-    out = ds.assign_coords(time=xr.Variable(("time",), new, dict(tv.attrs),
-                                            enc))
-    # assign_coords drops the close hook
+    coords = {"time": xr.Variable(("time",), new, dict(tv.attrs), enc)}
+    if win is not None:
+        coords[TIME_WINDOWS] = xr.Variable(("time", TIME_WINDOW_EDGE), win)
+    # assign_coords drops the close hook: ONE call for both coordinates, then
+    # set_close (a second assign_coords after it would lose the hook again)
+    out = ds.assign_coords(coords)
     out.set_close(ds._close)
     return out
+
+
+def exact_cycle(ds, file_times,
+                n_time_total: int) -> Optional[Tuple[float, float]]:
+    """The exact period and seam of ``time.on_exhausted: cycle``, or None
+    for the legacy rule.
+
+    Records that are means over windows of unequal length (calendar months
+    or years) are not equally spaced, so the forcing repeats after the sum
+    of the windows, not after the span of the records plus the last
+    interval.  The windows come from the coordinate ``TIME_WINDOWS``, which
+    the places that resolve record times attach (:func:`apply_time_options`,
+    the FESOM 1.4 reader).
+
+    Parameters
+    ----------
+    ds : xr.Dataset or None
+        The run's dataset; anything without the ``TIME_WINDOWS`` coordinate
+        (or without ``coords``) gives None.
+    file_times : array_like of float or None
+        The record times of the run's axis, seconds since its first record
+        (:func:`extract_time_info`).
+    n_time_total : int
+        The number of records the run uses (the first ``n_time_total`` of
+        the axis).
+
+    Returns
+    -------
+    (period, seam) or None
+        ``period``: the sum of the window lengths of the first
+        ``n_time_total`` records, in seconds; ``seam``: ``period -
+        (file_times[n - 1] - file_times[0])``, the time from the last
+        record to the first record of the next pass, in seconds.  A tuple
+        only when (1) ``ds`` carries ``TIME_WINDOWS``; (2) ``n_time_total
+        >= 2``; (3) ``file_times`` is given with at least ``n_time_total``
+        entries and the coordinate has at least ``n_time_total`` rows; (4)
+        the window lengths of those records differ by more than 1 ms.
+        Otherwise None.  The selection is by window equality, never by
+        comparing the two periods: a caller keeps its legacy arithmetic
+        verbatim for ``None``.
+    """
+    coords = getattr(ds, "coords", None)
+    if coords is None or TIME_WINDOWS not in coords:
+        return None
+    n = int(n_time_total)
+    if n < 2 or file_times is None or len(file_times) < n:
+        return None
+    win = np.asarray(coords[TIME_WINDOWS].values)
+    if win.shape[0] < n:
+        return None
+    win = win[:n]
+    if win.dtype == object:                      # cftime: calendar-aware
+        lengths = np.array([(e - s).total_seconds() for s, e in win],
+                           dtype=np.float64)
+    else:                                        # datetime64, overflow-safe
+        lengths = ((win[:, 1].astype("datetime64[us]")
+                    - win[:, 0].astype("datetime64[us]"))
+                   / np.timedelta64(1, "s")).astype(np.float64)
+    if lengths.max() - lengths.min() <= 1e-3:    # equal windows: legacy rule
+        return None
+    period = float(lengths.sum())
+    return period, period - float(file_times[n - 1] - file_times[0])
 
 
 # ---------------------------------------------------------------------------
@@ -1417,6 +1534,7 @@ __all__ = [
     "register",
     "get_reader",
     "extract_time_info",
+    "exact_cycle",
     "resolve_w_sign",
     "_detect_engine",
     "_read_kh_fields",
