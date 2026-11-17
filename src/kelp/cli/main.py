@@ -75,8 +75,8 @@ def _cmd_info(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
     try:
-        # the stamp options, refused before the mesh is read as in a run
-        # (fesom14 only; _open_run_dataset passes them on)
+        # the stamp options and their rules, refused before the mesh is read
+        # as in a run (_open_run_dataset passes them on or applies them)
         _time_option_kwargs(config)
     except (TypeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -148,8 +148,7 @@ def _cmd_info(args: argparse.Namespace) -> int:
                 t0 = ds["time"].values[0]
                 t1 = ds["time"].values[-1]
                 print(f"    {t0}  →  {t1}")
-            record_times = _describe_record_times(
-                ds, getattr(config.data, "time_offset", None))
+            record_times = _describe_record_times(ds, config.data)
             if record_times is not None:
                 print(f"    record times {record_times}")
     finally:

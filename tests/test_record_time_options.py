@@ -407,3 +407,110 @@ def test_record_time_mode():
         _cfg("fesom2", time_stamp="start", time_window="1 d")
     ) == RESOLVED_FROM_OPTIONS
     assert _record_time_mode(_cfg("fesom2")) is None
+
+
+# ---------------------------------------------------------------------------
+# run start: the checks before anything is read, the open of a run
+# ---------------------------------------------------------------------------
+
+def _run_cfg(tmp_path, mesh_type, on_exhausted="stop", **data_kw):
+    """A run_tracking config whose every path is absent: a refusal proves it
+    comes before any read."""
+    from kelp.core.config import (AppConfig, MeshConfig, ModeConfig,
+                                  NumericsConfig, TimeConfig)
+    return AppConfig(
+        mode=ModeConfig(), numerics=NumericsConfig(dt=3600.0),
+        mesh=MeshConfig(type=mesh_type, meshpath=str(tmp_path / "absent")),
+        data=DataConfig(ncinput=str(tmp_path / "absent"),
+                        inicloud=str(tmp_path / "absent.dat"), **data_kw),
+        time=TimeConfig(n_steps=1, on_exhausted=on_exhausted))
+
+
+_RUN_START_CASES = {
+    "time_averaging": (
+        dict(time_stamp="start", time_window="calendar_day",
+             time_averaging="instant"),
+        "stop", lambda mt: ["Remove data.time_averaging"]),
+    "offset_alone": (
+        dict(time_offset="+6 h"),
+        "stop", lambda mt: ["data.time_offset", repr(mt)]),
+    "cycle_month": (
+        dict(time_stamp="start", time_window="calendar_month"),
+        "cycle", lambda mt: ["time.on_exhausted"]),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_RUN_START_CASES))
+@pytest.mark.parametrize("mesh_type", OTHERS)
+def test_refused_at_run_start_before_any_read(tmp_path, mesh_type, case):
+    from kelp import tracking
+    data_kw, on_exhausted, needles = _RUN_START_CASES[case]
+    cfg = _run_cfg(tmp_path, mesh_type, on_exhausted, **data_kw)
+    with pytest.raises(ValueError) as e:
+        tracking.run_tracking(cfg)
+    msg = str(e.value)
+    for needle in needles(mesh_type):
+        assert needle in msg, (needle, msg)
+
+
+def test_time_option_kwargs_for_other_readers_is_empty():
+    from kelp.readers import _time_option_kwargs
+    assert _time_option_kwargs(
+        _cfg("fesom2", time_stamp="start", time_window="1 d")) == {}
+    assert _time_option_kwargs(
+        _cfg("fesom2", "cycle", time_stamp="start",
+             time_window="calendar_day")) == {}
+
+
+def test_fesom14_kwargs_and_cycle_unchanged():
+    from kelp.readers import _time_option_kwargs
+    assert _time_option_kwargs(
+        _cfg("fesom14", "cycle", time_stamp="end",
+             time_window="calendar_month")) == {
+        "time_stamp": "end", "time_window": "calendar_month"}
+
+
+def _fake_reader(times, calls):
+    """A reader whose ``open_dataset`` returns an in-memory dataset stamped
+    ``times`` with a close hook that records each call."""
+    class _Reader:
+        @staticmethod
+        def open_dataset(path, v_path=None, w_path=None, mode_cfg=None):
+            ds = _ds(times)
+            ds.set_close(lambda: calls.append(1))
+            return ds
+    return _Reader
+
+
+def _open_cfg():
+    cfg = _cfg("fesom2", time_stamp="start", time_window="calendar_day")
+    cfg.mode = SimpleNamespace(max_levels=None)
+    cfg.numerics = SimpleNamespace(diffusion=SimpleNamespace(enabled=False),
+                                   beaching=None)
+    return cfg
+
+
+def _open_mesh():
+    return SimpleNamespace(sigma=np.zeros(0), metadata={})
+
+
+def test_open_run_dataset_applies_and_keeps_the_close_hook():
+    from kelp.readers import _open_run_dataset
+    calls = []
+    reader = _fake_reader(_d64([f"{d}T00:00" for d in _DAYS]), calls)
+    ds = _open_run_dataset(reader, _open_mesh(), _open_cfg())
+    assert _iso(ds) == ["2001-01-01T12:00:00", "2001-01-02T12:00:00",
+                        "2001-01-03T12:00:00"]
+    assert calls == []
+    ds.close()
+    assert calls == [1]
+
+
+def test_open_run_dataset_closes_on_a_refusal():
+    from kelp.readers import _open_run_dataset
+    calls = []
+    reader = _fake_reader(_d64(["2001-01-01T00:00", "2001-01-02T00:00",
+                                "2001-01-04T00:00"]), calls)
+    with pytest.raises(ValueError):
+        _open_run_dataset(reader, _open_mesh(), _open_cfg())
+    assert calls == [1]

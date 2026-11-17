@@ -645,11 +645,16 @@ class DataConfig:
     averaging window, so the effective time must be shifted to the
     *midpoint* of each window.  This field should always be set
     explicitly; if omitted a warning is printed with a suggestion based
-    on the mesh type.  ``mesh.type: fesom14`` is the exception: its reader
-    resolves what time each record represents, ``time_averaging`` is
-    refused there, and ``time_stamp`` / ``time_window`` / ``time_offset``
-    say what the stamps mean when the files cannot (refused with any other
-    mesh type when the run starts).
+    on the mesh type.  ``time_stamp`` / ``time_window`` / ``time_offset``
+    say what the stamps mean, for every mesh type: with any reader but
+    FESOM 1.4 the stamp and the window (with the offset when the stamps sit
+    early or late) take the place of ``time_averaging`` (refused next to
+    them when the run starts), and the record times are resolved from them
+    once, at the open.  ``mesh.type: fesom14`` is the exception: its reader
+    resolves what time each record represents from the files,
+    ``time_averaging`` is refused there, the keys decide over the files'
+    time bounds and output schedule, and the offset may also be given
+    alone.
     """
     ncinput: str = ""              # velocity NetCDF file or directory
     ncinput_v: str = ""            # separate v file (empty = u+v in same ncinput)
@@ -662,14 +667,19 @@ class DataConfig:
     # of a sharded run); None = the seed file's '# kelp particle_offset N'
     # header (utils/split_seeds.py) or 0.  Keys every random draw.
     particle_offset: Optional[int] = None
-    # --- fesom14 only: what each record's time stamp means --------------
-    # Passed to the reader's open_dataset only when set; any other mesh type
-    # refuses them when the run starts.  time_stamp: start | centre | end |
-    # instant (where the stamp sits in its averaging window; instant =
-    # snapshots); time_window: calendar_month | calendar_year | calendar_day
-    # | '<number> <s|min|h|d>' (the averaging window, or the snapshot
-    # cadence); the two are given together or not at all, and then decide
-    # over the files' time bounds and output schedule.  time_offset:
+    # --- what each record's time stamp means (every mesh type) ---------
+    # fesom14: passed to the reader's open_dataset only when set; the reader
+    # also resolves without them (time bounds, output schedule) and takes
+    # the offset alone.  Any other mesh type: they take the place of
+    # time_averaging (refused next to them when the run starts) and the
+    # opened dataset's time axis is resolved from them
+    # (readers.apply_time_options); the offset needs the stamp and the
+    # window.  time_stamp: start | centre | end | instant (where the stamp
+    # sits in its averaging window; instant = snapshots); time_window:
+    # calendar_month | calendar_year | calendar_day | '<number>
+    # <s|min|h|d>' (the averaging window, or the snapshot cadence); the two
+    # are given together or not at all, and for fesom14 then decide over
+    # the files' time bounds and output schedule.  time_offset:
     # '<+-number> <s|min|h|d>' added to the raw stamps before anything else
     # (e.g. a raw job that started mid-day).
     time_stamp: Optional[str] = None

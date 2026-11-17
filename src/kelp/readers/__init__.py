@@ -18,9 +18,11 @@ that checks a dataset against the mesh; every entry of a run (and ``kelp
 info``) calls it through :func:`_prepare_dataset`.  A reader that resolves
 what time each record represents (``_READER_RESOLVES_TIME``) takes the
 ``data.time_*`` stamp options as ``open_dataset`` keywords
-(:func:`_time_option_kwargs`); a reader that opens only the variables a run
-consumes (``_READER_OPENS_CONSUMED``) takes the beaching dry mask
-(:func:`_dry_mask_kwargs`).
+(:func:`_time_option_kwargs`); for every other reader
+:func:`apply_time_options` resolves the opened dataset's ``time`` coordinate
+from them (:func:`_open_run_dataset` applies it once, at the open).  A reader
+that opens only the variables a run consumes (``_READER_OPENS_CONSUMED``)
+takes the beaching dry mask (:func:`_dry_mask_kwargs`).
 """
 from __future__ import annotations
 
@@ -169,7 +171,10 @@ def _open_run_dataset(reader, mesh, config, verbose: bool = False):
     reader fails loudly naming it), the diffusion block for the FESOM2
     ``var_az`` field, the stamp options (:func:`_time_option_kwargs`) and
     the beaching dry mask (:func:`_dry_mask_kwargs`) — so the other
-    readers' signatures stay untouched.
+    readers' signatures stay untouched.  For a reader that does not resolve
+    its record times itself the stamp options are then applied to the
+    opened dataset (:func:`apply_time_options`, once: a second call shifts
+    again); a refusal there closes the dataset before it propagates.
 
     Parameters
     ----------
@@ -183,7 +188,14 @@ def _open_run_dataset(reader, mesh, config, verbose: bool = False):
     Returns
     -------
     xr.Dataset
-        The open dataset.
+        The open dataset, its ``time`` resolved from the stamp options when
+        they are set.
+
+    Raises
+    ------
+    ValueError
+        The rules of :func:`_time_option_kwargs`; a refusal of
+        :func:`apply_time_options` (the dataset is closed first).
     """
     _apply_max_levels(mesh, config.mode, verbose)
     extra = {}
@@ -198,10 +210,15 @@ def _open_run_dataset(reader, mesh, config, verbose: bool = False):
         extra["diffusion"] = diff
     extra.update(_time_option_kwargs(config))
     extra.update(_dry_mask_kwargs(config))
-    return reader.open_dataset(config.data.ncinput,
-                               v_path=config.data.ncinput_v or None,
-                               w_path=config.data.ncinput_w or None,
-                               mode_cfg=config.mode, **extra)
+    ds = reader.open_dataset(config.data.ncinput,
+                             v_path=config.data.ncinput_v or None,
+                             w_path=config.data.ncinput_w or None,
+                             mode_cfg=config.mode, **extra)
+    try:
+        return apply_time_options(ds, config.data, config.mesh.type)
+    except Exception:
+        ds.close()
+        raise
 
 
 #: exact unit tokens of a numeric time axis without an epoch
@@ -424,11 +441,15 @@ _TIME_SOURCE_TEXT = {
 
 
 def _time_option_kwargs(config) -> Dict[str, str]:
-    """The stamp options set in ``config.data``, as ``open_dataset`` kwargs.
+    """The stamp options set in ``config.data``, as ``open_dataset`` kwargs,
+    checked before the mesh or any data is read.
 
     Only a reader that resolves its record times takes them (``mesh.type:
-    fesom14``); it also takes the place of ``data.time_averaging``.  Called
-    before the mesh or any data is read.
+    fesom14``); it also takes the place of ``data.time_averaging``.  For
+    any other mesh type the options are validated here
+    (:func:`_check_time_options`, :func:`_check_cycle_window`) and no
+    keyword is returned: :func:`_open_run_dataset` applies them to the
+    opened dataset (:func:`apply_time_options`).
 
     Parameters
     ----------
@@ -437,32 +458,28 @@ def _time_option_kwargs(config) -> Dict[str, str]:
     Returns
     -------
     dict
-        ``{key: value}`` for each of ``time_stamp``, ``time_window`` and
-        ``time_offset`` that is set (empty when none is).
+        For a mesh type in ``_READER_RESOLVES_TIME``: ``{key: value}`` for
+        each of ``time_stamp``, ``time_window`` and ``time_offset`` that is
+        set (empty when none is).  For any other: empty.
 
     Raises
     ------
-    TypeError
-        A key is set for another mesh type; the message names every key
-        set and the mesh type.
     ValueError
-        ``data.time_averaging`` is set for a reader that resolves its record
-        times; the message points to the stamp options.
+        For a reader that resolves its record times: ``data.time_averaging``
+        is set; the message points to the stamp options.  For any other: the
+        rules of :func:`_check_time_options` (an invalid key,
+        ``data.time_averaging`` next to a key, ``data.time_offset`` without
+        ``data.time_stamp`` and ``data.time_window``) and the refusal of
+        ``time.on_exhausted: cycle`` with a calendar month or year window
+        (:func:`_check_cycle_window`).
     """
     data = config.data
-    kw = {k: getattr(data, k) for k in _TIME_OPTION_KEYS
-          if getattr(data, k, None) is not None}
     mesh_type = config.mesh.type
     if mesh_type not in _READER_RESOLVES_TIME:
-        if kw:
-            keys = ", ".join(f"data.{k}" for k in kw)
-            raise TypeError(
-                f"{keys} {'is' if len(kw) == 1 else 'are'} set, but mesh.type "
-                f"is {mesh_type!r}: the stamp options are read by the FESOM "
-                "1.4 reader only (mesh.type: fesom14). Remove "
-                f"{keys}; for this reader data.time_averaging ('mean' or "
-                "'instant') says what the time stamps are")
-        return kw
+        _check_time_options(data, mesh_type)
+        _check_cycle_window(config)
+        return {}
+    kw = _set_time_options(data)
     if getattr(data, "time_averaging", None) is not None:
         raise ValueError(
             f"data.time_averaging = {data.time_averaging!r} is set, but the "
@@ -506,29 +523,41 @@ def _dry_mask_kwargs(config) -> Dict[str, str]:
     return {"dry_mask_var": name} if name else {}
 
 
-def _describe_record_times(ds, offset: Optional[str] = None) -> Optional[str]:
-    """One summary line on record times resolved by the reader, or None.
+def _describe_record_times(ds, data_cfg=None) -> Optional[str]:
+    """One summary line on resolved record times, or None.
 
     Parameters
     ----------
     ds : xarray.Dataset
         A dataset whose reader resolved its record times (it carries
-        ``attrs["fesom14_time_source"]``); any other gives None.
-    offset : str, optional
-        ``data.time_offset``, named when set.
+        ``attrs["fesom14_time_source"]``), or one whose time axis
+        :func:`apply_time_options` resolved from the stamp options.
+    data_cfg : DataConfig, optional
+        ``config.data``: ``time_offset`` is named when set; for a dataset
+        without ``attrs["fesom14_time_source"]``, ``time_stamp`` and
+        ``time_window`` (both set) give the line, else None.
 
     Returns
     -------
     str or None
         What resolved the times and the first and last instants.
     """
+    offset = getattr(data_cfg, "time_offset", None)
     source = getattr(ds, "attrs", {}).get("fesom14_time_source")
-    if source is None:
-        return None
-    text = (f"resolved by the reader from "
-            f"{_TIME_SOURCE_TEXT.get(source, str(source))}")
-    if offset is not None:
-        text += f", data.time_offset {offset} applied"
+    if source is not None:
+        text = (f"resolved by the reader from "
+                f"{_TIME_SOURCE_TEXT.get(source, str(source))}")
+        if offset is not None:
+            text += f", data.time_offset {offset} applied"
+    else:
+        stamp = getattr(data_cfg, "time_stamp", None)
+        window = getattr(data_cfg, "time_window", None)
+        if stamp is None or window is None:
+            return None
+        text = (f"resolved from data.time_stamp={stamp}, "
+                f"data.time_window={window}")
+        if offset is not None:
+            text += f", data.time_offset={offset}"
     t = ds["time"].values
     if len(t):
         text += f"; first {t[0]}, last {t[-1]}"
