@@ -185,7 +185,10 @@ def detect_cgrid_layout(tlon, tlat, flon=None, flat=None, flags=None):
     if not all(np.isfinite(a).all() for a in (tlon, tlat) + ((flon, flat) if have_f else ())):
         raise ValueError("the mesh file's glamt/gphit/glamf/gphif hold non-finite values: "
                          "the layout cannot be detected")
-    if ((tlon == 0) & (tlat == 0)).sum() + (((flon == 0) & (flat == 0)).sum() if have_f else 0) > 1:
+    def _zero_block(lon, lat):        # a tile is a block; one point (0E, 0N) and its halo copy are not
+        z = (lon == 0) & (lat == 0)
+        return bool((z[:, 1:] & z[:, :-1]).any() or (z[1:] & z[:-1]).any())
+    if _zero_block(tlon, tlat) or (have_f and _zero_block(flon, flat)):
         raise ValueError(
             "the mesh file has zero-filled tiles (land-processor elimination when "
             "it was assembled): regenerate it without land elimination or use domain_cfg.nc")

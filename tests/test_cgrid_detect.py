@@ -112,3 +112,13 @@ def test_pole_guard_needs_the_whole_row_to_collapse():
     for a in xy["T"]:
         a[-1, 5] = a[-1, 6]
     assert _detect(xy)[0] == CgridLayout((8, 10))
+
+
+def test_a_point_at_lon0_lat0_and_its_halo_copy_is_not_a_zero_tile():
+    lat1 = np.arange(-5, 7) * 10.0                       # a T row at the equator
+    lon1 = (np.arange(22) - 1) * 18.0                    # a T column at lon 0 (+ its halo copy)
+    lon, lat = np.meshgrid(lon1, lat1)
+    lon = ((lon + 180.0) % 360.0) - 180.0
+    assert ((lon == 0) & (lat == 0)).sum() == 2
+    lay, _ = _detect({"T": (lon, lat), "F": (lon + 9.0, lat + 5.0)})
+    assert (lay.halo_cols, lay.periodic) == (True, True)
