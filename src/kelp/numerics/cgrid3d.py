@@ -58,6 +58,10 @@ def _level_coord(mesh, e, ok, z=None, s=None):
 
 def cgrid3d_step(state, vel, mesh, dt, time_dir, scheme, kwargs):
     from . import integrators as I
+    if kwargs.get("diffusion") is not None or kwargs.get("recon") is not None:
+        raise NotImplementedError(
+            "the 3-D C-grid step supports neither diffusion nor temporal "
+            "(PCHIP) reconstruction")
     alive = state.alive_mask
     if not alive.any():
         return I._zero_dead_velocity(state)
@@ -100,8 +104,12 @@ def cgrid3d_step(state, vel, mesh, dt, time_dir, scheme, kwargs):
     # unchanged s keeps z (a particle at rest, or on land, is not re-measured)
     z = np.where(s == s0, state.z,
                  _level_coord(mesh, np.where(failed, e0, e1), np.where(failed, ok0, in_dom), s=s))
+    # vel_w in m/s: the first stage's ds/dt times the start cell's thickness
+    e3 = (_level_coord(mesh, e0, ok0, s=np.floor(s0) + 1.0)
+          - _level_coord(mesh, e0, ok0, s=np.floor(s0)))
+    w_ms = first[2] * e3
     reason = I._update_failure_reason(
         state.failure_reason, {FailureReason.INTERPOLATION_FAILED: interp_failed,
                                FailureReason.OUT_OF_BOUNDS: domain_failed})
     return state.replace(lon=lon, lat=lat, z=z, status=status, nearest_node=nn,
-                         u=first[0], v=first[1], w=first[2], failure_reason=reason)
+                         u=first[0], v=first[1], w=w_ms, failure_reason=reason)

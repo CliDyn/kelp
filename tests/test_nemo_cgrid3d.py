@@ -369,3 +369,25 @@ def test_garbage_on_land_faces_is_masked_by_the_tmask_faces():
                                      0, mesh, np.float64, None) for u, v in (clean, dirty)]
     for f in ("u", "v", "w"):
         np.testing.assert_array_equal(getattr(out[0], f), getattr(out[1], f))
+
+
+def test_vel_w_is_dz_dt_in_metres_per_second():
+    mesh, e2u, e1v, nl = _box()
+    u = np.zeros((K, NY, NX)); v = np.zeros_like(u)
+    u[0, :, 1:4] = 0.05; u[0, :, 4:8] = -0.05          # convergence in layer 0 -> downwelling
+    u[1, :, 1:4] = -0.05; u[1, :, 4:8] = 0.05
+    vel = _vel(mesh, u, v, _w(mesh, u, v, e2u, e1v))
+    st = make_state([3.5 * D], [2.5 * D], [5.0])
+    out = cgrid3d_step(st, vel, mesh, 1.0, 1.0, "euler", {})
+    dzdt = (out.z - st.z) / 1.0
+    assert dzdt[0] != 0 and abs(out.w[0] - dzdt[0]) < 1e-3 * abs(dzdt[0])
+
+
+def test_cgrid3d_step_refuses_diffusion_and_reconstruction():
+    mesh, *_ = _box()
+    z = np.zeros((K, NY, NX))
+    vel = _vel(mesh, z, z, np.zeros((K + 1, NY, NX)))
+    st = make_state([3.5 * D], [2.5 * D], [5.0])
+    for kw in ({"diffusion": object()}, {"recon": object()}):
+        with pytest.raises(NotImplementedError):
+            cgrid3d_step(st, vel, mesh, 1.0, 1.0, "euler", kw)
