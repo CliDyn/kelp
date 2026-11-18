@@ -1646,11 +1646,12 @@ def _check_step_grid(*, integrator, temporal_interp, file_times, n_time_total,
     and the record ahead; a step that crosses a record without ending on it
     would need the next pair for its later stages and runs on the steady
     velocity of its start instead.  So every record the run reaches must lie
-    on the step grid: a whole number of steps from the start (``sim_time``),
-    to within :func:`_snapshot_band` (under ``cycle`` the records of every
-    pass, so the seam too).  Measured from the start, not from the previous
-    record, so that the output's record times (start + n dt) stay on the
-    records however long the run.  Euler (one stage) and discrete mode are
+    on the step grid: a whole number of steps from the start (``sim_time``)
+    and from the previous record, to within :func:`_snapshot_band` (under
+    ``cycle`` the records of every pass, so the seam too).  From the start so
+    that the output's record times (start + n dt) stay on the records however
+    long the run; from the previous record because the loop sets the clock to
+    each record it reaches.  Euler (one stage) and discrete mode are
     not checked.  ``n_steps`` None checks to the end of the records (one
     period under ``cycle``).
     """
@@ -1666,8 +1667,7 @@ def _check_step_grid(*, integrator, temporal_interp, file_times, n_time_total,
     d = 1.0 if direction >= 0 else -1.0
     t0 = float(sim_time)
     if on_exhausted == "cycle":
-        period = (float(cycle[0]) if cycle is not None
-                  else float(ft[-1] - ft[0] + (ft[-1] - ft[-2])))
+        period = float(_cycle_period(ft, n, cycle))
         span = period if n_steps is None else float(n_steps) * dt
     else:
         period = None
@@ -1686,16 +1686,31 @@ def _check_step_grid(*, integrator, temporal_interp, file_times, n_time_total,
         return
     if d < 0:
         rec = rec[::-1]
+    # from the start (the output's record times, start + n dt, stay on the
+    # records) and from the previous record (the loop sets the clock to each
+    # record it reaches, so the misses of two records must not add up)
     offs = np.abs(rec - t0)
-    miss = np.abs(offs - np.rint(offs / dt) * dt)
-    bad = np.flatnonzero(miss > band)
+    gaps = np.abs(np.diff(np.r_[t0, rec]))
+    miss_o = np.abs(offs - np.rint(offs / dt) * dt)
+    miss_g = np.abs(gaps - np.rint(gaps / dt) * dt)
+    bad = np.flatnonzero((miss_o > band) | (miss_g > band))
     if bad.size == 0:
         return
     i = int(bad[0])
-    where = (f"the run starts {offs[0]:g} s from the record at {rec[0]:g} s, "
-             f"which is {offs[0] / dt:.7g} steps" if i == 0 else
-             f"the record at {rec[i]:.10g} s lies {offs[i]:.10g} s from the "
-             f"start at {t0:.10g} s, which is {offs[i] / dt:.7g} steps")
+    if i == 0:
+        where = (f"the run starts {offs[0]:.10g} s from the record at "
+                 f"{rec[0]:.10g} s, which is {offs[0] / dt:.9g} steps")
+    elif miss_o[i] > band:
+        where = (f"the record at {rec[i]:.10g} s lies {offs[i]:.10g} s from "
+                 f"the start at {t0:.10g} s, which is {offs[i] / dt:.9g} "
+                 "steps")
+    else:
+        where = (f"the records at {rec[i - 1]:.10g} s and {rec[i]:.10g} s "
+                 f"are {gaps[i]:.10g} s apart, which is {gaps[i] / dt:.9g} "
+                 "steps")
+    if period is not None and not (ft[0] <= rec[i] <= ft[-1]):
+        where += (" (a record of another pass of on_exhausted: cycle, times "
+                  "counted from the first record of the axis)")
     # suggest whole-second steps that fit every record, when the distances
     # are whole seconds
     hint = ""
@@ -1708,10 +1723,11 @@ def _check_step_grid(*, integrator, temporal_interp, file_times, n_time_total,
         below = [q for q in divs if q < dt][-2:]
         fits = sorted(above + below, reverse=True)
         if fits:
-            hint = (f" Steps that fit (divisors of {gcd} s near dt): "
+            hint = (f" Steps that fit a run of the same duration (divisors "
+                    f"of {gcd} s near dt): "
                     + ", ".join(f"{q} s" for q in fits) + ".")
     raise ValueError(
-        f"numerics.dt = {dt:g} s does not land on the records: {where}. "
+        f"numerics.dt = {dt:.10g} s does not land on the records: {where}. "
         f"With temporal_interp: true, {integrator} takes the velocity at the "
         "start of each step and at the record ahead, so a step that crosses "
         "a record would run on the steady velocity of its start; every "
@@ -2305,12 +2321,18 @@ def run_single_realization(
         if np.issubdtype(_ds_times.dtype, np.datetime64):
             _t0_epoch = _ds_times[0]
 
-    # Snapshot band (``_snapshot_band``): a step that reaches a snapshot to
-    # within it ends exactly ON it (its length is the distance to the
-    # snapshot and the clock is set to the snapshot, below), and a query that
-    # close below a snapshot starts on it (``_resolve_time_bracket``).  The
-    # clock's roundoff therefore never accumulates past a snapshot.
-    _snap = _snapshot_band(dt)
+    # Snapshot band.  Time-interpolated RK (``_snapshot_band``): a step that
+    # reaches a snapshot to within it ends exactly ON it (its length is the
+    # distance to the snapshot and the clock is set to the snapshot, below),
+    # and a query that close below a snapshot starts on it
+    # (``_resolve_time_bracket``), so the clock's roundoff never accumulates
+    # past a snapshot (_check_step_grid puts every snapshot on the step
+    # grid).  Euler and discrete mode keep the 5e-10 dt band of before: a
+    # step that passes the snapshot by no more takes vel_next, with its own
+    # length and clock.
+    _rk_snap = use_tinterp and _is_multistage
+    _snap = (_snapshot_band(dt) if _rk_snap
+             else 5e-10 * max(float(dt), 1.0))
 
     # Last fully-executed (global step, file_idx) for the final checkpoint;
     # stays None if the loop breaks before any step runs (see end of loop).
@@ -2466,15 +2488,14 @@ def run_single_realization(
         # runs with a dt that is not a whole number of seconds.
         step_len = dt
         sim_time_end = None
-        if (use_tinterp and dt_to_next is not None
+        if (_rk_snap and dt_to_next is not None
                 and abs(dt - dt_to_next) <= _snap):
             step_len = dt_to_next
-            # bracket[4] is the step's start in the bracket's frame (a query
-            # just below a snapshot was moved onto it): the end lands on the
-            # snapshot in that frame
-            sim_time_end = (sim_time + (bracket[4] - _wrap_sim_time(
-                sim_time, file_times, n_time_total, on_exhausted, cyc))
-                + dt_to_next * direction)
+            sim_time_end = _step_end_on_record(
+                sim_time, bracket[4], dt_to_next, direction, file_times,
+                n_time_total, on_exhausted, cyc)
+        elif dt_to_next is not None and dt_to_next < dt <= dt_to_next + _snap:
+            dt_to_next = dt
         # Downgrade to steady if tracking dt exceeds the bracket
         # (start-between-snapshots, end-of-range, irregular spacing; refused
         # for RK2/RK4/RK45 by _check_step_grid wherever records are reached).
@@ -2842,18 +2863,41 @@ def _index_to_sim_time(
     return float(file_times[clipped])
 
 
+def _cycle_period(file_times, n_time_total, cycle):
+    """The period of ``on_exhausted: cycle``: the exact period ``cycle[0]``,
+    else the span of the records plus the last interval."""
+    if cycle is not None:
+        return cycle[0]
+    last_dt = file_times[-1] - file_times[-2] if n_time_total > 1 else 1.0
+    return file_times[-1] - file_times[0] + last_dt
+
+
 def _wrap_sim_time(sim_time, file_times, n_time_total, on_exhausted, cycle):
     """``sim_time`` on the record axis: under ``cycle`` folded into one pass
-    (the exact period ``cycle[0]``, else the span plus the last interval),
-    else unchanged.  The fold :func:`_resolve_time_bracket` uses."""
+    (:func:`_cycle_period`), else unchanged.  The fold
+    :func:`_resolve_time_bracket` uses."""
     if on_exhausted != "cycle":
         return sim_time
     t_start = file_times[0]
-    if cycle is not None:
-        return t_start + ((sim_time - t_start) % cycle[0])
-    last_dt = file_times[-1] - file_times[-2] if n_time_total > 1 else 1.0
-    total_span = file_times[-1] - t_start + last_dt
-    return t_start + ((sim_time - t_start) % total_span)
+    return t_start + ((sim_time - t_start)
+                      % _cycle_period(file_times, n_time_total, cycle))
+
+
+def _step_end_on_record(sim_time, pos, dt_to_next, direction, file_times,
+                        n_time_total, on_exhausted, cycle):
+    """The clock after a step that ends ON the record ahead: ``pos`` is the
+    step's start in the bracket's frame (a query just below a record was
+    moved onto it), ``pos + direction * dt_to_next`` the record.  Under
+    ``cycle`` the bracket can sit a period away from the folded clock (the
+    seam interval at the top of the pass when a backward step starts on
+    record 0; record 0 of the next pass for a clock just below the period
+    end), so the start offset is taken modulo the period."""
+    delta = pos - _wrap_sim_time(sim_time, file_times, n_time_total,
+                                 on_exhausted, cycle)
+    if on_exhausted == "cycle":
+        period = _cycle_period(file_times, n_time_total, cycle)
+        delta -= period * np.round(delta / period)
+    return sim_time + delta + dt_to_next * direction
 
 
 def _resolve_time_bracket(

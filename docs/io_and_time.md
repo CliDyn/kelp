@@ -878,7 +878,13 @@ Here `start0` is the original start index and `t0` the original start time in
 seconds since the first record (with temporal interpolation, as
 `tests/test_restart_record_schedule.py` does). The config stores `time_dir` as
 a float, hence `int(time_dir)`; `run_single_realization` accepts a whole-valued
-float index and refuses a fractional one. Three rules keep the output
+float index and refuses a fractional one. With a `dt` that is not a whole number
+of seconds a segment cut between two records starts from `t0 + n·dt` (one
+rounding) where the uninterrupted run's clock carries the roundoff of the steps
+since the last record (it is set to each record it reaches), so the two agree to
+roundoff (1e-13 degrees in a probe 30 years along the axis), not bit for bit; a
+segment cut on a record, or any segment with a whole-second `dt`, is bit for bit
+the uninterrupted run. Three rules keep the output
 `time` labels of the segments equal to those of the uninterrupted run (§5.2):
 
 - **Pass the same `file_times`** the first call used — under

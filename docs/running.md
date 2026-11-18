@@ -41,7 +41,8 @@ midpoint shift) are in [`io_and_time.md`](io_and_time.md).
 
 By default each tracking step uses one file snapshot (discrete mode). Set
 `temporal_interp: true` to linearly blend velocity between adjacent snapshots, so
-`dt` can be smaller than the file step for smoother trajectories.
+`dt` can be smaller than the file step for smoother trajectories (with `rk2`,
+`rk4` or `rk45` a `dt` that puts every record on a step boundary, see above).
 
 Linear-in-time blending caps the time order at O(dt²) regardless of RK order. To
 let RK4 separate from RK2 at coarse file cadence, set

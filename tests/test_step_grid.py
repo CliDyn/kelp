@@ -51,7 +51,7 @@ def _track(reader, mesh, ds, file_times, dt, n_steps, integrator="rk4",
             mesh, ds, reader, lon0=np.array([5.0]), lat0=np.array([5.0]),
             n_steps=n_steps, dt=dt, time_dir=kw.pop("time_dir", 1.0),
             integrator=integrator, file_times=np.asarray(file_times, float),
-            temporal_interp=True, **kw)
+            temporal_interp=kw.pop("temporal_interp", True), **kw)
     fallbacks = [str(w.message) for w in caught
                  if "fall back to steady" in str(w.message)]
     return rec, fallbacks
@@ -212,3 +212,97 @@ def test_the_clock_is_set_to_each_record(tmp_path):
         assert abs(east - exact) < 1e-4, (east, exact)
     finally:
         ds.close()
+
+
+# --- review round 1 (finder + verifier) ------------------------------------
+
+def test_a_start_and_a_step_each_inside_the_band_but_together_outside():
+    """A start 0.03 s before an hourly record and dt = 3600.05 s: each record
+    is within the band (0.036 s) of the step grid counted from the start, but
+    the run starts ON the record (the resolver moves it there) and the step
+    from it misses the next record by 0.05 s, so it would fall back: refused,
+    naming the two records."""
+    ft = np.arange(4) * HOUR
+    with pytest.raises(ValueError, match=r"records at 3600 s and 7200 s"):
+        _ok(file_times=ft, dt=3600.05, sim_time=3599.97, n_steps=1)
+
+
+def test_the_message_names_dt_with_its_digits():
+    ft = np.arange(100) * HOUR
+    with pytest.raises(ValueError, match=r"numerics\.dt = 3600\.002 s "):
+        _ok(file_times=ft, dt=3600.002, sim_time=0.0, n_steps=25)
+
+
+def test_a_later_realization_off_the_grid_is_refused_before_any_output(
+        tmp_path):
+    """Two realizations on noleap monthly means, one record apart, daily
+    steps: the first (July -> August centre, 31 d) fits, the second
+    (August -> September, 30.5 d) does not.  run_tracking refuses before it
+    writes anything, not after the first realization."""
+    from pathlib import Path
+
+    from tests.test_exact_cycle_runs import _monthly_data, _timed
+    from tests.test_fesom14_tracking import _cfg, _run
+    data = _monthly_data(tmp_path / "data")
+    cfg = _timed(_cfg(tmp_path, data=data, out="multi.nc"),
+                 start_time_idx=6, n_steps=31, on_exhausted="stop",
+                 num_runs=2, run_interval=1)
+    with pytest.raises(ValueError, match=r"numerics\.dt"):
+        _run(cfg)
+    out = Path(cfg.data.output_path)
+    assert not list(out.parent.glob(out.stem + "*")), list(out.parent.iterdir())
+
+
+def test_euler_keeps_its_own_clock(tmp_path):
+    """Euler is not checked and its steps are not snapped onto the records:
+    dt = 720.001 s on hourly records (every fifth step passes a record by
+    0.005 s, inside the RK band) gives exactly Euler's sum
+    dt * sum(u(n dt)) for u(t) = 0.01 (1 + t / 3600)."""
+    reader, mesh, ds = _setup(tmp_path)
+    dt, n = 720.001, 20
+    try:
+        rec, _ = _track(reader, mesh, ds, np.arange(6) * HOUR, dt=dt,
+                        n_steps=n, integrator="euler", start_time_idx=0)
+        lon = rec.to_arrays()["lon"][-1, 0]
+        east = (lon - 5.0) * METERS_PER_DEG_LAT * np.cos(np.deg2rad(5.0))
+        exact = dt * np.sum(0.01 * (1.0 + np.arange(n) * dt / HOUR))
+        assert abs(east - exact) < 1e-5, (east - exact)
+    finally:
+        ds.close()
+
+
+def test_discrete_rk_on_fractional_record_spacing_keeps_the_next_record(
+        tmp_path):
+    """Discrete mode, RK2, records 3600.1 s apart and dt = 3600.1 s: some
+    intervals of the float axis are 1.5e-12 s shorter than dt.  Such a step
+    takes the next record as before (the old 5e-10 dt tolerance of discrete
+    mode), not the steady velocity."""
+    reader, mesh, ds = _setup(tmp_path)
+    ft = np.arange(6, dtype=np.float64) * 3600.1
+    assert (np.diff(ft) < 3600.1).any()
+    try:
+        _, fb = _track(reader, mesh, ds, ft, dt=3600.1, n_steps=5,
+                       integrator="rk2", start_time_idx=0,
+                       temporal_interp=False)
+        assert not fb, fb
+    finally:
+        ds.close()
+
+
+def test_the_end_on_a_record_across_the_cycle_wrap():
+    """Backward from record 0 under cycle the bracket is the seam interval
+    at the top of the pass (its start one period above the folded clock);
+    forward a clock just below the period end is moved onto record 0 of the
+    next pass.  The step end lands on the record next to the clock, not a
+    period away."""
+    from kelp.tracking import _resolve_time_bracket, _step_end_on_record
+    ft = np.arange(4) * HOUR                          # legacy period 4 h
+    b = _resolve_time_bracket(0.0, ft, 4, "cycle", direction=-1, cycle=None,
+                              snap=0.036)
+    assert _step_end_on_record(0.0, b[4], HOUR, -1, ft, 4, "cycle",
+                               None) == -HOUR
+    q = 4 * HOUR - 0.01
+    b = _resolve_time_bracket(q, ft, 4, "cycle", direction=1, cycle=None,
+                              snap=0.036)
+    assert _step_end_on_record(q, b[4], HOUR, 1, ft, 4, "cycle",
+                               None) == 5 * HOUR

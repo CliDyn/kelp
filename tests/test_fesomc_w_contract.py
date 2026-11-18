@@ -407,12 +407,13 @@ class TestSigmaKicks:
     horizontal kick's s-rescale was untested, and a kick that fell back to
     the start surface passed on the steps where the two coincide)."""
 
-    @pytest.mark.usefixtures("no_step_grid")
     @pytest.mark.parametrize("integrator", ["euler", "rk2", "rk4"])
     @pytest.mark.parametrize("dt", [150.0, 400.0])
     @pytest.mark.parametrize("recon", ["linear", "pchip"])
     def test_horizontal_kick_keeps_sigma(self, tmp_path, integrator, dt,
-                                         recon):
+                                         recon, request):
+        if dt == 400.0:                      # steps across the 600 s records
+            request.getfixturevalue("no_step_grid")
         import warnings as _w
         from kelp.core.config import DiffusionConfig
         g, d0 = 5e-5, 20.0
@@ -518,11 +519,13 @@ class TestSigmaRestartIdentity:
     have broken it — the end-of-step and next-start surfaces are now one
     function of time, supplied by the tracking layer)."""
 
-    @pytest.mark.usefixtures("no_step_grid")
     @pytest.mark.parametrize("integrator", ["rk2", "rk4"])
     @pytest.mark.parametrize("recon", ["linear", "pchip"])
     @pytest.mark.parametrize("dt", [150.0, 400.0])
-    def test_resume_equals_continuous(self, tmp_path, integrator, recon, dt):
+    def test_resume_equals_continuous(self, tmp_path, integrator, recon, dt,
+                                      request):
+        if dt == 400.0:                      # steps across the 600 s records
+            request.getfixturevalue("no_step_grid")
         import warnings as _w
         from kelp.core.config import NumericsConfig
         from kelp.core.mesh import find_nearest_nodes
