@@ -13,7 +13,7 @@ the tracker was developed privately from 2026-06.
   of Delandmeter and van Sebille (2019): nodes are the F-points, elements the
   wet T-cells, u/v stay on the cell faces, so no flow crosses a closed face and
   the model's discrete continuity is reproduced. `numerics.uv_interp` becomes
-  `cgrid` by itself; naming another interpolator is refused. 2-D and 3-D
+  `nemo_cgrid` by itself; naming another interpolator is refused. 2-D and 3-D
   (z-levels with partial bottom cells; the vertical position is a fractional
   level coordinate; W is computed from continuity and equals the model's W on
   ORCA05). Land is zero velocity inside one ring of dry cells; particles on land
@@ -26,11 +26,14 @@ the tracker was developed privately from 2026-06.
   (`data.ncinput`, new `ncinput_u`, `ncinput_v`; `ncinput_w` is refused: W comes from continuity); XIOS calendar
   spellings (`360d`, ...). New `mesh.nemo_partial_cells: shrunk | porous`.
   `mode.sample_vars` return the T-cell value.
-- Refused, loudly: s-coordinates, ice-shelf cavities, non-T `sample_vars`,
+- Refused at startup: s-coordinates, ice-shelf cavities, non-T `sample_vars`,
   rk45, PCHIP, em/m1 diffusion, diffusion in 3-D, beaching, `elem_search: walk`
   in 3-D. z*/vvl output warns and uses the fixed reference thicknesses.
 - Docs: `docs/nemo.md`, `docs/velocity_interpolation.md` section 8, the
   `examples/config_nemo*.yaml` templates and the `kelp-nemo` skill.
+- `utils/make_nemo_test_data.py` builds the data directory of the data-gated
+  NEMO tests (`KELP_TEST_NEMO_DATA`) from public ORCA05, eORCA025 and ORCA2
+  sources.
 
 ### Added — record-time options for every reader
 

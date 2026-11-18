@@ -32,7 +32,7 @@ except Exception:  # pragma: no cover - exercised only without numba
 
 
 _VALID_KH_LAYOUTS = ("node", "element")
-_VALID_UV_LAYOUTS = ("element", "node", "cgrid")
+_VALID_UV_LAYOUTS = ("element", "node", "nemo_cgrid")
 #: Placement of the 3-D horizontal velocity data points in the vertical:
 #: ``"layer"`` (layer centres, piecewise constant in depth — the default),
 #: ``"level"`` (on the levels, linear in depth) and ``"layer_linear"``
@@ -241,7 +241,7 @@ class VelocityField:
     kh_zonal: Optional[np.ndarray] = None
     kh_meridional: Optional[np.ndarray] = None
     kh_layout: Optional[str] = None
-    uv_layout: str = "element"  # "element" (centres), "node" (FESOM2 unod/vnod) or "cgrid" (NEMO face rasters)
+    uv_layout: str = "element"  # "element" (centres), "node" (FESOM2 unod/vnod) or "nemo_cgrid" (NEMO face rasters)
     scalars: Optional[Dict[str, np.ndarray]] = None  # {varname: (N,) | (K-1, N) | (K, N)} node fields
     az: Optional[np.ndarray] = None  # vertical diffusivity (K, N) at interfaces
     uv_vertical: str = "layer"  # "layer" | "level" | "layer_linear"

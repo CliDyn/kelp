@@ -37,7 +37,7 @@ into its own small dataclass. (Every key is documented in
    from ASCII files or from the data's cell polygons; the reader resolves each
    record's time), `"fesomc"` (sigma coordinates), `"healpix"` (HEALPix products,
    the mesh built from the data store; 2-D and 3-D — `healpix.md`), or `"nemo"`
-   (structured C-grid: the exact C-grid path `mesh.nemo_grid: cgrid`, 2-D and 3-D, `nemo.md`; or the 2-D T-point path mapped onto a quad mesh). The reader is a small set of
+   (NEMO: exact C-grid, or a 2-D T-point path — `nemo.md`). The reader is a small set of
    static functions that know how to turn that model's files into the generic
    structures the rest of the code consumes, so no domain-specific knowledge
    leaks past this boundary.

@@ -1,46 +1,48 @@
-"""NEMO structured-grid reader (TODO 4.6).
+"""NEMO reader (``mesh.type: nemo``): ``@register("nemo")``.
 
-Reads NEMO's Arakawa C-grid curvilinear output onto the unstructured ``Mesh`` via
-:mod:`readers.structured`: nodes = wet T-points, elements = quads of 4 adjacent
-T-points; u/v are averaged from the C-grid faces to the T-points (**node
-layout** -> the run needs ``numerics.uv_interp: barycentric``).  Scalars
-(temp/salt/ssh) are already at T-points.
+Two paths, chosen by ``mesh.nemo_grid``:
 
-v1: **2-D, E/N-aligned** grid only.  NEMO grid_U/grid_V are along the LOCAL grid
-axes; v1 uses them as geographic east/north, valid only when the axes align with
-E/N (regular lat/lon or pre-rotated output) — a grid whose axes deviate > 2deg
-from E/N is rejected (``NotImplementedError``).  Vector rotation (the gate for
-true curvilinear + global ORCA grids), global ORCA (north-fold seam + east-west
-periodicity), and 3-D (deptht / e3t / partial cells / W on interfaces) are staged
-follow-ups for this T-point path.  The exact C-grid path (``mesh.nemo_grid:
-cgrid``) already handles curvilinear grids, global ORCA (E-W seam, T- and
-F-point-pivot north fold, with or without the halo: ``detect_cgrid_layout``)
-and ``mesh.rotation``.
+- ``cgrid``: the exact Arakawa C-grid path (user page ``docs/nemo.md``).  The
+  mesh is built on the model's own staggering (F-point nodes, wet T-cell
+  elements, one dry ring; :mod:`._mesh`) from the canonical form of every
+  raster (:mod:`._layout`: E-W seam, T- and F-point-pivot north fold, with or
+  without the halo); u/v stay on the faces (``uv_layout="nemo_cgrid"``,
+  interpolated by :mod:`kelp.numerics.nemo_cgrid`).  2-D, and 3-D on z-levels
+  with partial bottom cells, W from continuity (:mod:`._vertical`).
+  ``mesh.rotation`` is supported.
+- ``tpoint`` (default): 2-D, grids whose axes are aligned with east / north
+  only (a grid whose axes deviate > 2 deg is refused).  The mesh is the
+  generic T-point quad mesh of :mod:`kelp.readers.structured`; u/v are
+  averaged from the faces to the T-points (node layout, the run needs
+  ``numerics.uv_interp: barycentric``).  Scalars (temp/salt/ssh) are already at
+  T-points.
 
 File layout: NEMO splits output by C-grid point into ``*_grid_T.nc`` (temp/salt/
 ssh), ``*_grid_U.nc`` (u), ``*_grid_V.nc`` (v), ``*_grid_W.nc`` (w).  Point
 ``data.ncinput`` at the **grid_T** file; the grid_U/grid_V siblings are derived by
-swapping the ``grid_T`` token in the basename (override grid_V with
-``data.ncinput_v``).  ``grid_W`` is never read: in 3-D, W is recomputed from the
-u/v fluxes (``data.ncinput_w`` / ``open_dataset``'s ``w_path`` are refused).  The land-sea mask + coordinates come from
-``mesh.meshpath`` (``mesh_mask.nc`` / ``domain_cfg.nc``), falling back to the
-grid_T file's ``nav_lon``/``nav_lat`` with an all-wet mask.
+swapping the ``grid_T`` token in the basename (override with
+``data.ncinput_u`` / ``data.ncinput_v``).  ``grid_W`` is never read: in 3-D, W is
+recomputed from the u/v fluxes (``data.ncinput_w`` / ``open_dataset``'s
+``w_path`` are refused).  The land-sea mask + coordinates come from
+``mesh.meshpath`` (``mesh_mask.nc`` / ``domain_cfg.nc``); the T-point path falls
+back to the grid_T file's ``nav_lon``/``nav_lat`` with an all-wet mask.
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Optional, Sequence
 
 import numpy as np
 import xarray as xr
 
-from ..core.io import VelocityField
-from ..core.mesh import Mesh
-from . import register, _detect_engine
-from .structured import (
-    SAME_POINT_CHORD, CgridLayout, _copy_sets, _unit_xyz, build_cgrid_mesh,
-    build_structured_mesh, c_grid_to_t, cgrid_thickness, cgrid_to_canonical,
-    cgrid_w_from_continuity, field_to_nodes)
+from ...core.io import VelocityField
+from ...core.mesh import Mesh
+from .. import register, _detect_engine
+from ..structured import build_structured_mesh, c_grid_to_t, field_to_nodes
+from ._layout import _read_layout_flags, detect_nemo_cgrid_layout, nemo_cgrid_to_canonical
+from ._mesh import build_nemo_cgrid_mesh
+from ._vertical import (_check_zps_rule, _refuse_unsupported_vertical, nemo_cgrid_thickness,
+                        nemo_cgrid_w_from_continuity)
 
 
 # Variable-name aliases (NEMO output naming varies by config / XIOS field defs).
@@ -124,180 +126,6 @@ def _open_nemo(spec) -> xr.Dataset:
     return ds
 
 
-def _read_layout_flags(ds) -> dict:
-    """NEMO 4.2 topology attributes (global attributes or scalar variables):
-    ``Iperio`` / ``Jperio`` / ``NFold`` (ints) and ``NFtype`` (``"T"`` / ``"F"``).
-    Only a cross-check of what the coordinates show (NEMO <= 4.0 mesh files
-    carry none of them)."""
-    out = {}
-    for k in ("Iperio", "Jperio", "NFold", "NFtype"):
-        v = ds.attrs.get(k)
-        if v is None and k in ds.variables and ds[k].size == 1:
-            v = ds[k].values.reshape(-1)[0]
-        if v is None:
-            continue
-        if isinstance(v, bytes):
-            v = v.decode()
-        out[k] = str(v).strip().upper() if k == "NFtype" else int(v)
-    return out
-
-
-#: neighbouring columns this many median spacings apart across the wrap still
-#: count as one periodic raster
-_WRAP_SPACINGS = 1.5
-
-
-def _wrap_ratio(xyz) -> float:
-    """Median distance from the last to the first column over the median column
-    spacing, on the rows below the fold region."""
-    ny = xyz.shape[0]
-    rows = slice(0, max(1, ny - 3))
-    wrap = np.linalg.norm(xyz[rows, -1] - xyz[rows, 0], axis=-1)
-    step = np.median(np.linalg.norm(xyz[rows, 1:] - xyz[rows, :-1], axis=-1), axis=1)
-    ok = step > 0
-    return float(np.median(wrap[ok] / step[ok])) if ok.any() else np.inf
-
-
-def detect_cgrid_layout(tlon, tlat, flon=None, flat=None, flags=None
-                        ) -> Tuple[CgridLayout, List[str]]:
-    """Classify the raw raster for ``mesh.nemo_grid: cgrid``.
-
-    The coordinates decide what the raster contains: the E-W halo columns, the
-    north halo row and the fold are identities between points (the copies NEMO's
-    ``lbc_lnk`` writes), checked exactly for the T points and the F points of
-    the real rows (the halo-row F is not reliable in ORCA05; F optional), no thresholds.
-    The nine candidates ``{halo columns, none} x {no fold, T / F fold, with /
-    without the halo row}`` are tried; the passing one with the most copies wins
-    (no-halo and halo F-pivot share a fold centre, so the count is the
-    tie-break); equal counts refuse.  ``flags`` (:func:`_read_layout_flags`) only
-    cross-check: a contradiction refuses; flags that claim MORE than the raster
-    shows (all of our crops inherit the parent file's) make it a crop -- the
-    missing topology is an open edge, noted in ``notes``.  Periodicity without
-    halo columns (halo-free fold or ``Iperio``) must also pass the wrap-gap test
-    (last -> first column within 1.5 median spacings): fold identities on a
-    partial-width crop symmetric about a pivot would otherwise join its edges.
-    Also refuses zero-filled tiles (land-processor elimination) and a pole row.
-
-    Parameters
-    ----------
-    tlon, tlat : array_like (ny, nx)
-        T-point longitude / latitude (deg) of the raw raster.
-    flon, flat : array_like (ny, nx) or None
-        F-point coordinates (optional; they sharpen the fold test).
-    flags : dict or None
-        The file's NEMO 4.2 attributes ``Iperio`` / ``NFold`` / ``NFtype``.
-
-    Returns
-    -------
-    layout : CgridLayout
-        Halo columns, fold type and the open edges of the raster.
-    notes : list of str
-        Messages for the load log (e.g. flags that claim more than the raster
-        shows).
-
-    Raises
-    ------
-    ValueError
-        Zero-filled tiles, a pole row, ambiguous candidates, a partial-width
-        raster whose fold identities hold, or flags that contradict the
-        coordinates.
-    """
-    flags = flags or {}
-    tlon, tlat = (np.asarray(a, dtype=np.float64) for a in (tlon, tlat))
-    ny, nx = raw = tlon.shape
-    have_f = flon is not None
-    if have_f:
-        flon, flat = (np.asarray(a, dtype=np.float64) for a in (flon, flat))
-    if tlat.shape != raw or (have_f and (flon.shape != raw or flat.shape != raw)):
-        raise ValueError("glamt/gphit and glamf/gphif must share one (ny, nx) shape")
-    if not all(np.isfinite(a).all() for a in (tlon, tlat) + ((flon, flat) if have_f else ())):
-        raise ValueError("the mesh file's glamt/gphit/glamf/gphif hold non-finite values: "
-                         "the layout cannot be detected")
-    def _zero_block(lon, lat):        # a tile is a block; one point (0E, 0N) and its halo copy are not
-        z = (lon == 0) & (lat == 0)
-        return bool((z[:, 1:] & z[:, :-1]).any() or (z[1:] & z[:-1]).any())
-    if _zero_block(tlon, tlat) or (have_f and _zero_block(flon, flat)):
-        raise ValueError(
-            "the mesh file has zero-filled tiles (land-processor elimination when "
-            "it was assembled): regenerate it without land elimination or use domain_cfg.nc")
-    if flags.get("Jperio", 0) == 1:
-        raise NotImplementedError("mesh.nemo_grid: cgrid: N-S periodic grids (Jperio = 1) are not supported")
-    xt, xf = _unit_xyz(tlon, tlat), (_unit_xyz(flon, flat) if have_f else None)
-    if np.linalg.norm(xt[-1] - xt[-1, :1], axis=-1).max() <= SAME_POINT_CHORD:
-        raise ValueError("the top row of T points collapses to one point (a pole row): "
-                         "crop below it")
-    notes = []
-    if ny < 4 or nx < 4:
-        return CgridLayout(raw), notes
-
-    def copies(lay):
-        """Number of copy pairs compared, or None when one does not coincide."""
-        n = 0
-        for kind, xyz in (("T", xt), ("F", xf)):
-            if xyz is None:                                # no F coordinates (CMIP output)
-                continue
-            dst, src, _s, present = _copy_sets(lay, kind)
-            nc, pc = lay.shape[1], int(lay.pad_cols)
-            k = present[dst]
-            if kind == "F" and lay.fold:
-                k &= dst // nc <= lay.J
-            d, s_ = dst[k], src[k]
-            a = xyz[d // nc, d % nc - pc]
-            b = xyz[s_ // nc, s_ % nc - pc]
-            if d.size and np.linalg.norm(a - b, axis=-1).max() > SAME_POINT_CHORD:
-                return None
-            n += int(d.size)
-        return n
-
-    found = []
-    for halo_cols in (True, False):
-        for fold, halo_row in ((None, False), ("T", True), ("T", False), ("F", True), ("F", False)):
-            if fold is None and not halo_cols:
-                continue                                   # implies no copy at all
-            lay = CgridLayout(raw, halo_cols, halo_row, True, fold)
-            n = copies(lay)
-            if n:
-                found.append((n, lay))
-    found.sort(key=lambda t: -t[0])
-    if len(found) > 1 and found[0][0] == found[1][0]:
-        raise ValueError("the raster matches two layouts equally well: "
-                         f"{found[0][1].label()} / {found[1][1].label()}")
-    iperio, nfold, nftype = flags.get("Iperio"), flags.get("NFold"), flags.get("NFtype")
-    ratio = _wrap_ratio(xt)
-    if found:
-        lay = found[0][1]
-        if lay.fold and (nfold == 0 or nftype not in (None, lay.fold)):
-            raise ValueError(f"the coordinates show a {lay.fold}-pivot fold, the file's flags say "
-                             f"NFold={nfold}, NFtype={nftype!r}")
-        if iperio == 0:
-            raise ValueError("the coordinates show E-W periodicity, the file's flag says Iperio=0")
-        if not lay.halo_cols and ratio > _WRAP_SPACINGS:
-            raise ValueError(
-                f"the fold identities hold, but the raster is not full width (the last column is "
-                f"{ratio:.1f} grid spacings from the first): a partial-width crop through the fold "
-                "cannot be joined; crop the full width")
-        if not lay.fold and nfold == 1:
-            notes.append("the flags claim a north fold the raster does not show: treated as a crop "
-                         "(the north edge is open)")
-        return lay, notes
-    looks_periodic = ratio <= _WRAP_SPACINGS
-    if iperio == 1:
-        if looks_periodic:
-            if nfold == 1:
-                notes.append("the flags claim a north fold the raster does not show: treated as a crop "
-                             "(the north edge is open)")
-            return CgridLayout(raw, False, False, True, None), notes
-        notes.append("the flags claim E-W periodicity the raster does not show (not full width): "
-                     "treated as a crop (the east and west edges are open)")
-    elif looks_periodic and iperio is None:
-        raise ValueError(
-            "the raster looks E-W periodic without halo columns (the last column is "
-            f"{ratio:.1f} grid spacings from the first) but the file says nothing: add Iperio=1 "
-            "(and NFold / NFtype for a fold) to the mesh file's attributes, or crop it")
-    return CgridLayout(raw), notes
-
-
-
 def _first(ds, aliases: Sequence[str], cfg_name: Optional[str] = None):
     """Return the variable name to use: an explicit ``cfg_name`` override if set,
     else the first present alias (``None`` if no alias matches).
@@ -358,10 +186,10 @@ def _surface_2d(da: xr.DataArray) -> np.ndarray:
 
 def _read_raster(da, layout, kind, name, *, vector=False, check=False, surface=False,
                  face_levels=None):
-    """The ONLY way the cgrid path reads a raster: ``da`` (a DataArray or array,
+    """The ONLY way the nemo_cgrid path reads a raster: ``da`` (a DataArray or array,
     trailing dims the raw ``(ny, nx)`` of ``layout``; ``surface`` takes the
     surface level of a depth dimension) -> its canonical float64 form
-    (:func:`cgrid_to_canonical`), so no raw halo / fold array ever meets a
+    (:func:`nemo_cgrid_to_canonical`), so no raw halo / fold array ever meets a
     canonical-shape one.  ``kind`` is the C-grid point (``"T"``, ``"U"``,
     ``"V"``), ``vector`` only for u and v.  ``check=True`` REFUSES when a halo /
     fold copy of the raw raster differs from its canonical point: used for
@@ -370,7 +198,7 @@ def _read_raster(da, layout, kind, name, *, vector=False, check=False, surface=F
     and the file's ``e3t`` are canonicalised silently (their stale copies
     -- ``bathy_metry`` on the fold row, eddy-induced velocities -- are real)."""
     a = _surface_2d(da) if surface else np.asarray(da)
-    a = cgrid_to_canonical(a, layout, kind, vector=vector, check=check, name=name)
+    a = nemo_cgrid_to_canonical(a, layout, kind, vector=vector, check=check, name=name)
     if face_levels is not None:
         # u / v live on faces: zero wherever the face mask (derived from tmask,
         # not from what the file holds on land faces) says land
@@ -463,93 +291,33 @@ def _grid_point(da) -> str:
 
 
 def _refuse_unsupported_mode(mode_cfg, where):
-    """Fail fast on mode settings the v1 reader cannot honour."""
+    """Fail fast on mode settings the T-point path cannot honour."""
     if mode_cfg is None:
         return
     if getattr(mode_cfg, "sigma_mean", False):
         raise NotImplementedError(
-            "the NEMO reader tracks the surface level only in v1; "
-            "mode.sigma_mean (a vertical mean) is not supported.")
+            "the NEMO T-point path tracks the surface level only; "
+            "mode.sigma_mean (a vertical mean) is not supported "
+            "(3-D: mesh.nemo_grid: cgrid with mode.Fdrift3D).")
     layer = getattr(mode_cfg, "sigma_layer", None)
     if layer not in (None, 0):
-        # _surface_2d always takes index 0 of every depth dimension; a deeper
-        # layer used to be ignored silently (audit 2026-10-04).
+        # _surface_2d always takes index 0 of every depth dimension.
         raise NotImplementedError(
-            "the NEMO reader tracks the surface level only in v1; "
-            f"mode.sigma_layer = {layer!r} is not supported (use 0 or null).")
-
-
-def _refuse_unsupported_vertical(ds, path) -> None:
-    """z-levels with partial bottom cells only: s-coordinates and ice-shelf
-    cavities are refused (the file's attributes, ``top_level``, ``misf``)."""
-    vc = ds.attrs.get("VertCoord")
-    if vc is not None and str(vc).strip().lower() not in ("zco", "zps"):
-        raise NotImplementedError(
-            f"mesh file {path!r}: VertCoord = {str(vc)!r}; only z-levels "
-            "(zco, zps) are supported, not s-coordinates")
-    # only real cavities: the variables count at WET columns (ORCA05 mesh_mask
-    # carries misf = 1 and isfdraft = 0 there, and 0 on land)
-    if "tmask" in ds.variables:
-        tm = np.asarray(ds["tmask"]).squeeze()
-        wet = (tm > 0.5).any(0) if tm.ndim == 3 else tm > 0.5
-    elif "bottom_level" in ds.variables:
-        wet = np.asarray(ds["bottom_level"]).squeeze() > 0
-    else:
-        wet = None
-    cav = int(np.asarray(ds.attrs.get("IsfCav", 0)).reshape(-1)[0]) != 0
-    for name, bad in (("misf", lambda a: a > 1), ("top_level", lambda a: a > 1),
-                      ("isfdraft", lambda a: a > 0)):
-        if cav or name not in ds.variables:
-            continue
-        a = np.asarray(ds[name]).squeeze()
-        cav = bool((bad(a) if wet is None or a.shape != wet.shape else bad(a) & wet).any())
-    if cav:
-        raise NotImplementedError(
-            f"mesh file {path!r} has ice-shelf cavities (IsfCav / misf > 1 / "
-            "top_level > 1 / isfdraft > 0 at wet columns); they are not "
-            "supported (levels must start at the surface)")
-
-
-def _check_zps_rule(zw, nlev, e3b, e3u0, e3v0):
-    """Load-time consistency check: the model's face thickness at a face's
-    bottom level must be the NEMO partial-step rule, the smaller of its two
-    cells' thickness there (``e3u(j,i) = min(e3t(j,i), e3t(j,i+1))``; ``v``
-    likewise towards ``j+1``).  Interior faces of wet cells only (the crop's
-    last column / row has no neighbour cell here; the mesh keeps the file's
-    value there).  The kernel uses the file's e3u_0 / e3v_0, not this rule."""
-    ref = np.diff(zw)
-
-    bad = 0.0
-    for e3f, sl_a, sl_b in ((e3u0, np.s_[:, :-1], np.s_[:, 1:]),
-                            (e3v0, np.s_[:-1, :], np.s_[1:, :])):
-        na, nb = nlev[sl_a], nlev[sl_b]
-        kb = np.minimum(na, nb) - 1
-        wet = kb >= 0
-        k = np.maximum(kb, 0)
-        rule = np.minimum(np.where(na - 1 == k, e3b[sl_a], ref[k]),
-                          np.where(nb - 1 == k, e3b[sl_b], ref[k]))
-        got = np.take_along_axis(e3f[(slice(None),) + sl_a], k[None], 0)[0]
-        bad = max(bad, float(np.max(np.abs(got - rule)[wet] / rule[wet], initial=0.0)))
-        above = np.arange(len(ref))[:, None, None] < kb[None]      # wet levels above the bottom
-        bad = max(bad, float(np.max(np.abs(e3f[(slice(None),) + sl_a] / ref[:, None, None] - 1)
-                                    * above, initial=0.0)))
-    if bad > 1e-4:
-        raise ValueError(
-            "mesh.nemo_grid: cgrid 3-D: e3u_0/e3v_0 differ from the partial-step "
-            f"rule min(e3t_0 of the two cells) by {bad:.2e} (relative); only "
-            "z-levels with partial steps (zps) are supported")
+            "the NEMO T-point path tracks the surface level only; "
+            f"mode.sigma_layer = {layer!r} is not supported (use 0 or null; "
+            "3-D: mesh.nemo_grid: cgrid with mode.Fdrift3D).")
 
 
 @register("nemo")
 class NemoReader:
-    """Reader for NEMO curvilinear C-grid output (2-D v1)."""
+    """Reader for NEMO output: the exact C-grid path and the T-point path."""
 
     @staticmethod
     def load_mesh(mesh_cfg) -> Mesh:
         if (getattr(mesh_cfg, "rotation", None) is not None
                 and getattr(mesh_cfg, "nemo_grid", "tpoint") != "cgrid"):
             # The T-point path has no vector-rotation of its averaged u/v
-            # (mirrors FESOM-C); the cgrid path needs none (its u/v come from
+            # (mirrors FESOM-C); the nemo_cgrid path needs none (its u/v come from
             # the cell geometry in the mesh frame).
             raise ValueError(
                 "mesh.rotation is not supported by the NEMO reader with "
@@ -559,7 +327,7 @@ class NemoReader:
         ds = _open_nemo(path)
         try:
             if getattr(mesh_cfg, "nemo_grid", "tpoint") == "cgrid":
-                return NemoReader._load_cgrid_mesh(ds, path, mesh_cfg)
+                return NemoReader._load_nemo_cgrid_mesh(ds, path, mesh_cfg)
             lon_n = _first(ds, _LON_ALIASES)
             lat_n = _first(ds, _LAT_ALIASES)
             if lon_n is None or lat_n is None:
@@ -568,18 +336,18 @@ class NemoReader:
                     f"(or glamt/gphit). Found: {list(ds.variables)[:12]}…")
             lon2d = _squeeze_to_2d(ds[lon_n].values)
             lat2d = _squeeze_to_2d(ds[lat_n].values)
-            # v1 fail-fast: u/v are taken as geographic east/north, valid only on
+            # Fail-fast: u/v are taken as geographic east/north, valid only on
             # a grid whose axes align with E/N. A curvilinear / rotated grid
-            # (e.g. global ORCA) needs vector rotation -> a staged follow-up.
+            # (e.g. global ORCA) needs vector rotation, which the C-grid path avoids.
             mis = _max_axis_misalignment_deg(lon2d, lat2d)
             if mis > _ALIGN_TOL_DEG:
                 raise NotImplementedError(
-                    f"NEMO reader v1: the grid axes deviate {mis:.1f}° from "
+                    f"NEMO T-point path: the grid axes deviate {mis:.1f}° from "
                     f"geographic east/north (> {_ALIGN_TOL_DEG}°), so its "
                     "grid-relative u/v cannot be used as east/north without "
-                    "vector rotation (a staged follow-up). v1 supports "
+                    "vector rotation. The T-point path supports "
                     "geographic-aligned grids (regular lat/lon or pre-rotated "
-                    "output) only.")
+                    "output) only; use mesh.nemo_grid: cgrid for this grid.")
             tmask_n = _first(ds, _TMASK_ALIASES)
             if tmask_n is not None:
                 wet = _surface_2d(ds[tmask_n]) > 0.5
@@ -599,7 +367,7 @@ class NemoReader:
         return mesh
 
     @staticmethod
-    def _load_cgrid_mesh(ds, path, mesh_cfg) -> Mesh:
+    def _load_nemo_cgrid_mesh(ds, path, mesh_cfg) -> Mesh:
         """Exact C-grid mesh (``mesh.nemo_grid: cgrid``): F-point cells from
         glamf/gphif + tmask.  No axis-alignment gate: the C-grid interpolator
         works in index space and returns geographic u/v itself."""
@@ -617,17 +385,17 @@ class NemoReader:
                 f"mesh.nemo_grid: cgrid needs the T-point coordinates "
                 f"(glamt/gphit or nav_lon/nav_lat) in {path!r} to classify the "
                 "grid (regional / global ORCA)")
-        layout, notes = detect_cgrid_layout(
+        layout, notes = detect_nemo_cgrid_layout(
             _squeeze_to_2d(ds[tl].values), _squeeze_to_2d(ds[tp].values), glamf, gphif,
             _read_layout_flags(ds))
-        print(f"  NEMO cgrid layout: {layout.label()}")
+        print(f"  NEMO C-grid layout: {layout.label()}")
         for n in notes:
             print(f"    note: {n}")
 
         def rd(nm, kind, check=True):
             return _read_raster(ds[nm].squeeze(), layout, kind, nm, check=check)
-        glamf = cgrid_to_canonical(glamf, layout, "F", name="glamf")
-        gphif = cgrid_to_canonical(gphif, layout, "F", name="gphif")
+        glamf = nemo_cgrid_to_canonical(glamf, layout, "F", name="glamf")
+        gphif = nemo_cgrid_to_canonical(gphif, layout, "F", name="gphif")
         _refuse_unsupported_vertical(ds, path)
         tmask_n = _first(ds, ("tmask",))
         if tmask_n is not None:
@@ -693,7 +461,7 @@ class NemoReader:
                         "regenerate it without land elimination or use domain_cfg.nc")
             vert = dict(nlev2d=nlev, zw=zw, e3b=e3b, e3u0=e3u0, e3v0=e3v0,
                         area=rd("e1t", "T") * rd("e2t", "T"))
-            print(f"  NEMO cgrid 3-D: {tm3.shape[0]} levels, "
+            print(f"  NEMO C-grid 3-D: {tm3.shape[0]} levels, "
                   + ("partial bottom cells (e3t_0, e3u_0, e3v_0)" if e3b is not None else
                      "full reference cells (no e3t_0 / e3u_0 / e3v_0 in the mesh file)"))
         for dn in (() if vert else ("hdept", "hdepw", "bathy_meter", "bathy_metry",
@@ -708,17 +476,17 @@ class NemoReader:
                 f"mesh file {path!r} (mesh_mask.nc / domain_cfg.nc carry them)")
         if "e2u" in ds.variables and "e1v" in ds.variables:
             widths = dict(e2u=rd("e2u", "U"), e1v=rd("e1v", "V"))
-            print("  NEMO cgrid: fluxes use the model face widths e2u/e1v")
+            print("  NEMO C-grid: fluxes use the model face widths e2u/e1v")
         else:
-            print("  NEMO cgrid: e2u/e1v not in the mesh file; fluxes use plane "
+            print("  NEMO C-grid: e2u/e1v not in the mesh file; fluxes use plane "
                   "edge lengths (cos at each edge's mean latitude)")
-        from .fesom2 import POLE_WARN_LAT, _resolve_rotation_angles
+        from ..fesom2 import POLE_WARN_LAT, _resolve_rotation_angles
         angles = _resolve_rotation_angles(mesh_cfg)
         max_lat = float(np.nanmax(np.abs(gphif)))
         if angles is None and max_lat > POLE_WARN_LAT:
             import warnings
             warnings.warn(
-                f"NEMO cgrid mesh reaches |lat| = {max_lat:.2f} deg - the "
+                f"NEMO C-grid mesh reaches |lat| = {max_lat:.2f} deg - the "
                 "lon/lat cell geometry degenerates near the pole (containment "
                 "and the local plane fail there); set mesh.rotation: fesom2.",
                 RuntimeWarning, stacklevel=2)
@@ -727,17 +495,17 @@ class NemoReader:
             # the cell geometry, so it returns them in the rotated frame with
             # no vector rotation (the face values are grid-relative normals;
             # the widths e2u/e1v are lengths, frame-free).
-            from ..core.rotation import euler_matrix, rotate_lonlat
+            from ...core.rotation import euler_matrix, rotate_lonlat
             glamf, gphif = rotate_lonlat(glamf, gphif, euler_matrix(*angles))
             print(f"    rotated frame: alpha/beta/gamma = {tuple(angles)} "
                   "(pole-safe)")
-        mesh = build_cgrid_mesh(glamf, gphif, wet, depth2d=depth2d, name="nemo",
+        mesh = build_nemo_cgrid_mesh(glamf, gphif, wet, depth2d=depth2d, name="nemo",
                                 layout=layout,
                                 partial_cells=getattr(mesh_cfg, "nemo_partial_cells", "shrunk"),
                                 r_earth=getattr(mesh_cfg, "r_earth", None),
                                 **widths, **vert)
         mesh.rotation_angles = angles
-        mesh._cgrid_zps_refusal = zps_refusal
+        mesh._nemo_cgrid_zps_refusal = zps_refusal
         return mesh
 
     @staticmethod
@@ -857,8 +625,8 @@ class NemoReader:
         # NEMO u/v are averaged onto T-points -> node layout (needs barycentric),
         # or kept on the faces for the exact C-grid scheme (mesh.nemo_grid: cgrid).
         # Surfacing it here lets run_tracking fail fast BEFORE creating a writer.
-        if mesh is not None and getattr(mesh, "_cgrid", False):
-            return "cgrid"
+        if mesh is not None and getattr(mesh, "_nemo_cgrid", False):
+            return "nemo_cgrid"
         return "node"
 
     @staticmethod
@@ -872,22 +640,22 @@ class NemoReader:
                 and getattr(diffusion, "enabled", False)
                 and getattr(diffusion, "scheme", "uniform") in ("em", "m1")):
             raise NotImplementedError(
-                "NEMO reader v1: only uniform diffusion is supported "
+                "NEMO T-point path: only uniform diffusion is supported "
                 "(em/m1 read spatial Kh fields, not yet mapped to T-points).")
         vd = np.float32 if velocity_float32 else np.float64
-        if getattr(mesh, "_cgrid", False):
-            lay = mesh._cgrid_layout
+        if getattr(mesh, "_nemo_cgrid", False):
+            lay = mesh._nemo_cgrid_layout
             scal = (NemoReader.read_scalar_fields(ds, timestep, mesh, sample_vars,
                                                   mode_cfg) if sample_vars else None)
             if getattr(mode_cfg, "Fdrift3D", False):
-                return NemoReader._read_cgrid_3d(ds, timestep, mesh, vd, scal)
+                return NemoReader._read_nemo_cgrid_3d(ds, timestep, mesh, vd, scal)
             faces = [_read_raster(ds[nm].isel(time=timestep), lay, k, nm, vector=True,
                                   check=True, surface=True,
-                                  face_levels=mesh._cgrid_face_levels[k]).reshape(-1).astype(vd, copy=False)
+                                  face_levels=mesh._nemo_cgrid_face_levels[k]).reshape(-1).astype(vd, copy=False)
                      for nm, k in (("u", "U"), ("v", "V"))]
             return VelocityField(
                 u=faces[0], v=faces[1], eta=np.zeros(mesh.n_nodes), w=None,
-                uv_layout="cgrid", scalars=scal)
+                uv_layout="nemo_cgrid", scalars=scal)
         if getattr(mode_cfg, "Fdrift3D", False):
             raise NotImplementedError(
                 "NEMO reader: mode.Fdrift3D needs mesh.nemo_grid: cgrid; the T-point "
@@ -918,23 +686,23 @@ class NemoReader:
 
     @staticmethod
     def prepare(mesh, ds) -> None:
-        """z*/vvl check (3-D cgrid only; changes nothing): when ``grid_T`` carries
+        """z*/vvl check (3-D nemo_cgrid only; changes nothing): when ``grid_T`` carries
         ``e3t`` (read here from the files ``open_dataset`` recorded, never merged
         into the run's fields), warn if records 0 / last deviate from the
         reference thickness.  Fixed reference thicknesses (``e3*_0``) are
         used either way, so z* transports are off by about eta/H."""
-        if not (getattr(mesh, "_cgrid", False) and mesh._cgrid_zw.size
+        if not (getattr(mesh, "_nemo_cgrid", False) and mesh._nemo_cgrid_zw.size
                 and "nemo_t_files" in ds.attrs):
             return
         ny, nx = mesh._structured_shape
-        nlev = mesh._cgrid_nlev_raster
-        ref = cgrid_thickness(mesh._cgrid_zw, np.where(nlev > 0, nlev - 1, -1),
-                              mesh._cgrid_e3b.reshape(ny, nx))
+        nlev = mesh._nemo_cgrid_nlev_raster
+        ref = nemo_cgrid_thickness(mesh._nemo_cgrid_zw, np.where(nlev > 0, nlev - 1, -1),
+                              mesh._nemo_cgrid_e3b.reshape(ny, nx))
         wet = np.arange(ref.shape[0])[:, None, None] < nlev
         raw = _open_nemo(ds.attrs["nemo_t_files"])
         try:
             e3t = _rename_tz_da(raw["e3t"])
-            dev = max(float(np.nanmax(np.abs(_read_raster(e3t.isel(time=r), mesh._cgrid_layout,
+            dev = max(float(np.nanmax(np.abs(_read_raster(e3t.isel(time=r), mesh._nemo_cgrid_layout,
                                                           "T", "e3t") - ref)[wet] / ref[wet]))
                       for r in (0, e3t.sizes["time"] - 1))
         finally:
@@ -942,51 +710,51 @@ class NemoReader:
         if dev > 1e-4:
             import warnings
             warnings.warn(
-                f"NEMO cgrid 3-D: the file's e3t differs from the reference "
+                f"NEMO C-grid 3-D: the file's e3t differs from the reference "
                 f"e3t_0 by up to {dev:.1%} (records 0 and last): z*/vvl "
                 "detected. Fixed reference thicknesses (e3*_0) are used, so "
                 "the transports are off by about eta/H (z* is not supported "
                 "yet).", RuntimeWarning, stacklevel=2)
 
     @staticmethod
-    def _read_cgrid_3d(ds, timestep, mesh, vd, scalars):
+    def _read_nemo_cgrid_3d(ds, timestep, mesh, vd, scalars):
         """3-D faces of one record on the partial-step cells, plus the W
-        that makes them non-divergent up to float32 rounding (``cgrid_w_from_continuity``)."""
-        if getattr(mesh, "_cgrid_zps_refusal", None):
-            raise ValueError(mesh._cgrid_zps_refusal)
+        that makes them non-divergent up to float32 rounding (``nemo_cgrid_w_from_continuity``)."""
+        if getattr(mesh, "_nemo_cgrid_zps_refusal", None):
+            raise ValueError(mesh._nemo_cgrid_zps_refusal)
         ny, nx = mesh._structured_shape
-        zw = mesh._cgrid_zw
+        zw = mesh._nemo_cgrid_zw
         if zw.size == 0:
             raise ValueError("mode.Fdrift3D with mesh.nemo_grid: cgrid needs a "
                              "3-D mesh_mask (3-D tmask, e3t_1d, e1t, e2t)")
-        lay = mesh._cgrid_layout
+        lay = mesh._nemo_cgrid_layout
         uv = []
         for nm, k in (("u", "U"), ("v", "V")):
             a = _read_raster(ds[nm].isel(time=timestep), lay, k, nm, vector=True, check=True,
-                             face_levels=mesh._cgrid_face_levels[k])
+                             face_levels=mesh._nemo_cgrid_face_levels[k])
             if a.shape != (zw.size - 1, ny, nx):
                 raise ValueError(f"NEMO {nm} shape {a.shape} != (K, ny, nx) "
                                  f"{(zw.size - 1, ny, nx)}")
             uv.append(a.astype(vd).astype(np.float64))   # w consistent with stored u/v
-        e2u, e1v = (m.reshape(ny, nx) for m in (mesh._cgrid_e2u, mesh._cgrid_e1v))
-        e3u, e3v = (cgrid_thickness(zw, getattr(mesh, f"_cgrid_kb{n}").reshape(ny, nx),
-                                    getattr(mesh, f"_cgrid_e3{n}").reshape(ny, nx))
+        e2u, e1v = (m.reshape(ny, nx) for m in (mesh._nemo_cgrid_e2u, mesh._nemo_cgrid_e1v))
+        e3u, e3v = (nemo_cgrid_thickness(zw, getattr(mesh, f"_nemo_cgrid_kb{n}").reshape(ny, nx),
+                                    getattr(mesh, f"_nemo_cgrid_e3{n}").reshape(ny, nx))
                     for n in ("u", "v"))
-        w = cgrid_w_from_continuity(uv[0], uv[1], e2u, e1v, e3u, e3v,
-                                    mesh._cgrid_area.reshape(ny, nx),
-                                    mesh._cgrid_nlev_raster)
+        w = nemo_cgrid_w_from_continuity(uv[0], uv[1], e2u, e1v, e3u, e3v,
+                                    mesh._nemo_cgrid_area.reshape(ny, nx),
+                                    mesh._nemo_cgrid_nlev_raster)
         return VelocityField(
             u=uv[0].reshape(uv[0].shape[0], -1).astype(vd),
             v=uv[1].reshape(uv[1].shape[0], -1).astype(vd),
             w=w.reshape(w.shape[0], -1).astype(vd), eta=np.zeros(mesh.n_nodes),
-            uv_layout="cgrid", scalars=scalars)
+            uv_layout="nemo_cgrid", scalars=scalars)
 
     @staticmethod
     def read_scalar_fields(ds, timestep, mesh, varnames, mode_cfg=None) -> dict:
         _refuse_unsupported_mode(mode_cfg, "read_scalar_fields")
-        if getattr(mesh, "_cgrid", False):
+        if getattr(mesh, "_nemo_cgrid", False):
             # T-cell values on the raster (land -> NaN: the files carry 0.0
-            # there), flattened (ny*nx,) / (K, ny*nx) for sample_field_cgrid
+            # there), flattened (ny*nx,) / (K, ny*nx) for sample_field_nemo_cgrid
             ny, nx = mesh._structured_shape
             out = {}
             for nm in varnames:
@@ -994,14 +762,14 @@ class NemoReader:
                     raise ValueError(f"NEMO reader: sampled variable {nm!r} not "
                                      "in the dataset (grid_T, mode.sample_vars).")
                 three = getattr(mode_cfg, "Fdrift3D", False)
-                a = _read_raster(ds[nm].isel(time=timestep), mesh._cgrid_layout, "T", nm,
+                a = _read_raster(ds[nm].isel(time=timestep), mesh._nemo_cgrid_layout, "T", nm,
                                  surface=not three)
                 if three:
-                    nl = mesh._cgrid_nlev_raster
+                    nl = mesh._nemo_cgrid_nlev_raster
                     a = np.where(np.arange(a.shape[0])[:, None, None] < nl, a, np.nan)
                     out[nm] = a.reshape(a.shape[0], -1)
                 else:
-                    out[nm] = np.where(mesh._cgrid_nlev_raster > 0, a, np.nan).reshape(-1)
+                    out[nm] = np.where(mesh._nemo_cgrid_nlev_raster > 0, a, np.nan).reshape(-1)
             return out
         node_id = mesh._structured_node_id
         out = {}

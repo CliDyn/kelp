@@ -13,7 +13,7 @@ adaptation workflow. The run itself follows **kelp-run**; the YAML mechanics
 
 Use `mesh.nemo_grid: cgrid` (exact C-grid, 2-D and 3-D) for any real NEMO
 output. The default `tpoint` path is 2-D, E/N-aligned grids only.
-`numerics.uv_interp` follows from `cgrid`: do not set another interpolator.
+`numerics.uv_interp` follows from `nemo_cgrid`: do not set another interpolator.
 
 ## Input checklist
 
@@ -33,7 +33,7 @@ output. The default `tpoint` path is 2-D, E/N-aligned grids only.
    time (each file may carry its own epoch; the joined axis must be strictly
    increasing).
 4. **Halo / fold / crop**: nothing to set. The layout is detected from the
-   coordinates and printed at load and by `kelp info` (`cgrid_layout`): read that line.
+   coordinates and printed at load and by `kelp info` (`nemo_cgrid_layout`): read that line.
    A crop (the file's `Iperio/NFold/NFtype` attributes claim more than the raster
    has) gets OPEN edges: a particle that reaches one is absorbed and ends
    `OUT_OF_BOUNDS` or `INTERPOLATION_FAILED`; count both as exits.

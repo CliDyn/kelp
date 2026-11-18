@@ -1,4 +1,4 @@
-"""NEMO structured-grid reader (readers/nemo.py, TODO 4.6).
+"""NEMO structured-grid reader (readers/nemo/, TODO 4.6).
 
 Synthetic NEMO-like output (grid_T/U/V + mesh_mask) — no external data.
 """

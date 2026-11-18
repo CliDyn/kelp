@@ -174,12 +174,13 @@ def _sample_record_fields(state, mesh, vel, sample_interp, Dmin=0.5):
     """
     if not getattr(vel, "scalars", None):
         return None
-    from .numerics.sampling import sample_field, sample_field_cgrid
+    from .numerics.nemo_cgrid import sample_field_nemo_cgrid
+    from .numerics.sampling import sample_field
     alive = state.status == ParticleStatus.ALIVE
     out = {}
     for name, arr in vel.scalars.items():
-        if getattr(mesh, "_cgrid", False):
-            out[name] = sample_field_cgrid(arr, mesh, state.lon, state.lat,
+        if getattr(mesh, "_nemo_cgrid", False):
+            out[name] = sample_field_nemo_cgrid(arr, mesh, state.lon, state.lat,
                                            state.z, alive=alive,
                                            nearest=state.nearest_node)
             continue
@@ -938,8 +939,8 @@ def _path_fingerprint(path) -> list:
 # Time-averaging midpoint shift
 # ---------------------------------------------------------------------------
 
-def _refuse_cgrid_unsupported(config) -> None:
-    """Exact C-grid (``uv_interp: cgrid``): refuse the options that would read
+def _refuse_nemo_cgrid_unsupported(config) -> None:
+    """Exact C-grid (``uv_interp: nemo_cgrid``): refuse the options that would read
     node/element fields it does not carry."""
     n = config.numerics
     bad = []
@@ -957,7 +958,7 @@ def _refuse_cgrid_unsupported(config) -> None:
         bad.append("elem_search 'walk' in 3-D")
     if bad:
         raise NotImplementedError(
-            "numerics.uv_interp 'cgrid' (exact C-grid, v1) does not support: "
+            "numerics.uv_interp 'nemo_cgrid' (exact C-grid) does not support: "
             + ", ".join(bad))
 
 
@@ -973,9 +974,9 @@ def _validate_uv_compat(uv_layout: str, uv_interp: str,
     u/v on a z-level ``mesh`` (when given) need the element bottoms and no
     ice-shelf cavities (:func:`_check_linear_element_mesh`; a sigma mesh
     needs neither)."""
-    if (uv_layout == "cgrid") != (uv_interp == "cgrid"):
+    if (uv_layout == "nemo_cgrid") != (uv_interp == "nemo_cgrid"):
         raise ValueError(
-            "numerics.uv_interp 'cgrid' and the C-grid face layout go "
+            "numerics.uv_interp 'nemo_cgrid' and the C-grid face layout go "
             f"together (NEMO with mesh.nemo_grid: cgrid); got uv_layout="
             f"{uv_layout!r}, uv_interp={uv_interp!r}.")
     if uv_layout == "node" and uv_interp in ("leastsq", "edge_leastsq"):
@@ -2122,7 +2123,7 @@ def run_single_realization(
         writer.set_global_attr("temporal_interp", int(bool(temporal_interp)))
         writer.set_global_attr("temporal_reconstruction", str(
             getattr(numerics, "temporal_reconstruction", "linear")))
-        if getattr(mode, "Fdrift3D", False) and numerics.uv_interp != "cgrid":   # cgrid: W is recomputed
+        if getattr(mode, "Fdrift3D", False) and numerics.uv_interp != "nemo_cgrid":   # nemo_cgrid: W is recomputed
             writer.set_global_attr("w_interp", str(
                 getattr(numerics, "w_interp", "leastsq")))
             writer.set_global_attr("w_positive", str(
@@ -3140,7 +3141,7 @@ def run_tracking(
                           "and data.time_window.")
         else:
             suggestion = "instant"
-            hint = "this reader typically writes instantaneous snapshots"
+            hint = "FESOM-C typically writes instantaneous snapshots"
             stamp_hint = ""
         warnings.warn(
             f"data.time_averaging is not set. {hint} — "
@@ -3421,7 +3422,7 @@ def run_tracking(
             if attrs:
                 sample_var_attrs[name] = attrs
         print(f"  Sampling:          {', '.join(user_sample_vars)} "
-              f"(method={'cell value' if config.numerics.uv_interp == 'cgrid' else sample_interp})")
+              f"(method={'cell value' if config.numerics.uv_interp == 'nemo_cgrid' else sample_interp})")
 
     # -- uv_interp x uv_layout fail-fast (pre-writer; spec 2026-06-06) --
     # The probe is metadata-only (dims/sizes).  Readers without it keep
@@ -3435,8 +3436,8 @@ def run_tracking(
                             uv_vertical_option=_uv_vertical_option(
                                 config.mode),
                             mesh=mesh)
-    if config.numerics.uv_interp == "cgrid":
-        _refuse_cgrid_unsupported(config)
+    if config.numerics.uv_interp == "nemo_cgrid":
+        _refuse_nemo_cgrid_unsupported(config)
     if (config.mesh.type == "nemo" and config.mode.Fdrift3D
             and getattr(config.mesh, "nemo_grid", "tpoint") != "cgrid"):
         raise NotImplementedError(
@@ -3677,10 +3678,10 @@ def run_tracking(
                 **_time_metadata(config, str(time_avg)),
                 "kelp_version": _kelp_version(),
             }
-            if getattr(mesh, "_cgrid_layout", None) is not None:
-                meta["cgrid_layout"] = mesh._cgrid_layout.label()    # incl. the open edges
-                meta["nemo_partial_cells"] = mesh._cgrid_partial
-            if getattr(config.mode, "Fdrift3D", False) and config.numerics.uv_interp != "cgrid":
+            if getattr(mesh, "_nemo_cgrid_layout", None) is not None:
+                meta["nemo_cgrid_layout"] = mesh._nemo_cgrid_layout.label()    # incl. the open edges
+                meta["nemo_partial_cells"] = mesh._nemo_cgrid_partial
+            if getattr(config.mode, "Fdrift3D", False) and config.numerics.uv_interp != "nemo_cgrid":
                 meta["w_interp"] = str(config.numerics.w_interp)
                 # the file-side W convention and the 2026-09-23 reader
                 # contract (readers convert producer W to the internal
@@ -3746,7 +3747,7 @@ def run_tracking(
                 _pw = getattr(config.numerics, _pn, None)
                 if _pw is not None:
                     meta[_pn] = [float(_pw[0]), float(_pw[1])]
-            if user_sample_vars and config.numerics.uv_interp != "cgrid":   # cgrid: cell values
+            if user_sample_vars and config.numerics.uv_interp != "nemo_cgrid":   # nemo_cgrid: cell values
                 meta["sample_interp"] = sample_interp
             if config.numerics.uv_interp != "leastsq":
                 meta["uv_interp"] = config.numerics.uv_interp

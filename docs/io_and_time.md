@@ -57,9 +57,6 @@ tracker reads both transparently.)
 
 ## §2 Finding the data files
 
-NEMO (`mesh.type: nemo`) has its own file rules (grid_T token swap, `ncinput_u/v` (`ncinput_w` refused), globs and lists per grid, `mesh_mask` / `domain_cfg`): `nemo.md` §3, `configuration.md`.
-
-
 `open_dataset` (the FESOM2 reader's version is the richest) accepts the input
 data in three shapes:
 
@@ -145,6 +142,10 @@ Two newer capabilities extend the directory case:
   levels `nlevels` or `zbar_e_bottom` (and `ulevels`), both loaders declare
   each element's bed and last wet layer in `mesh.metadata` — what
   `mode.uv_vertical: linear` needs on element u/v (`vertical.md` §2.1).
+
+NEMO (`mesh.type: nemo`) has its own file rules (the grid_T token swap,
+`ncinput_u`/`ncinput_v`, globs and lists per grid): `nemo.md` §3 and
+`configuration.md` §5.
 
 ## §3 The time axis
 

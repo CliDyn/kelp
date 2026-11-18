@@ -2,7 +2,7 @@
 
 > **Covers:** how the horizontal `u`/`v` velocity at a particle is computed once its nearest node and containing element are known — the default least-squares plane fit (and why it is particle-centered), the barycentric/Wachspress vertex blend, and node- vs element-based velocity layouts.
 > **Does not cover:** the NEMO C-grid path's user-level behaviour (see `nemo.md`); finding the nearest node / containing element (see `localization.md`); the full weight formulas and normal-equation derivations (see `interpolation.md` §1, §1.1, §7); the vertical `W` velocity (see `vertical.md`); where the velocity layout is detected on input (see `io_and_time.md`, `configuration.md`).
-> **Code:** `src/kelp/numerics/interpolate.py:_interp_leastsq_core`, `src/kelp/numerics/interpolate.py:_interp_barycentric_core`, `src/kelp/numerics/interpolate.py:_interp_barycentric_core_dl`, `src/kelp/numerics/interpolate.py:_interp_leastsq_core_dl`, `src/kelp/numerics/interpolate.py:get_interpolator`, `src/kelp/numerics/interpolate.py:_interp_cgrid_core`, `src/kelp/numerics/interpolate.py:interp_cgrid3d`.
+> **Code:** `src/kelp/numerics/interpolate.py:_interp_leastsq_core`, `src/kelp/numerics/interpolate.py:_interp_barycentric_core`, `src/kelp/numerics/interpolate.py:_interp_barycentric_core_dl`, `src/kelp/numerics/interpolate.py:_interp_leastsq_core_dl`, `src/kelp/numerics/interpolate.py:get_interpolator`, `src/kelp/numerics/nemo_cgrid.py:_interp_nemo_cgrid_core`, `src/kelp/numerics/nemo_cgrid.py:interp_nemo_cgrid3d`.
 > **Verified at:** see `docs/doc_map.yaml` (stamped via check_doc_sync --bless).
 
 This document explains how the tracker turns a particle's position into a
@@ -391,9 +391,9 @@ bounds: when member values of opposite sign cancel, the relative error of the
 result is unbounded. Where a member is dry the layer kernel still reads it and
 the two answers differ by design.
 
-## 8. Exact C-grid interpolation (`cgrid`, NEMO)
+## 8. Exact C-grid interpolation (`nemo_cgrid`, NEMO)
 
-`uv_interp: cgrid` (`mesh.nemo_grid: cgrid`, see `nemo.md`) does not
+`uv_interp: nemo_cgrid` (`mesh.nemo_grid: cgrid`, see `nemo.md`) does not
 interpolate a point velocity from nodes: it moves the particle with the model's
 face fluxes (Delandmeter and van Sebille 2019). The mesh elements are the T-cells
 (corners = four F-points); the data are the face rasters (u on the east face, v on
@@ -429,5 +429,5 @@ the north face), `VelocityField.u` has the length `ny*nx` (3-D: per layer).
   floor; a stage in a dry-ring cell or at or below a column's floor reads zero
   velocity.
 
-Fused kernels compare `uv_interp` by name, so `cgrid` always takes the unfused
-registry path (`cgrid3d_step` in 3-D).
+Fused kernels compare `uv_interp` by name, so `nemo_cgrid` always takes the unfused
+registry path (`nemo_cgrid3d_step` in 3-D).

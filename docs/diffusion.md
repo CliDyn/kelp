@@ -19,9 +19,6 @@ is byte-for-byte identical to a pure-advection run.
 
 ## 1. Why particles get a random kick
 
-(NEMO C-grid path, `mesh.nemo_grid: cgrid`: uniform-Kh diffusion in 2-D only; em/m1 and any diffusion in 3-D are refused, `nemo.md` §6.)
-
-
 The velocity field read from a model output is an *average* over each grid cell
 and each output interval. Motions smaller or faster than that — eddies,
 filaments, turbulent overturning — are smoothed away. Yet those motions do real
@@ -295,6 +292,9 @@ The kicks never read `u`/`v`, so a horizontal velocity linear in depth
 (`mode.uv_vertical: linear`, `vertical.md` §2.1) composes with the `split`
 uniform kick and the Az kick unchanged: the deterministic part of the step is
 the depth-linear step, the kicks follow as above; `em`/`m1` stay 2-D only.
+
+On the NEMO C-grid path (`mesh.nemo_grid: cgrid`) only the uniform-Kh kick in
+2-D is available; `em`/`m1` and any diffusion in 3-D are refused (`nemo.md` §6).
 
 
 ## 6. What is called when

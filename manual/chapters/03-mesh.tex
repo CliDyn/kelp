@@ -262,7 +262,8 @@ FESOM~1.4 & model nodes & triangles, from the mesh files or the cell polygons & 
 FESOM-C & model nodes & triangles, quadrilaterals & element (node when stored so) & sigma & \num{6400000} \\
 HEALPix, dual & wet pixel centres & corner cells: quadrilaterals, some triangles & node & z-level & \num{6371000} \\
 HEALPix, pixel & pixel corners & wet pixels (quadrilaterals) & element & two-dim. & \num{6371000} \\
-NEMO & wet T-points & quadrilaterals of four wet T-points & node & two-dim. & \num{6371000} \\
+NEMO, T-point & wet T-points & quadrilaterals of four wet T-points & node & two-dim. & \num{6371000} \\
+NEMO, C-grid & F-points & wet T-cells (quadrilaterals) & cell faces & z-level & \num{6371000} \\
 \bottomrule
 \end{tabular}
 \caption{Mesh sources. The radius is the default of \conf{mesh.r\_earth}; it enters the fallback
@@ -295,8 +296,23 @@ the eight pixels that touch a pole are degenerate in the geographic frame and pr
 corners are four adjacent wet cell centres (T-points); a quadrilateral with a land corner is dropped, which
 draws the coastline, and a wet T-point that belongs to no quadrilateral is left out, since it could only be
 a dead end. The NEMO reader averages the C-grid velocities at the cell faces to the T-points, setting
-missing face values to zero first, which gives node-layout velocities. Its first version is two-dimensional
-and requires a grid whose axes are within $2^\circ$ of east and north.
+missing face values to zero first, which gives node-layout velocities. This T-point path, the default
+(\conf{mesh.nemo\_grid: tpoint}), is two-dimensional and requires a grid whose axes are within $2^\circ$
+of east and north.
+
+\paragraph{NEMO, exact C-grid.} With \conf{mesh.nemo\_grid: cgrid} the mesh is the model's own
+staggered grid: the nodes are the F-points, the elements the wet T-cells with their four F-point
+corners, and the velocities stay on the cell faces ($u$ on the east face, $v$ on the north face), where
+they are interpolated with the flux scheme of \citet{delandmeter2019parcels} (\conf{uv\_interp: nemo\_cgrid},
+set by the key). The fluxes use the model's face widths \code{e2u}, \code{e1v}, so no flow crosses a
+closed face and the model's discrete continuity carries over; land has zero velocity, and one ring of
+dry cells around the wet region holds a particle that reaches the coast, alive and at rest. The layout
+of the raster --- east-west halo columns, a T- or F-point-pivot north fold, with or without the halo, or
+a crop with open edges --- is read from the coordinates, and every raster is brought to one canonical
+form, so the seam and the fold are interior edges. Three-dimensional runs use z-levels with partial
+bottom cells and a vertical velocity recomputed from the continuity of the face fluxes; the step runs in
+a fractional level coordinate. The grid may be rotated (\cref{ch:frame}). The user page
+\code{docs/nemo.md} lists the inputs, the refused options and the validation.
 
 \begin{figure}[t]
 \centering
@@ -340,7 +356,10 @@ quadrilaterals whose four T-points are wet; one land point removes the quadrilat
 \codeanchor{\fn{\_sanitize\_connectivity} and \fn{FesomCReader.load\_mesh} (\srcfile{readers/fesomc.py});
 \fn{build\_healpix\_dual\_mesh}, \fn{build\_healpix\_pixel\_mesh} and \fn{HealpixReader.load\_mesh}
 (\srcfile{readers/healpix.py}); \fn{build\_structured\_mesh} and \fn{c\_grid\_to\_t}
-(\srcfile{readers/structured.py}); the NEMO adapter in \srcfile{readers/nemo.py}.}
+(\srcfile{readers/structured.py}); the NEMO reader in the package \srcfile{readers/nemo/}
+(\srcfile{reader.py}; the raster layouts in \srcfile{\_layout.py}, \fn{build\_nemo\_cgrid\_mesh} in
+\srcfile{\_mesh.py}, partial cells and $\Wvel$ in \srcfile{\_vertical.py}) and the C-grid numerics in
+\srcfile{numerics/nemo\_cgrid.py}.}
 
 \section{The FESOM~1.4 mesh}\label{sec:mesh-fesom14}
 

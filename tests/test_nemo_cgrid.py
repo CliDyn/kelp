@@ -1,5 +1,5 @@
 """Exact Arakawa C-grid u/v for NEMO (``mesh.nemo_grid: cgrid`` +
-``numerics.uv_interp: cgrid``), synthetic grids only.
+``numerics.uv_interp: nemo_cgrid``), synthetic grids only.
 
 Grid frame: F(j,i) sits at (i, j) * d, T(j,i) at (i - 1/2, j - 1/2) * d, the
 frame is rotated by ``theta`` (and optionally sheared) and put at the equator,
@@ -16,10 +16,10 @@ from kelp.core.config import (
     NumericsConfig, TimeConfig)
 from kelp.core.geometry import METERS_PER_DEG_LAT
 from kelp.core.io import VelocityField
-from kelp.numerics.interpolate import interp_cgrid_single
+from kelp.numerics.nemo_cgrid import interp_nemo_cgrid_single
 from kelp.readers import get_reader
-from kelp.readers.structured import build_cgrid_mesh
-from tests._cgrid_orca import NC, NY, orca_grid, strip
+from kelp.readers.nemo._mesh import build_nemo_cgrid_mesh
+from tests._nemo_cgrid_orca import NC, NY, orca_grid, strip
 
 D = 0.1          # cell size, degrees
 
@@ -119,7 +119,7 @@ def _write(tmp_path, ny, nx, theta, tmask, u, v, n_time=3, dt=3600.0,
     return str(tmp_path / "EXP_grid_T.nc"), str(tmp_path / "mesh_mask.nc")
 
 
-def _cfg(tmp_path, gt, mm, seeds, n_steps, dt=3600.0, uv_interp="cgrid",
+def _cfg(tmp_path, gt, mm, seeds, n_steps, dt=3600.0, uv_interp="nemo_cgrid",
          nemo_grid="cgrid", integrator="rk4", **kw):
     sf = tmp_path / "seeds.dat"
     sf.write_text("".join(f"{a:.9f} {b:.9f}\n" for a, b in seeds))
@@ -150,17 +150,17 @@ def test_uniform_flow_exact(theta, shear, mirror):
     tmask = np.ones((ny, nx))
     vx, vy = 0.3, -0.2
     u, v = _faces(flon, flat, np.ones((ny, nx)), vx=vx, vy=vy)
-    mesh = build_cgrid_mesh(flon, flat, tmask)
+    mesh = build_nemo_cgrid_mesh(flon, flat, tmask)
     vel = VelocityField(u=u.ravel(), v=v.ravel(), eta=np.zeros(mesh.n_nodes),
-                        uv_layout="cgrid")
+                        uv_layout="nemo_cgrid")
     rng = np.random.default_rng(1)
-    ji = mesh._cgrid_elem_ji       # the raster's last row/column have a dry far face
+    ji = mesh._nemo_cgrid_elem_ji       # the raster's last row/column have a dry far face
     inner = np.flatnonzero((ji[:, 0] < ny - 1) & (ji[:, 1] < nx - 1))
     for e in rng.choice(inner, 12):
-        c = mesh._cgrid_corners[e]
+        c = mesh._nemo_cgrid_corners[e]
         w = rng.dirichlet(np.ones(4) * 3)
         lon, lat = w @ mesh.nodes_lon[c], w @ mesh.nodes_lat[c]
-        U, V, ok = interp_cgrid_single(lon, lat, 0, mesh, vel,
+        U, V, ok = interp_nemo_cgrid_single(lon, lat, 0, mesh, vel,
                                        _nearest(mesh, lon, lat))
         assert ok
         assert U == pytest.approx(vx, rel=1e-5) and V == pytest.approx(vy, rel=1e-5)
@@ -170,19 +170,19 @@ def test_axis_aligned_cell_returns_face_value():
     # rectangle, uW = uE = u0 -> exactly u0 (and linear u gives the linear profile)
     ny, nx = 5, 5
     (flon, flat), _ = _grid(ny, nx)
-    mesh = build_cgrid_mesh(flon, flat, np.ones((ny, nx)))
+    mesh = build_nemo_cgrid_mesh(flon, flat, np.ones((ny, nx)))
     u = np.zeros((ny, nx)); v = np.zeros((ny, nx))
     u[:, :] = 0.7
     vel = VelocityField(u=u.ravel(), v=v.ravel(), eta=np.zeros(mesh.n_nodes),
-                        uv_layout="cgrid")
-    U, V, ok = interp_cgrid_single(2.4 * D, 2.6 * D, 0, mesh, vel,
+                        uv_layout="nemo_cgrid")
+    U, V, ok = interp_nemo_cgrid_single(2.4 * D, 2.6 * D, 0, mesh, vel,
                                    _nearest(mesh, 2.4 * D, 2.6 * D))
     assert ok and U == pytest.approx(0.7, rel=1e-12) and V == pytest.approx(0.0, abs=1e-12)
     u[:, 2] = 0.3                          # uE of T(.,2) smaller: u linear in xi
     vel = VelocityField(u=u.ravel(), v=v.ravel(), eta=np.zeros(mesh.n_nodes),
-                        uv_layout="cgrid")
+                        uv_layout="nemo_cgrid")
     # T(j,2) spans x in [1, 2] * D; xi = 0.25 -> u = 0.7 + 0.25 * (0.3 - 0.7)
-    U, _, ok = interp_cgrid_single(1.25 * D, 2.6 * D, 0, mesh, vel,
+    U, _, ok = interp_nemo_cgrid_single(1.25 * D, 2.6 * D, 0, mesh, vel,
                                    _nearest(mesh, 1.25 * D, 2.6 * D))
     assert ok and U == pytest.approx(0.6, rel=2e-3)
 
@@ -294,16 +294,16 @@ def test_fold_slab_south_edge_is_open(tmp_path):
 def test_duplicate_nodes_and_wet_pivots_refuse():
     g, flon, flat, tmask, *_ = _orca_fields("F", True)
     with pytest.raises(ValueError, match="pairs of mesh nodes coincide"):
-        build_cgrid_mesh(flon, flat, tmask)               # the fold raster taken for a regional one
-    from kelp.readers.structured import fold_pivot_cells
+        build_nemo_cgrid_mesh(flon, flat, tmask)               # the fold raster taken for a regional one
+    from kelp.readers.nemo._layout import nemo_fold_pivot_cells
     wet = tmask.copy()
-    wet[fold_pivot_cells(g.canon)] = 1.0
+    wet[nemo_fold_pivot_cells(g.canon)] = 1.0
     with pytest.raises(ValueError, match="fold's grid poles must be on land"):
-        build_cgrid_mesh(flon, flat, wet, layout=g.canon)
+        build_nemo_cgrid_mesh(flon, flat, wet, layout=g.canon)
 
 
-# (e) rotated grid: accepted by cgrid, still refused by the default ----------
-def test_rotated_grid_accepted_only_in_cgrid(tmp_path):
+# (e) rotated grid: accepted by nemo_cgrid, still refused by the default ----------
+def test_rotated_grid_accepted_only_in_nemo_cgrid(tmp_path):
     ny = nx = 6
     (flon, flat), _ = _grid(ny, nx, 45.0)
     tmask = np.ones((ny, nx))
@@ -311,7 +311,7 @@ def test_rotated_grid_accepted_only_in_cgrid(tmp_path):
     _gt, mm = _write(tmp_path, ny, nx, 45.0, tmask, u, v)
     reader = get_reader("nemo")
     mesh = reader.load_mesh(SimpleNamespace(meshpath=mm, nemo_grid="cgrid"))
-    assert mesh._cgrid and mesh.n_elements == (ny - 1) * (nx - 1)
+    assert mesh._nemo_cgrid and mesh.n_elements == (ny - 1) * (nx - 1)
     with pytest.raises(NotImplementedError, match="east/north"):
         reader.load_mesh(SimpleNamespace(meshpath=mm))          # default tpoint
 
@@ -333,17 +333,17 @@ def _fail_case(name, tmp_path):
         kw["mode"] = ModeConfig(Fdrift2D=True, Fdrift3D=False, sample_vars=["thetao"])
     elif name == "pchip":
         extra["numerics"] = {"temporal_reconstruction": "pchip"}
-    elif name == "bary_on_cgrid":
+    elif name == "bary_on_nemo_cgrid":
         extra["uv_interp"] = "barycentric"
-    elif name == "cgrid_on_tpoint":
+    elif name == "nemo_cgrid_on_tpoint":
         extra["nemo_grid"] = "tpoint"
     return _cfg(tmp_path, gt, mm, seeds, 1, **extra, **kw)[0]
 
 
 @pytest.mark.parametrize("name,match", [
-    ("no_f", "glamf"), ("rk45", "cgrid|rk45"), ("beaching", "beaching"),
-    ("sample", "sampl"), ("pchip", "temporal|cgrid"),
-    ("bary_on_cgrid", "cgrid"), ("cgrid_on_tpoint", "cgrid")])
+    ("no_f", "glamf"), ("rk45", "nemo_cgrid|rk45"), ("beaching", "beaching"),
+    ("sample", "sampl"), ("pchip", "temporal|nemo_cgrid"),
+    ("bary_on_nemo_cgrid", "nemo_cgrid"), ("nemo_cgrid_on_tpoint", "nemo_cgrid")])
 def test_refusals(tmp_path, name, match):
     from kelp.tracking import run_tracking
     with pytest.raises((ValueError, NotImplementedError, KeyError), match=match):
@@ -379,7 +379,7 @@ def _loop_flux(mesh, vel, e, n=10, f=1e-3):
     """Outward flux of the interpolated field around a loop just inside
     element ``e`` in the sphere metric (``U dlat - V cos(lat) dlon``, 5-point
     Gauss on each segment), and the sum of |flux| through the loop."""
-    c = mesh._cgrid_corners[e]
+    c = mesh._nemo_cgrid_corners[e]
     lon, lat = mesh.nodes_lon[c], mesh.nodes_lat[c]
     ctr = np.array([lon.mean(), lat.mean()])
     pts = []
@@ -394,7 +394,7 @@ def _loop_flux(mesh, vel, e, n=10, f=1e-3):
     for p, q in zip(pts[:-1], pts[1:]):
         for x, w in zip(xs, ws):
             m = p + (q - p) * (x + 1) / 2
-            U, V, ok = interp_cgrid_single(m[0], m[1], 0, mesh, vel, _nearest(mesh, *m))
+            U, V, ok = interp_nemo_cgrid_single(m[0], m[1], 0, mesh, vel, _nearest(mesh, *m))
             assert ok
             d = w / 2 * (U * (q[1] - p[1]) - V * np.cos(np.deg2rad(m[1])) * (q[0] - p[0]))
             flux += d
@@ -419,11 +419,11 @@ def test_model_widths_carry_discrete_continuity(lat0):
     v[:, 1:] = (psi[:, 1:] - psi[:, :-1]) / e1v[:, 1:]
     res = {}
     for widths in (True, False):
-        mesh = build_cgrid_mesh(flon, flat, np.ones((ny, nx)),
+        mesh = build_nemo_cgrid_mesh(flon, flat, np.ones((ny, nx)),
                                 **(dict(e2u=e2u, e1v=e1v) if widths else {}))
         vel = VelocityField(u=u.ravel(), v=v.ravel(), eta=np.zeros(mesh.n_nodes),
-                            uv_layout="cgrid")
-        ji = mesh._cgrid_elem_ji
+                            uv_layout="nemo_cgrid")
+        ji = mesh._nemo_cgrid_elem_ji
         e = int(np.flatnonzero((ji[:, 0] == 4) & (ji[:, 1] == 4))[0])
         flux, absflux = _loop_flux(mesh, vel, e)
         res[widths] = abs(flux) / absflux
@@ -431,7 +431,7 @@ def test_model_widths_carry_discrete_continuity(lat0):
 
 
 # --- global ORCA layouts: E-W seam + T / F-pivot north fold, with / without the halo
-# (``tests/_cgrid_orca.py``: a tripolar-like elliptic grid; halo-free files carry
+# (``tests/_nemo_cgrid_orca.py``: a tripolar-like elliptic grid; halo-free files carry
 # the NEMO 4.2 topology attributes).  The flow psi = vy * x (northward) has face
 # fluxes that are psi differences, canonicalised as vectors, so every copy of u
 # and v is what NEMO writes (v antisymmetric on the fold row, a sign across it).
@@ -441,20 +441,20 @@ ORCA_IDS = ["F-halo", "T-halo", "F-free", "T-free"]
 
 def _orca_fields(fold, halo, vy=0.5):
     """Canonical-form rasters: F coordinates, tmask, widths, u, v of psi = vy * x."""
-    from kelp.readers.structured import cgrid_to_canonical, fold_pivot_cells
+    from kelp.readers.nemo._layout import nemo_cgrid_to_canonical, nemo_fold_pivot_cells
     g = orca_grid(fold, halo)
     lay = g.canon
     flon, flat = g.xy_c["F"]
     e2u, e1v = _widths(flon, flat)
-    e2u, e1v = cgrid_to_canonical(e2u, lay, "U"), cgrid_to_canonical(e1v, lay, "V")
+    e2u, e1v = nemo_cgrid_to_canonical(e2u, lay, "U"), nemo_cgrid_to_canonical(e1v, lay, "V")
     psi = vy * flon * METERS_PER_DEG_LAT
     u = np.zeros(flon.shape); v = np.zeros(flon.shape)
     u[1:, :] = -(psi[1:, :] - psi[:-1, :]) / e2u[1:, :]
     v[:, 1:] = (psi[:, 1:] - psi[:, :-1]) / e1v[:, 1:]
-    u, v = (cgrid_to_canonical(a, lay, k, vector=True) for a, k in ((u, "U"), (v, "V")))
+    u, v = (nemo_cgrid_to_canonical(a, lay, k, vector=True) for a, k in ((u, "U"), (v, "V")))
     tmask = np.ones(flon.shape)
-    tmask[fold_pivot_cells(lay)] = 0.0                  # the fold's grid poles are land
-    return g, flon, flat, cgrid_to_canonical(tmask, lay, "T"), e2u, e1v, u, v
+    tmask[nemo_fold_pivot_cells(lay)] = 0.0                  # the fold's grid poles are land
+    return g, flon, flat, nemo_cgrid_to_canonical(tmask, lay, "T"), e2u, e1v, u, v
 
 
 def _orca_case(tmp_path, fold="F", halo=True, vy=0.5, n_steps=120, dt=1800.0, seeds=(), rotation=None):
@@ -492,15 +492,15 @@ def _orca_case(tmp_path, fold="F", halo=True, vy=0.5, n_steps=120, dt=1800.0, se
 @pytest.mark.parametrize("fold,halo", ORCA_LAYOUTS, ids=ORCA_IDS)
 def test_orca_mesh_topology_and_flux_continuity(tmp_path, fold, halo, capsys):
     from kelp.core.mesh import build_elem_neighbors
-    from kelp.readers.structured import cgrid_canonical
+    from kelp.readers.nemo._layout import nemo_cgrid_canonical
     cfg, _out, u, v = _orca_case(tmp_path, fold, halo)
     mesh = get_reader("nemo").load_mesh(cfg.mesh)
-    lay = mesh._cgrid_layout
+    lay = mesh._nemo_cgrid_layout
     assert (lay.fold, lay.halo_cols, lay.periodic) == (fold, halo, True)
-    assert f"NEMO cgrid layout: {lay.label()}" in capsys.readouterr().out      # the log line
+    assert f"NEMO C-grid layout: {lay.label()}" in capsys.readouterr().out      # the log line
     ny, nx = lay.shape
     assert mesh._structured_shape == (NY, NC + 2) and lay.J == NY - 2
-    ji = mesh._cgrid_elem_ji
+    ji = mesh._nemo_cgrid_elem_ji
     nb = build_elem_neighbors(mesh)                       # raises if an edge has > 2 cells
     cell = {(int(a), int(b)): e for e, (a, b) in enumerate(ji)}
     for j in range(2, lay.J):                             # seam: W of i=1 is i=NC
@@ -508,7 +508,7 @@ def test_orca_mesh_topology_and_flux_continuity(tmp_path, fold, halo, capsys):
     n_fold = 0
     for (j, i), e in cell.items():                        # fold: N of a fold-row cell is its mirror
         if j == lay.J:
-            mj, mi, _ = cgrid_canonical("T", j + 1, i, lay)
+            mj, mi, _ = nemo_cgrid_canonical("T", j + 1, i, lay)
             if (int(mj), int(mi)) in cell:
                 assert nb[e, 2] == cell[(int(mj), int(mi))]
                 n_fold += 1
@@ -517,7 +517,7 @@ def test_orca_mesh_topology_and_flux_continuity(tmp_path, fold, halo, capsys):
     j, i = ji[:, 0], ji[:, 1]
     fi = np.stack([(j - 1) * nx + i, j * nx + i, j * nx + i, j * nx + i - 1], 1)
     uf, vf = u.ravel(), v.ravel()
-    e2u, e1v = mesh._cgrid_e2u, mesh._cgrid_e1v
+    e2u, e1v = mesh._nemo_cgrid_e2u, mesh._nemo_cgrid_e1v
     out = np.stack([-vf[fi[:, 0]] * e1v[fi[:, 0]], uf[fi[:, 1]] * e2u[fi[:, 1]],
                     vf[fi[:, 2]] * e1v[fi[:, 2]], -uf[fi[:, 3]] * e2u[fi[:, 3]]], 1)
     e, k = np.nonzero(nb >= 0)
@@ -525,16 +525,16 @@ def test_orca_mesh_topology_and_flux_continuity(tmp_path, fold, halo, capsys):
     k2 = np.array([int(np.flatnonzero(nb[b] == a)[0]) for a, b in zip(e, n)])
     assert np.abs(out[e, k] + out[n, k2]).max() <= 1e-9 * np.abs(out).max()
     # ...and so does the interpolated normal velocity at seam / fold edge midpoints
-    vel = VelocityField(u=uf, v=vf, eta=np.zeros(mesh.n_nodes), uv_layout="cgrid")
-    c, lo, la = mesh._cgrid_corners, mesh.nodes_lon, mesh.nodes_lat
+    vel = VelocityField(u=uf, v=vf, eta=np.zeros(mesh.n_nodes), uv_layout="nemo_cgrid")
+    c, lo, la = mesh._nemo_cgrid_corners, mesh.nodes_lon, mesh.nodes_lat
     special = (np.abs(i[e] - i[n]) > 1) | (np.abs(j[e] - j[n]) > 1)
     assert special.sum() > 10
     for a, s, b, t in zip(e[special], k[special], n[special], k2[special]):
         p, q = c[a, s], c[a, (s + 1) % 4]
         mid = (0.5 * (lo[p] + lo[q]), 0.5 * (la[p] + la[q]))
         nrm = np.array([la[q] - la[p], -(lo[q] - lo[p])])
-        va = np.array(interp_cgrid_single(*mid, 0, mesh, vel, int(p), elem=int(a))[:2])
-        vb = np.array(interp_cgrid_single(*mid, 0, mesh, vel, int(p), elem=int(b))[:2])
+        va = np.array(interp_nemo_cgrid_single(*mid, 0, mesh, vel, int(p), elem=int(a))[:2])
+        vb = np.array(interp_nemo_cgrid_single(*mid, 0, mesh, vel, int(p), elem=int(b))[:2])
         assert abs((va - vb) @ nrm) <= 1e-9 * np.hypot(*nrm)
 
 
@@ -560,8 +560,8 @@ def test_orca_particles_cross_seam_and_fold_rotation_invariant(tmp_path):
         tracks[fold, halo, rotation] = np.stack([tr["lon"], tr["lat"]])
         import xarray as xr
         with xr.open_dataset(out) as ds:                      # the layout, open edges included
-            assert f"{fold}-pivot north fold" in ds.attrs["cgrid_layout"]
-            assert "unjoined raster edges (open where wet): S" in ds.attrs["cgrid_layout"]
+            assert f"{fold}-pivot north fold" in ds.attrs["nemo_cgrid_layout"]
+            assert "unjoined raster edges (open where wet): S" in ds.attrs["nemo_cgrid_layout"]
     for fold in "TF":
         np.testing.assert_array_equal(tracks[fold, False, None], tracks[fold, True, None])
         np.testing.assert_allclose(tracks[fold, True, "fesom2"], tracks[fold, True, None], atol=1e-4)
@@ -600,7 +600,7 @@ def test_orca_mismatched_copies_refuse(tmp_path):
 
 # --- dry ring (one ring of zero-velocity cells around the wet region) --------
 def _ring_ji(mesh):
-    return {tuple(x) for x in mesh._cgrid_elem_ji[int((mesh._cgrid_nlev > 0).sum()):].tolist()}
+    return {tuple(x) for x in mesh._nemo_cgrid_elem_ji[int((mesh._nemo_cgrid_nlev > 0).sum()):].tolist()}
 
 
 def test_ring_cells_8_neighbourhood():
@@ -609,8 +609,8 @@ def test_ring_cells_8_neighbourhood():
     tmask = np.zeros((ny, nx))
     tmask[4, 4:6] = 1.0
     tmask[7, 7] = 1.0
-    m1 = build_cgrid_mesh(flon, flat, tmask)
-    np.testing.assert_array_equal(m1._cgrid_nlev, [1, 1, 1] + [0] * (m1.n_elements - 3))
+    m1 = build_nemo_cgrid_mesh(flon, flat, tmask)
+    np.testing.assert_array_equal(m1._nemo_cgrid_nlev, [1, 1, 1] + [0] * (m1.n_elements - 3))
     expect = set()
     for j, i in zip(*np.nonzero(tmask)):
         expect |= {(j + a, i + b) for a in (-1, 0, 1) for b in (-1, 0, 1)}
@@ -621,23 +621,23 @@ def test_ring_cells_8_neighbourhood():
 @pytest.mark.parametrize("fold", "TF")
 def test_ring_across_seam_and_fold(fold):
     from kelp.core.mesh import build_elem_neighbors
-    from kelp.readers.structured import cgrid_to_canonical, fold_pivot_cells
+    from kelp.readers.nemo._layout import nemo_cgrid_to_canonical, nemo_fold_pivot_cells
     g, flon, flat, tmask, _e2u, _e1v, _u, _v = _orca_fields(fold, True)
     J = g.canon.J
     tmask[4, NC] = 0.0                  # dry cell at the seam (col 0 is its halo copy)
     tmask[0, NC] = 0.0
     tmask[J, 4] = 0.0                   # dry cell on the fold row (mirrored in the halo row)
-    tmask = cgrid_to_canonical(tmask, g.canon, "T")
-    mesh = build_cgrid_mesh(flon, flat, tmask, layout=g.canon)
-    ring = [tuple(x) for x in mesh._cgrid_elem_ji[int((mesh._cgrid_nlev > 0).sum()):].tolist()]
+    tmask = nemo_cgrid_to_canonical(tmask, g.canon, "T")
+    mesh = build_nemo_cgrid_mesh(flon, flat, tmask, layout=g.canon)
+    ring = [tuple(x) for x in mesh._nemo_cgrid_elem_ji[int((mesh._nemo_cgrid_nlev > 0).sum()):].tolist()]
     assert len(ring) == len(set(ring))                   # each canonical cell once
     assert (4, NC) in ring and (J, 4) in ring
     assert all(1 <= i <= NC for _j, i in ring) and all(1 <= j <= J for j, _i in ring)
-    piv = fold_pivot_cells(g.canon)
+    piv = nemo_fold_pivot_cells(g.canon)
     assert not {(j, i) for j, i in ring if piv[j, i]}
     build_elem_neighbors(mesh)                           # raises if an edge has > 2 cells
     # the wet cell east of the seam dry cell reaches it across the halo
-    ji = [tuple(x) for x in mesh._cgrid_elem_ji.tolist()]
+    ji = [tuple(x) for x in mesh._nemo_cgrid_elem_ji.tolist()]
     nb = build_elem_neighbors(mesh)
     assert nb[ji.index((4, 1)), 3] == ji.index((4, NC))
 
@@ -659,14 +659,14 @@ def _step_corner():
     from kelp.numerics.integrators import rk4_step
     flon, flat, tmask, u, v = _corner_case()
     e2u, e1v = _widths(flon, flat)
-    mesh = build_cgrid_mesh(flon, flat, tmask, e2u=e2u, e1v=e1v)
+    mesh = build_nemo_cgrid_mesh(flon, flat, tmask, e2u=e2u, e1v=e1v)
     vel = VelocityField(u=u.ravel(), v=v.ravel(), eta=np.zeros(mesh.n_nodes),
-                        uv_layout="cgrid")
+                        uv_layout="nemo_cgrid")
     st = make_state([4.9 * D], [4.9 * D])
     st = st.replace(nearest_node=np.array([_nearest(mesh, 4.9 * D, 4.9 * D)], np.int32),
                     failure_reason=np.zeros(1, np.int8))
     dt = 0.3 * D * METERS_PER_DEG_LAT        # 1 m/s: the half step passes the corner by ~0.15 D
-    return rk4_step(st, vel, mesh, dt, 1.0, uv_interp="cgrid"), mesh
+    return rk4_step(st, vel, mesh, dt, 1.0, uv_interp="nemo_cgrid"), mesh
 
 
 def test_convex_corner_stage_stays_alive_in_ring():
@@ -676,18 +676,18 @@ def test_convex_corner_stage_stays_alive_in_ring():
     assert new.lon[0] > 4.9 * D and new.lat[0] > 4.9 * D            # and did move on
 
 
-def test_cgrid_mesh_derives_uv_interp_and_refuses_contradictions():
+def test_nemo_cgrid_mesh_derives_uv_interp_and_refuses_contradictions():
     from kelp.core.config import AppConfig, MeshConfig, NumericsConfig
     mk = lambda **kw: AppConfig(mesh=MeshConfig(type="nemo", nemo_grid="cgrid"),
                                 numerics=NumericsConfig(**kw))
-    assert mk().numerics.uv_interp == "cgrid"
-    assert mk(uv_interp="cgrid").numerics.uv_interp == "cgrid"
-    with pytest.raises(ValueError, match="uv_interp: cgrid"):
+    assert mk().numerics.uv_interp == "nemo_cgrid"
+    assert mk(uv_interp="nemo_cgrid").numerics.uv_interp == "nemo_cgrid"
+    with pytest.raises(ValueError, match="uv_interp: nemo_cgrid"):
         mk(uv_interp="barycentric")
 
 
-@pytest.mark.parametrize("named,ok", [("leastsq", False), ("barycentric", False), ("cgrid", True), (None, True)])
-def test_load_config_refuses_an_explicit_other_uv_interp_with_cgrid(tmp_path, named, ok):
+@pytest.mark.parametrize("named,ok", [("leastsq", False), ("barycentric", False), ("nemo_cgrid", True), (None, True)])
+def test_load_config_refuses_an_explicit_other_uv_interp_with_nemo_cgrid(tmp_path, named, ok):
     from kelp.core.config import load_config
     num = f", uv_interp: {named}" if named else ""
     p = tmp_path / "c.yaml"
@@ -698,9 +698,9 @@ data: {{path: d.nc}}
 time: {{n_steps: 1}}
 """)
     if ok:
-        assert load_config(str(p)).numerics.uv_interp == "cgrid"
+        assert load_config(str(p)).numerics.uv_interp == "nemo_cgrid"
     else:
-        with pytest.raises(ValueError, match="uv_interp: cgrid"):
+        with pytest.raises(ValueError, match="uv_interp: nemo_cgrid"):
             load_config(str(p))
 
 
@@ -721,7 +721,7 @@ def test_checkpoint_restart_chain_equals_the_uncut_run(tmp_path):
     rd = get_reader("nemo")
     mesh = rd.load_mesh(MeshConfig(type="nemo", meshpath=mm, nemo_grid="cgrid"))
     ds = rd.open_dataset(gt, mode_cfg=mode)
-    num = NumericsConfig(dt=3600.0, integrator="rk4", output_freq=1, uv_interp="cgrid")
+    num = NumericsConfig(dt=3600.0, integrator="rk4", output_freq=1, uv_interp="nemo_cgrid")
     seeds = make_state(np.array([3.3, 4.6, 5.1]) * D, np.array([3.2, 5.2, 4.1]) * D)
 
     def run(name, state, n_steps, step0=0, checkpoint_freq=0):

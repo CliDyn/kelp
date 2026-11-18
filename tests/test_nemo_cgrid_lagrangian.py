@@ -1,10 +1,11 @@
-"""Data-gated (``KELP_TEST_NEMO_DATA``): Lagrangian benchmarks of the C-grid 3-D path on a
-56 x 64 ORCA05 window (Denmark Strait / Iceland-Scotland sill, steady monthly record).
+"""Data-gated (``KELP_TEST_NEMO_DATA``, built by ``utils/make_nemo_test_data.py``): Lagrangian
+benchmarks of the C-grid 3-D path on a 56 x 64 ORCA05 window at the Denmark Strait /
+Iceland-Scotland sill (steady monthly record).
 
 1. Transport: transport-weighted particles seeded on the inflow faces of a T-cell box leave it
    through the edges carrying the Eulerian face fluxes (u e2u e3u, v e1v e3v).
 2. Uniformity (discrete Liouville): particles uniform per model volume (xi, eta, fractional
-   level) stay uniform per cell; the old metre-based vertical placement left bottom cells
+   level) stay uniform per cell; a metre-based vertical placement leaves bottom cells
    20-26 % over-populated (chi2/dof 1.45), the fractional-level scheme gives 1.01 / 1.02-1.05.
 """
 import os
@@ -97,7 +98,7 @@ def _run(d, name, seeds, dt, n_steps, out_steps):
     from kelp.tracking import run_tracking
     np.savetxt(d / f"{name}.seeds", seeds, fmt="%.9f")
     (d / f"{name}.yaml").write_text(f"""mode: {{Fdrift3D: true, time_dir: 1.0, var_u: vozocrtx, var_v: vomecrty, var_eta: sossheig, track_failure_reason: true}}
-numerics: {{dt: {dt}, integrator: rk4, output_freq: {out_steps}, uv_interp: cgrid, temporal_interp: false}}
+numerics: {{dt: {dt}, integrator: rk4, output_freq: {out_steps}, uv_interp: nemo_cgrid, temporal_interp: false}}
 mesh: {{type: nemo, nemo_grid: cgrid, meshpath: {d}/mesh.nc}}
 data: {{ncinput: {d}/grid_T.nc, inicloud: {d}/{name}.seeds, output_path: {d}/{name}.zarr, time_averaging: instant}}
 time: {{start_time_idx: 0, n_steps: {n_steps}, on_exhausted: cycle}}
@@ -167,9 +168,10 @@ def test_box_transport_lagrangian_matches_eulerian_fluxes(win):
     lag = {e: dT[exit_edge == e].sum() for e in list(eul) + ["dead", "unloc", ""]}
     print({e: (lag[e] / 1e6, eul.get(e, 0) / 1e6) for e in lag})
     assert lag["dead"] == 0 and lag["unloc"] == 0
-    assert lag[""] / dT.sum() < 0.02                                         # measured 0.8 % (N=20000)
-    assert abs(lag["S"] - eul["S"]) / eul["S"] < 0.01                        # measured 0.34 %
-    assert sum(abs(lag[e] - eul[e]) for e in eul) / dT.sum() < 0.02          # measured 0.8 %
+    # measured with these ~5000 particles (with 20 055: 0.8 %, 0.34 %, 0.8 %, docs/nemo.md §7)
+    assert lag[""] / dT.sum() < 0.02                                         # measured 0.94 %
+    assert abs(lag["S"] - eul["S"]) / eul["S"] < 0.01                        # measured 0.31 %
+    assert sum(abs(lag[e] - eul[e]) for e in eul) / dT.sum() < 0.02          # measured 0.95 %
 
 
 # --- 2. uniformity -------------------------------------------------------------
@@ -198,12 +200,11 @@ def test_uniform_per_volume_stays_uniform(win):
     core = np.zeros(V.shape, bool); core[:, bj0 + margin:bj1 + 1 - margin, bi0 + margin:bi1 + 1 - margin] = True
     m = core & (E > 0)
     chi2 = ((cnt[m] - E[m]) ** 2 / E[m]).sum() / m.sum()
-    tm = c["tm"]
     bottom = np.arange(c["K"])[:, None, None] == (nlev - 1)[None]
     ref = np.diff(c["zw"])[:, None, None]
     partial = bottom & (np.abs(c["e3t"] - ref) > 1e-3 * ref)
     ratios = {n: cnt[m & cm].sum() / E[m & cm].sum() for n, cm in (("bottom", bottom), ("partial", partial))}
     print(chi2, ratios)
     assert m.sum() > 500
-    assert chi2 < 1.2                                  # measured 1.01 (old metre placement 1.45)
-    assert all(0.9 < r < 1.1 for r in ratios.values()) # measured 1.02-1.05 (old 1.20-1.26)
+    assert chi2 < 1.2                                  # measured 1.01 (a metre placement: 1.45)
+    assert all(0.9 < r < 1.1 for r in ratios.values()) # measured 1.02-1.05 (a metre placement: 1.20-1.26)

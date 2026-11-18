@@ -1,16 +1,15 @@
-"""Layout detection for ``mesh.nemo_grid: cgrid`` (``readers.nemo.detect_cgrid_layout``)."""
+"""Layout detection for ``mesh.nemo_grid: cgrid`` (``readers.nemo._layout.detect_nemo_cgrid_layout``)."""
 import numpy as np
 import pytest
 
-from kelp.readers.nemo import detect_cgrid_layout
-from kelp.readers.structured import CgridLayout
-from tests._cgrid_orca import NC, NY, orca_grid
+from kelp.readers.nemo._layout import NemoCgridLayout, detect_nemo_cgrid_layout
+from tests._nemo_cgrid_orca import NC, orca_grid
 
 LAYOUTS = [("T", True), ("T", False), ("F", True), ("F", False)]
 
 
 def _detect(xy, flags=None):
-    return detect_cgrid_layout(*xy["T"], *xy["F"], flags)
+    return detect_nemo_cgrid_layout(*xy["T"], *xy["F"], flags)
 
 
 @pytest.mark.parametrize("fold,halo", LAYOUTS)
@@ -38,26 +37,26 @@ def _global_latlon(halo, ny=12, nc=20):
 
 def test_regular_rasters_without_a_fold():
     lay, notes = _detect(_regional())
-    assert lay == CgridLayout((8, 10)) and not notes                      # regional: all edges open
+    assert lay == NemoCgridLayout((8, 10)) and not notes                      # regional: all edges open
     lay, _ = _detect(_global_latlon(halo=True))
     assert (lay.halo_cols, lay.periodic, lay.fold) == (True, True, None)
     with pytest.raises(ValueError, match="add Iperio=1"):                  # NEMO >= 4.2, flags absent
         _detect(_global_latlon(halo=False))
     lay, _ = _detect(_global_latlon(halo=False), {"Iperio": 1})
-    assert lay == CgridLayout((12, 20), False, False, True, None) and lay.shape == (12, 22)
+    assert lay == NemoCgridLayout((12, 20), False, False, True, None) and lay.shape == (12, 22)
     lay, _ = _detect(_global_latlon(halo=False), {"Iperio": 0})           # trusted
-    assert lay == CgridLayout((12, 20))
+    assert lay == NemoCgridLayout((12, 20))
 
 
 def test_stale_flags_make_a_crop_not_a_refusal():
     g = orca_grid("F", True)
     below = {k: (a[:5], b[:5]) for k, (a, b) in g.xy.items()}              # rows below the fold
     lay, notes = _detect(below, {"Iperio": 1, "NFold": 1, "NFtype": "F"})
-    assert lay == CgridLayout((5, NC + 2), True, False, True, None)
+    assert lay == NemoCgridLayout((5, NC + 2), True, False, True, None)
     assert "north fold" in notes[0] and "open" in notes[0]
     box = _regional()
     lay, notes = _detect(box, {"Iperio": 1, "NFold": 1, "NFtype": "T"})   # box crop of a global file
-    assert lay == CgridLayout((8, 10)) and "east and west edges are open" in notes[0]
+    assert lay == NemoCgridLayout((8, 10)) and "east and west edges are open" in notes[0]
 
 
 def test_contradictions_refuse():
@@ -111,7 +110,7 @@ def test_pole_guard_needs_the_whole_row_to_collapse():
     xy = _regional()
     for a in xy["T"]:
         a[-1, 5] = a[-1, 6]
-    assert _detect(xy)[0] == CgridLayout((8, 10))
+    assert _detect(xy)[0] == NemoCgridLayout((8, 10))
 
 
 def test_a_point_at_lon0_lat0_and_its_halo_copy_is_not_a_zero_tile():

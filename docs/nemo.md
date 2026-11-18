@@ -2,7 +2,7 @@
 
 > **Covers:** tracking on native NEMO output (ORCA family, regional crops, GYRE-like boxes) with `mesh.nemo_grid: cgrid`: the scheme, the supported grid layouts, the input files, the vertical treatment, sampling, refusals, validation and known limitations.
 > **Does not cover:** the option reference (see `configuration.md`, keys `nemo_grid`, `nemo_partial_cells`, `ncinput_u/v`), the interpolation formulas (see `velocity_interpolation.md` §8), NEMO file adaptation recipes (skill `kelp-nemo`), the default T-point path (`nemo_grid: tpoint`, 2-D only, E/N-aligned grids; `docs/dev/readers.md`).
-> **Code:** `src/kelp/readers/nemo.py:NemoReader`, `src/kelp/readers/structured.py:build_cgrid_mesh`, `src/kelp/readers/nemo.py:detect_cgrid_layout`, `src/kelp/numerics/interpolate.py:interp_cgrid3d`, `src/kelp/numerics/cgrid3d.py:cgrid3d_step`.
+> **Code:** `src/kelp/readers/nemo/reader.py:NemoReader`, `src/kelp/readers/nemo/_mesh.py:build_nemo_cgrid_mesh`, `src/kelp/readers/nemo/_layout.py:detect_nemo_cgrid_layout`, `src/kelp/numerics/nemo_cgrid.py:interp_nemo_cgrid3d`, `src/kelp/numerics/nemo_cgrid.py:nemo_cgrid3d_step`.
 > **Verified at:** see `docs/doc_map.yaml` (stamped via check_doc_sync --bless).
 
 ## 1. What the path does
@@ -23,7 +23,12 @@ onto T-points and no vector rotation is needed:
   floor stays there, ALIVE, with zero velocity. Beyond the ring a stage
   fails. **Particles on land are not handled in the code**: filter them post
   hoc (e.g. by the mesh's wet mask at the final position, or by a zero
-  displacement over a record).
+  displacement over a record). Horizontal diffusion (`diffusion.scheme:
+  uniform`, 2-D) does not see the closed faces: a kick into the dry ring leaves
+  the particle there, ALIVE, and later kicks move it on; a kick past the ring
+  is undone and the particle ends OUTSIDE (`OUT_OF_BOUNDS`). On FESOM meshes
+  the coast is the mesh edge, so a kick across it ends the particle at once;
+  here the first land cell is open to the kick.
 - **Frames.** The Jacobian is taken in whatever frame the mesh nodes are in, so
   `mesh.rotation` (e.g. `fesom2`) works for the Arctic without any vector
   rotation. Above about 88 N the lon/lat cell geometry degenerates and the
@@ -53,7 +58,7 @@ raster edges are then **open**: where water reaches an edge a particle leaves
 the domain and is absorbed. It ends OUTSIDE with the label
 `OUT_OF_BOUNDS`, or `INTERPOLATION_FAILED` when an RK stage crossed the edge
 first (so count both as an exit). The layout and the open edges are printed at
-load and by `kelp info`, and stored as the output attribute `cgrid_layout`.
+load and by `kelp info`, and stored as the output attribute `nemo_cgrid_layout`.
 
 Refused at load: a partial-width raster whose fold identities hold (a crop
 symmetric about a pivot), zero-filled mesh tiles (land-processor elimination),
@@ -137,10 +142,16 @@ Names are exact (`thetao`, `thetao_con`, `so`, `so_abs`, `votemper`, ...).
 | ice-shelf cavities (`top_level > 1`, `misf > 1`, `isfdraft > 0` at wet columns, `IsfCav`) | reader |
 | `sample_vars` on non-T points | reader |
 | `Fdrift3D` with `nemo_grid: tpoint` | reader / tracking |
-| `rk45`, `temporal_reconstruction` other than linear, `em`/`m1` diffusion | `tracking._refuse_cgrid_unsupported` |
+| `rk45`, `temporal_reconstruction` other than linear, `em`/`m1` diffusion | `tracking._refuse_nemo_cgrid_unsupported` |
 | any diffusion in 3-D (2-D: uniform only), beaching | same |
 | `elem_search: walk` in 3-D | same |
-| `uv_interp` other than `cgrid` with `nemo_grid: cgrid` | `load_config` |
+| `uv_interp` other than `nemo_cgrid` with `nemo_grid: cgrid` | `load_config` |
+
+Out-of-spec configurations are refused at startup with a clear message. A
+warning is given when the run stays well-defined but is less accurate, e.g.
+z*/vvl output (the fixed reference thicknesses `e3*_0` are used, the transports
+are off by about eta/H), cells above about 88 N without `mesh.rotation` (§1),
+and an unset `data.time_averaging` (`instant` is assumed, `running.md`).
 
 ## 7. Validation
 
@@ -148,11 +159,13 @@ Names are exact (`thetao`, `thetao_con`, `so`, `so_abs`, `votemper`, ...).
   rounding on ORCA05 over every cell of the crop (data-gated test), including
   partial cells.
 - **Lagrangian transport benchmark** (ORCA05 window at the Denmark Strait /
-  Iceland-Scotland sill, a 5x5-column box, 60 d, dt 3600 s, 20 000
+  Iceland-Scotland sill, a 5x5-column box, 60 d, dt 3600 s, 20 055
   transport-weighted particles seeded on the inflow faces): the transport leaving
   the box through each edge matches the Eulerian face fluxes; the southern edge
   within 0.34 %, the sum of the deviations 0.8 % of the inflow (which is the
-  weight still inside the box); no particle lost; no dt dependence.
+  weight still inside the box); no particle lost; no dt dependence (dt 900 s:
+  0.28 %, 0.8 %). The data-gated test repeats it with about 5000 particles:
+  0.31 % and 0.95 %.
 - **Volume uniformity** (discrete Liouville; particles uniform per volume
   in `(xi, eta, s)` after 3 d): chi2 per degree of freedom 1.01 on the sill window.
   A scheme placing the vertical in metres gives 1.45 with 20-26 % too many
@@ -162,12 +175,33 @@ Names are exact (`thetao`, `thetao_con`, `so`, `so_abs`, `votemper`, ...).
   halo-free T-pivot, ORCA2 with halos (topology only).
 - All the synthetic suites run without data; the data-gated ones read
   `KELP_TEST_NEMO_DATA` (`tests/test_nemo_cgrid_data.py`,
-  `tests/test_nemo_cgrid_lagrangian.py`).
+  `tests/test_nemo_cgrid_lagrangian.py`), built as described under "Test data".
 
 A uniform flow comes out multiplied by `e2u / (dlat * 111120 m)`, i.e. +0.07 %
 with the NEMO radius of 6 371 229 m. Particle paths can still cut a convex land
 corner within about `v*dt/2` of it in an RK stage (rare; a smaller dt does not
 remove it).
+
+### Test data
+
+```bash
+python utils/make_nemo_test_data.py all --verify     # default --out ./.tmp/data/nemo_crops
+export KELP_TEST_NEMO_DATA=$PWD/.tmp/data/nemo_crops
+python utils/make_nemo_test_data.py all --dry-run    # list the source URLs only
+```
+
+The script downloads the public sources and writes the crops in the layout the
+tests expect; existing files are skipped, a failed download prints the URL and
+the target path for a manual download.
+
+| source | where | licence |
+|---|---|---|
+| ORCA05 / FOCI1.14 | Zenodo 3755721 (the year-2011 files, about 3.8 GB, kept in `<out>/_sources/orca05/`; `--drop-sources` removes them) | CC-BY-4.0 |
+| eORCA025 (NOC SE-NEMO JRA55 v1) | NOC S3 zarr store, read remotely (crops only) | unstated: local testing only, do not redistribute the crops |
+| ORCA2 (IPSL-CM5A-LR, CMIP5) | ESGF / CEDA, OPeNDAP for the `*_t0.nc` records, HTTPS for the fixed fields | [CMIP5 terms of use](https://pcmdi.llnl.gov/mips/cmip5/terms-of-use.html): unrestricted use, acknowledge the providers, pass the terms on when redistributing |
+
+Extra dependencies: `zarr>=3`, `fsspec`, `aiohttp` (eORCA025) and a netCDF4
+library with DAP support (ORCA2). See `utils/README.md`.
 
 ## 8. Known limitations and follow-ups
 
@@ -176,6 +210,7 @@ remove it).
 - Eddy-induced (bolus) velocity as an option: only the file's resolved
   velocity is advected.
 - Diffusion in 3-D and beaching on the C-grid.
+- Mirror horizontal diffusion kicks at land faces (no-normal-flux coast).
 - In-kernel time blend for time-aware runs (the blend is a whole-field blend
   per stage) and region crops of the rasters in the loop.
 - AGRIF nests, s-coordinates, ice-shelf cavities, ORCA grids whose land

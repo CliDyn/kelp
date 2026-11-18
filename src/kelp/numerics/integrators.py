@@ -5179,9 +5179,9 @@ def euler_step(
     ParticleState
         New state after one Euler step.
     """
-    if kwargs.get("uv_interp") == "cgrid" and _is_3d(vel):
-        from .cgrid3d import cgrid3d_step
-        return cgrid3d_step(state, vel, mesh, dt, time_dir, "euler", kwargs)
+    if kwargs.get("uv_interp") == "nemo_cgrid" and _is_3d(vel):
+        from .nemo_cgrid import nemo_cgrid3d_step
+        return nemo_cgrid3d_step(state, vel, mesh, dt, time_dir, "euler", kwargs)
     _check_depth_linear_entry(vel, mesh, kwargs.get("uv_interp", "leastsq"),
                               "euler", vel_next=kwargs.get("vel_next"),
                               recon=kwargs.get("recon"))
@@ -5622,9 +5622,9 @@ def rk2_step(
     Stage 1: half Euler step → midpoint position.
     Stage 2: evaluate velocity at midpoint, full step from original position.
     """
-    if kwargs.get("uv_interp") == "cgrid" and _is_3d(vel):
-        from .cgrid3d import cgrid3d_step
-        return cgrid3d_step(state, vel, mesh, dt, time_dir, "rk2", kwargs)
+    if kwargs.get("uv_interp") == "nemo_cgrid" and _is_3d(vel):
+        from .nemo_cgrid import nemo_cgrid3d_step
+        return nemo_cgrid3d_step(state, vel, mesh, dt, time_dir, "rk2", kwargs)
     _check_depth_linear_entry(vel, mesh, kwargs.get("uv_interp", "leastsq"),
                               "rk2", vel_next=kwargs.get("vel_next"),
                               recon=kwargs.get("recon"))
@@ -6024,9 +6024,9 @@ def rk4_step(
     Uses a single velocity field (no temporal interpolation).
     Four spatial evaluations at staggered positions.
     """
-    if kwargs.get("uv_interp") == "cgrid" and _is_3d(vel):
-        from .cgrid3d import cgrid3d_step
-        return cgrid3d_step(state, vel, mesh, dt, time_dir, "rk4", kwargs)
+    if kwargs.get("uv_interp") == "nemo_cgrid" and _is_3d(vel):
+        from .nemo_cgrid import nemo_cgrid3d_step
+        return nemo_cgrid3d_step(state, vel, mesh, dt, time_dir, "rk4", kwargs)
     _check_depth_linear_entry(vel, mesh, kwargs.get("uv_interp", "leastsq"),
                               "rk4", vel_next=kwargs.get("vel_next"),
                               recon=kwargs.get("recon"))

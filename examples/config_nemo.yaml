@@ -5,7 +5,7 @@
 # wet T-cell elements, Delandmeter & van Sebille flux scheme): works on
 # rotated/curvilinear and global ORCA grids (E-W seam, T/F-pivot north fold,
 # with or without halos), crops get open absorbing edges. uv_interp becomes
-# `cgrid` by itself (naming another interpolator is refused).
+# `nemo_cgrid` by itself (naming another interpolator is refused).
 # For 3-D see config_nemo_cgrid_3d.yaml. Variable names, mesh_mask vs
 # domain_cfg and other input pitfalls: skill `kelp-nemo`.
 #

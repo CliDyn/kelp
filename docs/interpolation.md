@@ -79,7 +79,7 @@ sphere** whose poles sit far from any ocean point:
   precision (validated against `fesom.mesh.diag.nc`).
 - `[α, β, γ]` — a custom 3-list of Euler angles in degrees.
 
-It is supported on FESOM2, HEALPix and FESOM 1.4 (fesomc/nemo reject it). The FESOM-C reader **rejects** `mesh.rotation` with a
+It is supported on FESOM2, HEALPix, FESOM 1.4 and NEMO with `nemo_grid: cgrid` (fesomc and the NEMO T-point path reject it). The FESOM-C reader **rejects** `mesh.rotation` with a
 `ValueError` (FESOM-C is a coastal model with no near-pole use case and no
 vector-rotation path). **Both** readers emit a one-time `RuntimeWarning` when the
 mesh reaches `max|lat| > 88°` while rotation is OFF; the FESOM2 message recommends
@@ -700,8 +700,6 @@ bracketed payload `vel_a.lerp(vel_b, α)`), `numerics.integrators._make_stage_ve
 `sim_time + dt` for split-RK diffusion).
 
 ## 7. Containment and polygon vertex weights
-
-(The exact NEMO C-grid scheme, `uv_interp: cgrid`, is a flux-form scheme of its own; see `velocity_interpolation.md` §8 and `nemo.md`.)
 
 This is the shared geometric primitive under the barycentric `W` combine (§3) and
 barycentric scalar sampling (§4). It splits cleanly into a **containment test**

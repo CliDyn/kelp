@@ -917,58 +917,8 @@ def sample_field(
     )
 
 
-def sample_field_cgrid(values, mesh, lons, lats, zs=None, *, alive=None,
-                       nearest=None) -> np.ndarray:
-    """Cell value of a T-point scalar on the exact C-grid layout.
-
-    Parameters
-    ----------
-    values : ndarray (ny*nx,) or (K, ny*nx)
-        Flattened T raster (land NaN), 2-D or layer-wise.
-    mesh : Mesh
-        A ``build_cgrid_mesh`` mesh.
-    lons, lats : ndarray (P,)
-        Particle positions (deg).
-    zs : ndarray (P,) or None
-        Depths (m); required for layer-wise ``values``, the layer is the one
-        containing the depth.
-    alive : ndarray of bool (P,) or None
-        Particles to sample (default: all).
-    nearest : ndarray of int (P,) or None
-        Nearest-node hints for the containment search.
-
-    Returns
-    -------
-    ndarray (P,)
-        The value of the wet cell (and layer) containing the particle; NaN
-        outside every cell, for a dry-ring cell, or for a dead particle.
-    """
-    from ..core.mesh import find_containing_elements, find_nearest_nodes
-    P = len(lons)
-    alive = np.ones(P, dtype=bool) if alive is None else np.asarray(alive)
-    out = np.full(P, np.nan)
-    idx = np.nonzero(alive)[0]
-    if idx.size == 0:
-        return out
-    nn = (find_nearest_nodes(mesh, lons[idx], lats[idx]) if nearest is None
-          else np.asarray(nearest)[idx])
-    e, ok = find_containing_elements(mesh, lons[idx], lats[idx], nn)
-    e = np.where(ok, e, 0)
-    flat = (mesh._cgrid_elem_ji[e, 0] * mesh._structured_shape[1]
-            + mesh._cgrid_elem_ji[e, 1])
-    if values.ndim == 2:
-        zw = mesh._cgrid_zw
-        k = np.clip(np.searchsorted(zw, zs[idx], side="right") - 1, 0, values.shape[0] - 1)
-        out[idx] = values[k, flat]
-    else:
-        out[idx] = values[flat]
-    out[idx[~ok]] = np.nan
-    return out
-
-
 __all__ = [
     "sample_field",
-    "sample_field_cgrid",
     "S_NEAREST",
     "S_LEASTSQ",
     "S_BARYCENTRIC",

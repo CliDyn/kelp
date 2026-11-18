@@ -7,8 +7,10 @@ poles lie over land --- conventionally over Greenland and Antarctica --- leaving
 the coordinate singularity. This chapter describes how the engine supports such a rotated frame: the
 rotation itself, the distinction between rotating points and rotating vectors, what is and is not
 affected, the contract that keeps the rotation invisible to the user, and the accuracy it achieves. The
-facility is available on FESOM2 and HEALPix meshes; FESOM-C meshes and NEMO-derived meshes reject a
-non-null \conf{mesh.rotation} with a configuration error.
+facility is available on FESOM2, FESOM~1.4 and HEALPix meshes and on the NEMO C-grid path, which
+needs no vector rotation (its velocities are built from the cell geometry in the rotated frame);
+FESOM-C meshes and the NEMO T-point path reject a non-null \conf{mesh.rotation} with a configuration
+error.
 
 \section{The rotated frame}\label{sec:frame-rotation}
 

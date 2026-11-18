@@ -84,9 +84,8 @@ campaign order-of-operations and the setup pitfalls.
 4. **Check cross-key constraints** (full list in `docs/configuration.md`):
    - `var_u: unod`/`vnod` (node-layout velocities), HEALPix and the NEMO T-point
      path require `numerics.uv_interp: barycentric` — `leastsq`/`edge_leastsq` fail at
-     startup (element-centre math). NEMO with `mesh.nemo_grid: cgrid` derives
-     `uv_interp: cgrid` itself and refuses any other named interpolator; its
-     inputs, variable names and pitfalls are in the **`kelp-nemo`** skill. FESOM-C `u2d`/`v2d` and FESOM2 `u`/`v` are
+     startup (element-centre math); NEMO `nemo_grid: cgrid` sets `uv_interp` itself
+     (skill `kelp-nemo`). FESOM-C `u2d`/`v2d` and FESOM2 `u`/`v` are
      ELEMENT layout: keep `leastsq` (default, fused); decide from the variable's
      dimension (`elem` vs `nod2`), never from the name.
    - 3-D horizontal diffusion: only `scheme: uniform` works; `em`/`m1` raise (vertical

@@ -1,5 +1,5 @@
 """Data-gated (``KELP_TEST_NEMO_DATA``): the exact C-grid path on real NEMO
-crops: partial-cell W against the model's W (ORCA05), z* detection and
+crops (built by ``utils/make_nemo_test_data.py``): partial-cell W against the model's W (ORCA05), z* detection and
 halo-free T-pivot layouts (eORCA025), the global topologies (ORCA05 F-pivot,
 ORCA2 T-pivot with halos), input robustness.  Skips when the directory or a
 file in it is missing."""
@@ -38,7 +38,7 @@ def test_orca05_partial_cell_w_equals_model_w():
         wf = -np.nan_to_num(dw[wn].isel({dw[wn].dims[0]: 0}).values.astype(float))   # positive down
     K = wf.shape[0]
     w = vel.w.reshape(K + 1, ny, nx)[:-1].astype(float)
-    wet = np.arange(K)[:, None, None] < mesh._cgrid_nlev_raster
+    wet = np.arange(K)[:, None, None] < mesh._nemo_cgrid_nlev_raster
     err = np.abs(w - wf)[wet].max()
     assert np.abs(wf).max() > 1e-5 and err < 5e-6 * np.abs(wf).max()
 
@@ -86,13 +86,13 @@ def _flux_balance_and_special_edges(mesh, ds, mode):
     from kelp.core.mesh import build_elem_neighbors
     vel = get_reader("nemo").read_velocities(ds, 0, mesh, mode_cfg=mode)
     nx = mesh._structured_shape[1]
-    nw = int((mesh._cgrid_nlev > 0).sum())
-    ji = mesh._cgrid_elem_ji[:nw]
+    nw = int((mesh._nemo_cgrid_nlev > 0).sum())
+    ji = mesh._nemo_cgrid_elem_ji[:nw]
     nb = build_elem_neighbors(mesh)[:nw]
     j, i = ji[:, 0], ji[:, 1]
     fi = np.stack([(j - 1) * nx + i, j * nx + i, j * nx + i, j * nx + i - 1], 1)
     uf, vf = vel.u.astype(float), vel.v.astype(float)
-    e2u, e1v = mesh._cgrid_e2u, mesh._cgrid_e1v
+    e2u, e1v = mesh._nemo_cgrid_e2u, mesh._nemo_cgrid_e1v
     out = np.stack([-vf[fi[:, 0]] * e1v[fi[:, 0]], uf[fi[:, 1]] * e2u[fi[:, 1]],
                     vf[fi[:, 2]] * e1v[fi[:, 2]], -uf[fi[:, 3]] * e2u[fi[:, 3]]], 1)
     e, k = np.nonzero((nb >= 0) & (nb < nw))
@@ -105,11 +105,11 @@ def _flux_balance_and_special_edges(mesh, ds, mode):
 def test_orca05_full_mesh_counts():
     from kelp.core.mesh import build_elem_neighbors
     mesh = _mesh(_sib("nemo_orca05", "mesh_mask.nc"), "fesom2")
-    nw = int((mesh._cgrid_nlev > 0).sum())               # the wet cells (the ring follows them)
-    assert (np.unique(mesh._cgrid_corners[:nw]).size, nw) == (229958, 224514)
+    nw = int((mesh._nemo_cgrid_nlev > 0).sum())               # the wet cells (the ring follows them)
+    assert (np.unique(mesh._nemo_cgrid_corners[:nw]).size, nw) == (229958, 224514)
     nb = build_elem_neighbors(mesh)[:nw]
     assert int(((nb >= 0) & (nb < nw)).sum()) // 2 == 443446
-    lay = mesh._cgrid_layout
+    lay = mesh._nemo_cgrid_layout
     assert (lay.fold, lay.halo_cols, lay.halo_row, lay.periodic) == ("F", True, True, True)
 
 
@@ -122,7 +122,7 @@ def test_orca05_arctic_fold_flux_balance_and_particles_stay_alive(tmp_path):
     d = Path(_d)
     mode = ModeConfig(Fdrift2D=True, Fdrift3D=False, var_u="vozocrtx", var_v="vomecrty")
     mesh = _mesh(d / "orca05_arctic_mesh.nc", "fesom2")
-    lay = mesh._cgrid_layout
+    lay = mesh._nemo_cgrid_layout
     assert (lay.fold, lay.halo_cols, lay.halo_row) == ("F", True, True) and lay.shape == (71, 722)
     ds = get_reader("nemo").open_dataset(str(d / "orca05_arctic_grid_T.nc"), mode_cfg=mode)
     err, n_special = _flux_balance_and_special_edges(mesh, ds, mode)
@@ -137,7 +137,7 @@ def test_orca05_arctic_fold_flux_balance_and_particles_stay_alive(tmp_path):
     sf.write_text("".join(f"{a:.9f} {b:.9f}\n" for a, b in seeds))
     out = tmp_path / "t.nc"
     cfg = AppConfig(
-        mode=mode, numerics=NumericsConfig(dt=3600.0, integrator="rk4", output_freq=24, uv_interp="cgrid"),
+        mode=mode, numerics=NumericsConfig(dt=3600.0, integrator="rk4", output_freq=24, uv_interp="nemo_cgrid"),
         mesh=MeshConfig(type="nemo", meshpath=str(d / "orca05_arctic_mesh.nc"), nemo_grid="cgrid",
                         rotation="fesom2"),
         data=DataConfig(ncinput=str(d / "orca05_arctic_grid_T.nc"), inicloud=str(sf),
@@ -151,7 +151,7 @@ def test_orca05_arctic_fold_flux_balance_and_particles_stay_alive(tmp_path):
 def test_eorca025_arctic_tpivot_halo_free(tmp_path):
     mf, gt = _link_eorca025(tmp_path, "arctic")
     mesh = _mesh(mf, "fesom2")
-    lay = mesh._cgrid_layout
+    lay = mesh._nemo_cgrid_layout
     assert (lay.fold, lay.halo_cols, lay.halo_row, lay.periodic) == ("T", False, False, True)
     assert lay.raw_shape == (70, 1440) and lay.shape == (71, 1442) and mesh._structured_shape == (71, 1442)
     mode = ModeConfig(Fdrift2D=True, Fdrift3D=False, var_u="uo", var_v="vo")
@@ -163,14 +163,14 @@ def test_eorca025_arctic_tpivot_halo_free(tmp_path):
 def test_eorca025_southern_band_is_halo_free_periodic(tmp_path, capsys):
     mf, _gt = _link_eorca025(tmp_path, "southern")   # stale NFold flag on a crop below the fold
     mesh = _mesh(mf, "fesom2")
-    lay = mesh._cgrid_layout
+    lay = mesh._nemo_cgrid_layout
     assert (lay.fold, lay.halo_cols, lay.periodic, lay.shape) == (None, False, True, (28, 1442))
     assert "north fold the raster does not show" in capsys.readouterr().out
 
 
 def test_orca05_equatorial_box_has_open_edges(capsys):
     mesh = _mesh(Path(_d) / "orca05_equatorial_mesh.nc")      # stale Iperio / NFold flags
-    lay = mesh._cgrid_layout
+    lay = mesh._nemo_cgrid_layout
     assert (lay.fold, lay.periodic) == (None, False)
     assert "E-W periodicity the raster does not show" in capsys.readouterr().out
     assert "N, E, W" in lay.label()
@@ -181,18 +181,17 @@ def test_orca2_cmip5_tpivot_with_halos_topology_only():
     coordinates alone, and the u / v / thetao copies are the canonical ones
     (u, v with the fold sign)."""
     import xarray as xr
-    from kelp.readers.nemo import detect_cgrid_layout
-    from kelp.readers.structured import cgrid_to_canonical
+    from kelp.readers.nemo._layout import detect_nemo_cgrid_layout, nemo_cgrid_to_canonical
     d = _sib("esgf_orca2", "data")
     th = xr.open_dataset(d / "thetao_t0.nc")
-    lay, notes = detect_cgrid_layout(th["lon"].values, th["lat"].values)
+    lay, notes = detect_nemo_cgrid_layout(th["lon"].values, th["lat"].values)
     assert (lay.fold, lay.halo_cols, lay.halo_row) == ("T", True, True) and not notes
     assert lay.shape == (149, 182) and lay.J == 147
     for name, kind, vec in (("thetao_t0.nc", "T", False), ("uo_t0.nc", "U", True), ("vo_t0.nc", "V", True)):
         ds = xr.open_dataset(d / name)
         a = ds[name.split("_")[0]].isel(time=0).values
         a = np.where(np.abs(a) > 1e10, np.nan, a)            # land fill
-        cgrid_to_canonical(a, lay, kind, vector=vec, check=True, name=name)
+        nemo_cgrid_to_canonical(a, lay, kind, vector=vec, check=True, name=name)
 
 
 # --- input robustness: domain_cfg without tmask, files per grid, explicit grid paths ----
@@ -203,7 +202,7 @@ def test_eorca025_domain_cfg_without_tmask_gives_the_same_mesh(tmp_path):
         ds.drop_vars("tmask").to_netcdf(tmp_path / "domain_cfg.nc")
     a, b = _mesh(src), _mesh(tmp_path / "domain_cfg.nc")
     assert (a.n_nodes, a.n_elements) == (b.n_nodes, b.n_elements)
-    assert (a._cgrid_nlev_raster == b._cgrid_nlev_raster).all()
+    assert (a._nemo_cgrid_nlev_raster == b._nemo_cgrid_nlev_raster).all()
 
 
 def test_eorca025_files_split_in_time_join_along_time():

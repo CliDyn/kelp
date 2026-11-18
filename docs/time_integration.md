@@ -390,11 +390,10 @@ which collapses the first line to `u_{a,e}` and recovers the original
 single-blend arithmetic exactly. So the lazy machinery changes *when* the blend
 happens, never the numbers it produces.
 
+`uv_interp: nemo_cgrid` is never fused (`velocity_interpolation.md` §8).
+
 
 ## 6. What is called when
-
-`uv_interp: cgrid` (NEMO, `nemo.md`) is not fused: it takes the unfused Butcher loop with the same time-aware stage blend (whole-field linear lerp of the face rasters per stage), and in 3-D its own step `numerics/cgrid3d.py:cgrid3d_step` (Euler / midpoint / RK4, no rk45, no PCHIP).
-
 
 The dispatch lives in `run_single_realization` and the integrator functions
 themselves. The loop resolves `step_fn = get_integrator(numerics.integrator)`

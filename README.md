@@ -231,7 +231,7 @@ annotated template: [`config.yaml`](config.yaml).
 | `output_flush_every` | `0` | NetCDF only: buffer N records then flush so the file is readable mid-run (`0` = keep open). Zarr is always lock-free |
 | `temporal_interp` | `false` | linearly blend velocity between file snapshots (then `dt` may be < file step) |
 | `temporal_reconstruction` | `linear` | `linear` / `pchip` (4-snapshot monotone cubic; lets RK4 beat RK2 at coarse cadence) |
-| `uv_interp` | `leastsq` | u/v interpolation: `leastsq` (element-layout only) / `barycentric` (node-layout, e.g. FESOM2 `unod`/`vnod` or HEALPix) / `edge_leastsq` (FESOM-style: containing element + edge neighbors; element-layout only) / `cgrid` (exact Arakawa C-grid, NEMO; set by `mesh.nemo_grid: cgrid`, no need to name it) |
+| `uv_interp` | `leastsq` | u/v interpolation: `leastsq` (element-layout only) / `barycentric` (node-layout, e.g. FESOM2 `unod`/`vnod` or HEALPix) / `edge_leastsq` (FESOM-style: containing element + edge neighbors; element-layout only) / `nemo_cgrid` (exact Arakawa C-grid, NEMO; set by `mesh.nemo_grid: cgrid`, no need to name it) |
 | `edge_leastsq_bc` | `freeslip` | `edge_leastsq` coastal ghosts: `freeslip` / `noslip` (inert for other methods) |
 | `elem_search` | `local` | containing-element search: `local` (per-step scan) / `walk` (search once at release, then cross edges; identical results; faster on unfused runs — element-layout `barycentric`, `edge_leastsq` — but it switches off the fused node-layout barycentric kernels) |
 | `w_interp` | `leastsq` | 3D W: `nearest` / `leastsq` / `barycentric` / `idw` |
@@ -291,7 +291,7 @@ annotated template: [`config.yaml`](config.yaml).
 | `r_earth` | `null` (family default) | Earth radius (m); set only to match a non-default model build |
 | `rotation` | `null` | FESOM2 + HEALPix + FESOM 1.4 + NEMO (`nemo_grid: cgrid`): pole-safe rotated frame — `null` / `fesom2` / `[α, β, γ]` (deg) |
 | `nemo_grid` | `tpoint` | NEMO only: `tpoint` (2-D, E/N-aligned grids) / `cgrid` (exact C-grid, 2-D and 3-D, global ORCA; `docs/nemo.md`) |
-| `nemo_partial_cells` | `shrunk` | NEMO `cgrid` 3-D: metres of a partial bottom cell, `shrunk` (NEMO <= 4.2) / `porous` (NEMO 5) |
+| `nemo_partial_cells` | `shrunk` | NEMO C-grid 3-D (`nemo_grid: cgrid`): metres of a partial bottom cell, `shrunk` (NEMO <= 4.2) / `porous` (NEMO 5) |
 | `input_rotation` | `null` | FESOM 1.4 only: `[α, β, γ]` (deg) of the rotated frame an ASCII mesh is stored in (rotated back to geographic on load) |
 | `grid_hash_cell_size` | `null` (rule) | nearest-node hash cell (deg); `null` = chosen by `grid_hash_cell_rule` |
 | `grid_hash_cell_rule` | `occupancy` | `occupancy` (measured choice) / `legacy` (the reader's mean-spacing cell) |
@@ -367,8 +367,7 @@ the validation campaign and the `-m slow` cross-checks against Parcels.
 
 - **2D and 3D tracking**, forward or backward, on FESOM2 meshes (fixed depth
   levels), FESOM-C meshes (terrain-following sigma layers), FESOM 1.4 output,
-  HEALPix stores and NEMO C-grid output (native staggering, global ORCA
-  layouts; `docs/nemo.md`) (next bullets).
+  HEALPix stores and NEMO C-grid output (next bullets).
 - **FESOM 1.4 reader** — level-wise files (such as the published CMIP6 output,
   whose mesh is recovered exactly from the cell polygons in the files) or the
   raw writer's output next to an ASCII mesh; u, v and w lie on the levels and are
@@ -385,6 +384,12 @@ the validation campaign and the `-m slow` cross-checks against Parcels.
   effect of the remapping: for a uniform global release the 30-day median
   separation was 4.4, 1.4 and 0.39 km at pixel spacings of 102, 51 and
   25.5 km.
+- **NEMO reader** — NEMO output on its own Arakawa C-grid
+  (`mesh.nemo_grid: cgrid`), with the face fluxes interpolated exactly; 2D and
+  3D (z-levels with partial cells), regional boxes and global ORCA layouts
+  (seam, north fold); validated on ORCA05 and eORCA025 output
+  ([`docs/nemo.md`](docs/nemo.md)). The default T-point path
+  (`nemo_grid: tpoint`) is early 2D work.
 - **Time integrators** Euler / RK2 / RK4, with time-aware stages and an optional
   4-snapshot PCHIP temporal reconstruction; plus an adaptive RK45
   (Dormand–Prince, per-particle substepping under a metre error tolerance —
@@ -420,14 +425,6 @@ the validation campaign and the `-m slow` cross-checks against Parcels.
   and times, and the same attributes in NetCDF and Zarr.
   Standalone numbered restart files (`write_restart_file`) support resumable-chain
   runs that span a wall-clock limit, bit-for-bit identical to one continuous run.
-
-NEMO output is supported through the exact Arakawa C-grid path
-(`mesh.nemo_grid: cgrid`, readers `readers/nemo.py` and `readers/structured.py`):
-2-D and 3-D (z-levels with partial cells), regional boxes and global ORCA
-layouts, validated on ORCA05 and eORCA025 output. The scope, the inputs and the
-refusals are in [`docs/nemo.md`](docs/nemo.md). The default T-point path
-(`nemo_grid: tpoint`) is early work: two-dimensional, restricted to grids whose
-axes line up with east and north.
 
 ## Licence and citation
 

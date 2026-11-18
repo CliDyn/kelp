@@ -45,8 +45,8 @@ def _load(path):
 def test_domain_cfg_without_tmask_equals_the_mesh_mask_form(tmp_path):
     a = _load(_domain_cfg(tmp_path, tmask=False, name="a.nc"))
     b = _load(_domain_cfg(tmp_path, tmask=True, name="b.nc"))
-    assert a.n_elements == b.n_elements and (a._cgrid_nlev_raster == b._cgrid_nlev_raster).all()
-    assert a._cgrid_nlev_raster.max() == K and a._cgrid_zw.size == K + 1
+    assert a.n_elements == b.n_elements and (a._nemo_cgrid_nlev_raster == b._nemo_cgrid_nlev_raster).all()
+    assert a._nemo_cgrid_nlev_raster.max() == K and a._nemo_cgrid_zw.size == K + 1
 
 
 @pytest.mark.parametrize("kw,match", [
@@ -65,7 +65,7 @@ def test_zps_without_partial_cell_thicknesses_is_refused(tmp_path, attrs):
     m = _load(_domain_cfg(tmp_path, no_e3=True, attrs=attrs))   # 2-D runs are unaffected
     assert m.n_elements > 0
     with pytest.raises(ValueError, match="partial steps"):
-        get_reader("nemo")._read_cgrid_3d(None, 0, m, None, None)
+        get_reader("nemo")._read_nemo_cgrid_3d(None, 0, m, None, None)
     assert _load(_domain_cfg(tmp_path, no_e3=True, attrs={"VertCoord": "zco"})).n_elements > 0
 
 
@@ -167,7 +167,7 @@ def test_t_point_path_refuses_3d_in_the_reader(tmp_path):
     mode = ModeConfig(Fdrift3D=True)
     ds = rd.open_dataset(str(tmp_path / "ref_grid_T.nc"), mode_cfg=mode)
     with pytest.raises(NotImplementedError, match="nemo_grid: cgrid"):
-        rd.read_velocities(ds, 0, SimpleNamespace(_cgrid=False), mode_cfg=mode)
+        rd.read_velocities(ds, 0, SimpleNamespace(_nemo_cgrid=False), mode_cfg=mode)
 
 
 def test_glob_input_is_fingerprinted_by_its_files(tmp_path):

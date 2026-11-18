@@ -120,7 +120,7 @@ _VALID_DIFFUSION_SCHEMES = ("uniform", "em", "m1")
 _VALID_DIFFUSION_COMPOSITIONS = ("split", "combined", "split_rk")
 _VALID_KH_EVAL_POSITIONS = ("start", "end")
 _VALID_SAMPLE_INTERP = ("nearest", "leastsq", "barycentric", "idw")
-_VALID_UV_INTERP = ("leastsq", "barycentric", "edge_leastsq", "cgrid")
+_VALID_UV_INTERP = ("leastsq", "barycentric", "edge_leastsq", "nemo_cgrid")
 _VALID_EDGE_LSQ_BC = ("freeslip", "noslip")
 _VALID_ELEM_SEARCH = ("local", "walk")
 _VALID_TEMPORAL_RECONSTRUCTION = ("linear", "pchip")
@@ -512,9 +512,9 @@ class MeshConfig:
     healpix_geometry: str = "dual"
     # NEMO only: "tpoint" (default; quads of T-points + face->T averaging,
     # uv_interp barycentric) or "cgrid" (exact Arakawa C-grid: F-point cells,
-    # needs glamf/gphif in meshpath, uv_interp cgrid).
+    # needs glamf/gphif in meshpath, uv_interp nemo_cgrid).
     nemo_grid: str = "tpoint"
-    # NEMO cgrid 3-D: metres of the fractional level in a partial bottom cell:
+    # NEMO C-grid 3-D: metres of the fractional level in a partial bottom cell:
     # "shrunk" (NEMO <= 4.2: the cell spans e3t_0) or "porous" (NEMO 5: the
     # full reference layer e3t_1d).  Only depth in metres differs.
     nemo_partial_cells: str = "shrunk"
@@ -808,14 +808,14 @@ class AppConfig:
 
     def __post_init__(self):
         # the exact C-grid scheme needs its own interpolator: ``mesh.nemo_grid:
-        # cgrid`` implies ``numerics.uv_interp: cgrid`` (the default ``leastsq``
+        # cgrid`` implies ``numerics.uv_interp: nemo_cgrid`` (the default ``leastsq``
         # is replaced; naming any other interpolator is a contradiction)
         if getattr(self.mesh, "nemo_grid", "tpoint") == "cgrid":
             if self.numerics.uv_interp == "leastsq":
-                self.numerics.uv_interp = "cgrid"
-            elif self.numerics.uv_interp != "cgrid":
+                self.numerics.uv_interp = "nemo_cgrid"
+            elif self.numerics.uv_interp != "nemo_cgrid":
                 raise ValueError(
-                    "mesh.nemo_grid: cgrid uses numerics.uv_interp: cgrid (set "
+                    "mesh.nemo_grid: cgrid uses numerics.uv_interp: nemo_cgrid (set "
                     f"automatically); got {self.numerics.uv_interp!r}")
 
 
@@ -910,9 +910,9 @@ def load_config(path: str) -> AppConfig:
     # so the contradiction with ``nemo_grid: cgrid`` is refused on the raw dict
     named = (data.get("numerics") or {}).get("uv_interp")
     if ((data.get("mesh") or {}).get("nemo_grid") == "cgrid"
-            and named is not None and named != "cgrid"):
+            and named is not None and named != "nemo_cgrid"):
         raise ValueError(
-            "mesh.nemo_grid: cgrid uses numerics.uv_interp: cgrid (set "
+            "mesh.nemo_grid: cgrid uses numerics.uv_interp: nemo_cgrid (set "
             f"automatically); got {named!r}")
     cfg = AppConfig(
         mode=_build_section(ModeConfig, data, "mode"),
