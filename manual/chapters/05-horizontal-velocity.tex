@@ -19,7 +19,8 @@ and states the accuracy each achieves.
 velocity source & layout & admissible \conf{uv\_interp} \\
 \midrule
 FESOM2 \code{u}/\code{v}; FESOM-C element fields; HEALPix pixel geometry & element & \conf{leastsq}, \conf{edge\_leastsq}, \conf{barycentric} \\
-FESOM2 \code{unod}/\code{vnod}; FESOM~1.4 \code{uo}/\code{vo}; FESOM-C node fields; HEALPix dual mesh; NEMO (C-grid faces averaged to T-points) & node & \conf{barycentric} \\
+FESOM2 \code{unod}/\code{vnod}; FESOM~1.4 \code{uo}/\code{vo}; FESOM-C node fields; HEALPix dual mesh; NEMO T-point path (C-grid faces averaged to T-points) & node & \conf{barycentric} \\
+NEMO C-grid path (\conf{mesh.nemo\_grid: cgrid}) & cell faces & \conf{nemo\_cgrid} \\
 \bottomrule
 \end{tabular}
 \caption{Velocity layouts by source and the interpolation schemes each admits. The layout is detected

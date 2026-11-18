@@ -34,6 +34,7 @@ from ..core.mesh import (
     build_elem_neighbors,
 )
 from ..core.particles import ParticleState
+from .nemo_cgrid import interp_nemo_cgrid, interp_nemo_cgrid_single
 from .temporal_reconstruct import _pchip_value_scalar  # njit scalar PCHIP
 from .vertical_uv import (
     depth_points,
@@ -3354,17 +3355,19 @@ def interp_edge_leastsq(
 #: methods whose vectorised form accepts the ``elems=`` pre-validated
 #: containing-element hints (edge-walk tracker); ``leastsq`` needs no
 #: containment and ignores the walk entirely.
-UV_INTERP_USES_ELEMS = frozenset({"barycentric", "edge_leastsq"})
+UV_INTERP_USES_ELEMS = frozenset({"barycentric", "edge_leastsq", "nemo_cgrid"})
 
 _UV_INTERPOLATORS = {
     "leastsq": interp_leastsq,
     "barycentric": interp_barycentric,
     "edge_leastsq": interp_edge_leastsq,
+    "nemo_cgrid": interp_nemo_cgrid,
 }
 _UV_INTERPOLATORS_SINGLE = {
     "leastsq": interp_leastsq_single,
     "barycentric": interp_barycentric_single,
     "edge_leastsq": interp_edge_leastsq_single,
+    "nemo_cgrid": interp_nemo_cgrid_single,
 }
 
 

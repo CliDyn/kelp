@@ -85,17 +85,3 @@ def test_seed_generation_keeps_the_existing_grid_hash():
     generate_around_point(mesh, 1.0, 1.0, n=20, radius_km=30.0, seed=1)
     generate_around_point(mesh, 1.0, 1.0, n=20, radius_km=30.0, seed=2)
     assert mesh._gh_offsets is offsets
-
-
-# --- F-046: the NEMO reader's advice names the key that decides ---------------
-
-def test_nemo_3d_refusal_names_fdrift3d(tmp_path):
-    from types import SimpleNamespace
-    from kelp.readers import get_reader
-    import xarray as xr
-    t = tmp_path / "x_grid_T.nc"
-    xr.Dataset({"ssh": (("time_counter", "y", "x"), np.zeros((1, 2, 2)))}).to_netcdf(t)
-    mode = SimpleNamespace(Fdrift2D=True, Fdrift3D=True, var_u=None, var_v=None,
-                           var_w=None, var_eta=None, sample_vars=[])
-    with pytest.raises(NotImplementedError, match="Fdrift3D: false"):
-        get_reader("nemo").open_dataset(str(t), mode_cfg=mode)

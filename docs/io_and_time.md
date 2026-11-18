@@ -143,6 +143,10 @@ Two newer capabilities extend the directory case:
   each element's bed and last wet layer in `mesh.metadata` — what
   `mode.uv_vertical: linear` needs on element u/v (`vertical.md` §2.1).
 
+NEMO (`mesh.type: nemo`) has its own file rules (the grid_T token swap,
+`ncinput_u`/`ncinput_v`, globs and lists per grid): `nemo.md` §3 and
+`configuration.md` §5.
+
 ## §3 The time axis
 
 Reading the data is only half the job; the tracker also has to know *what time*

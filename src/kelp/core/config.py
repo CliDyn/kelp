@@ -120,7 +120,7 @@ _VALID_DIFFUSION_SCHEMES = ("uniform", "em", "m1")
 _VALID_DIFFUSION_COMPOSITIONS = ("split", "combined", "split_rk")
 _VALID_KH_EVAL_POSITIONS = ("start", "end")
 _VALID_SAMPLE_INTERP = ("nearest", "leastsq", "barycentric", "idw")
-_VALID_UV_INTERP = ("leastsq", "barycentric", "edge_leastsq")
+_VALID_UV_INTERP = ("leastsq", "barycentric", "edge_leastsq", "nemo_cgrid")
 _VALID_EDGE_LSQ_BC = ("freeslip", "noslip")
 _VALID_ELEM_SEARCH = ("local", "walk")
 _VALID_TEMPORAL_RECONSTRUCTION = ("linear", "pchip")
@@ -484,8 +484,9 @@ class MeshConfig:
     # grid_hash_cell_size always wins.  The resolved cell is stamped in the
     # output metadata (grid_hash_cell, grid_hash_cell_rule).
     grid_hash_cell_rule: Optional[str] = "occupancy"
-    # Coordinate-frame rotation for pole-safe tracking (FESOM2 and HEALPix;
-    # the FESOM-C and NEMO readers refuse it).
+    # Coordinate-frame rotation for pole-safe tracking (FESOM2, HEALPix,
+    # FESOM 1.4 and NEMO with nemo_grid: cgrid; FESOM-C and NEMO tpoint
+    # refuse it).
     # None (default) -> no rotation, byte-identical behaviour.
     # "fesom2"       -> the standard FESOM Euler angles (50, 15, -90):
     #                   the computational pole sits on Greenland.
@@ -509,6 +510,14 @@ class MeshConfig:
     #            (element-layout u/v => the fused leastsq kernels;
     #            v1 is 2-D only, no sampling / spatial Kh).
     healpix_geometry: str = "dual"
+    # NEMO only: "tpoint" (default; quads of T-points + face->T averaging,
+    # uv_interp barycentric) or "cgrid" (exact Arakawa C-grid: F-point cells,
+    # needs glamf/gphif in meshpath, uv_interp nemo_cgrid).
+    nemo_grid: str = "tpoint"
+    # NEMO C-grid 3-D: metres of the fractional level in a partial bottom cell:
+    # "shrunk" (NEMO <= 4.2: the cell spans e3t_0) or "porous" (NEMO 5: the
+    # full reference layer e3t_1d).  Only depth in metres differs.
+    nemo_partial_cells: str = "shrunk"
     # --- fesom14-only key (refused for the other mesh types) ------------
     # Euler angles [alpha, beta, gamma] (degrees, as in the run's namelist)
     # of the rotated frame a FESOM 1.4 ASCII mesh is stored in; the reader
@@ -549,6 +558,18 @@ class MeshConfig:
                     f"{self.grid_hash_cell_size!r}"
                 )
             self.grid_hash_cell_size = cell
+        if self.nemo_grid not in ("tpoint", "cgrid"):
+            raise ValueError(
+                "mesh.nemo_grid must be 'tpoint' or 'cgrid', got "
+                f"{self.nemo_grid!r}")
+        if self.nemo_grid != "tpoint" and self.type != "nemo":
+            raise ValueError("mesh.nemo_grid applies to mesh.type 'nemo' only")
+        if self.nemo_partial_cells not in ("shrunk", "porous"):
+            raise ValueError(
+                "mesh.nemo_partial_cells must be 'shrunk' or 'porous', got "
+                f"{self.nemo_partial_cells!r}")
+        if self.nemo_partial_cells != "shrunk" and self.type != "nemo":
+            raise ValueError("mesh.nemo_partial_cells applies to mesh.type 'nemo' only")
         if self.healpix_geometry not in ("dual", "pixel"):
             raise ValueError(
                 "mesh.healpix_geometry must be 'dual' or 'pixel', got "
@@ -656,10 +677,11 @@ class DataConfig:
     time bounds and output schedule, and the offset may also be given
     alone.
     """
-    ncinput: str = ""              # velocity NetCDF file or directory
-    ncinput_v: str = ""            # separate v file (empty = u+v in same ncinput)
-    ncinput_w: str = ""            # separate w file (empty = no w or w in ncinput)
-    ncinput_eta: str = ""          # separate ssh store (healpix: the 2-D store; empty = ssh in ncinput or auto-derived sibling)
+    ncinput: str | list[str] = ""              # velocity NetCDF file or directory
+    ncinput_u: str | list[str] = ""            # nemo only: grid_U file(s) when their names lack the grid_T token
+    ncinput_v: str | list[str] = ""            # separate v file (empty = u+v in same ncinput)
+    ncinput_w: str | list[str] = ""            # separate w file (empty = no w or w in ncinput)
+    ncinput_eta: str | list[str] = ""          # separate ssh store (healpix: the 2-D store; empty = ssh in ncinput or auto-derived sibling)
     inicloud: str = ""             # initial particle positions file
     output_path: str = ""          # trajectory NetCDF output (empty = in-memory only)
     time_averaging: Optional[str] = None  # "mean" or "instant" (None triggers warning)
@@ -784,6 +806,18 @@ class AppConfig:
     data: DataConfig = field(default_factory=DataConfig)
     time: TimeConfig = field(default_factory=TimeConfig)
 
+    def __post_init__(self):
+        # the exact C-grid scheme needs its own interpolator: ``mesh.nemo_grid:
+        # cgrid`` implies ``numerics.uv_interp: nemo_cgrid`` (the default ``leastsq``
+        # is replaced; naming any other interpolator is a contradiction)
+        if getattr(self.mesh, "nemo_grid", "tpoint") == "cgrid":
+            if self.numerics.uv_interp == "leastsq":
+                self.numerics.uv_interp = "nemo_cgrid"
+            elif self.numerics.uv_interp != "nemo_cgrid":
+                raise ValueError(
+                    "mesh.nemo_grid: cgrid uses numerics.uv_interp: nemo_cgrid (set "
+                    f"automatically); got {self.numerics.uv_interp!r}")
+
 
 def _load_yaml(path: Path) -> dict:
     """Read a YAML file, return dict."""
@@ -824,7 +858,9 @@ def _resolve_paths(cfg: AppConfig, config_dir: Path) -> None:
     Expands ``~`` and makes relative paths absolute using *config_dir*
     as the base.  Modifies *cfg* in place.
     """
-    def _resolve(p: str) -> str:
+    def _resolve(p):
+        if isinstance(p, (list, tuple)):          # a YAML list of files / globs
+            return [_resolve(q) for q in p]
         if not p:
             return p
         expanded = Path(p).expanduser()
@@ -836,6 +872,7 @@ def _resolve_paths(cfg: AppConfig, config_dir: Path) -> None:
     if isinstance(cfg.mesh.levels, str):
         cfg.mesh.levels = _resolve(cfg.mesh.levels)
     cfg.data.ncinput = _resolve(cfg.data.ncinput)
+    cfg.data.ncinput_u = _resolve(cfg.data.ncinput_u)
     cfg.data.ncinput_v = _resolve(cfg.data.ncinput_v)
     cfg.data.ncinput_w = _resolve(cfg.data.ncinput_w)
     cfg.data.ncinput_eta = _resolve(cfg.data.ncinput_eta)
@@ -869,6 +906,14 @@ def load_config(path: str) -> AppConfig:
     """
     config_path = Path(path).resolve()
     data = _validate_config_dict(_load_yaml(config_path))
+    # AppConfig cannot tell an explicit ``uv_interp: leastsq`` from the default,
+    # so the contradiction with ``nemo_grid: cgrid`` is refused on the raw dict
+    named = (data.get("numerics") or {}).get("uv_interp")
+    if ((data.get("mesh") or {}).get("nemo_grid") == "cgrid"
+            and named is not None and named != "nemo_cgrid"):
+        raise ValueError(
+            "mesh.nemo_grid: cgrid uses numerics.uv_interp: nemo_cgrid (set "
+            f"automatically); got {named!r}")
     cfg = AppConfig(
         mode=_build_section(ModeConfig, data, "mode"),
         numerics=_build_section(NumericsConfig, data, "numerics"),

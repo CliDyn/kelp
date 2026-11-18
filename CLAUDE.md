@@ -11,9 +11,10 @@ A Python Lagrangian particle tracker for unstructured ocean meshes, reimplementi
 - **Stochastic diffusion** — uniform Kh / Euler-Maruyama / Milstein, wired into Euler/RK2/RK4 via three composition modes (split / combined / split_rk), counter-based RNG; **vertical Az** (TODO 2.2b, 3-D only) — split kick with mandatory Itô drift (Visser 1997) + reflective boundaries, `az_const` everywhere / `var_az` field FESOM2 z-level, `COMP_VERTICAL=1`.
 - **Time-aware RK2/RK4** — stages lerp velocity to substep times on non-autonomous flows; opt-in 4-snapshot PCHIP in time (`numerics.temporal_reconstruction`); adaptive **RK45** (Dormand–Prince, 2-D element leastsq).
 - **u/v interpolation** — `leastsq` (default), `barycentric` (node layout: HEALPix, FESOM2 `unod`/`vnod`, FESOM 1.4), `edge_leastsq` (FESOM-style).
-- **HEALPix** reader (2-D + 3-D, dual or pixel geometry, regional extracts) besides FESOM2, FESOM 1.4 and FESOM-C. The structured-grid adapter `readers/nemo.py` is early 2-D groundwork, not a supported model (see "Remaining work").
+- **HEALPix** reader (2-D + 3-D, dual or pixel geometry, regional extracts) besides FESOM2, FESOM 1.4, FESOM-C and NEMO.
 - **FESOM 1.4** reader (`mesh.type: fesom14`, `readers/fesom14/`) — mesh from an ASCII mesh directory or recovered exactly from the cell polygons of level-wise data; level-wise and raw 3-D-node files; u/v/w on the levels (`native_uv_vertical = "level"`, always linear in depth — a prism-wise approximation of FESOM 1.4's interpolation on tetrahedra); the reader resolves what time each record represents (time bounds, the raw `output_schedule`, or `data.time_stamp` + `time_window`; `data.time_offset`), so no midpoint shift and `data.time_averaging` is refused; a check-only `prepare(mesh, ds)` hook. The raw form is validated against the format description and a real-geometry round trip, not against real raw output.
 - **Record-time options for every reader** (`data.time_stamp` / `time_window` / `time_offset`) — where each stamp sits in its averaging window (`start | centre | end | instant`; calendar or fixed-duration windows), for output not stamped at the window end (e.g. stores written from GRIB with the reference time, stamped at the window START, which `time_averaging: mean` places a whole window early). For readers other than fesom14 they take the place of `data.time_averaging` (refused next to them) and resolve the opened dataset's one axis once, at the open (`readers.apply_time_options` inside `_open_run_dataset`, the arithmetic of `fesom14/_timeaxis.resolve_stamps`): each record at its exact window centre, no midpoint shift, `kelp info` and the run print the resolved first/last instants; refused: stamps off the convention, gaps, the offset alone, `on_exhausted: cycle` with calendar-month/year windows. Output `time_averaging = "resolved_from_options"` plus each set key (`readers._time_metadata`); runs without the keys are bit for bit unchanged. Direct callers of `run_single_realization` / `track_particles` apply `apply_time_options` themselves (once: a second call shifts again).
+- **NEMO C-grid path** (`mesh.nemo_grid: cgrid`, `docs/nemo.md`, skill `kelp-nemo`) — Delandmeter & van Sebille flux scheme on the model's own staggering (F-point nodes, wet T-cell elements, one dry ring, land = zero velocity, no in-code land handling); 2-D and 3-D (z-levels, zps partial cells, fractional level coordinate, W from continuity = model W on ORCA05, `numerics/nemo_cgrid.py`); regional boxes and global ORCA with E-W seam + T/F-pivot north fold, halo or halo-free, crops with open absorbing edges; T-cell sampling; `uv_interp: nemo_cgrid` follows from `nemo_grid: cgrid`. Validated on ORCA05, eORCA025 (data-gated, `KELP_TEST_NEMO_DATA`), ORCA2 CMIP5 topology only.
 - **Offline W reconstruction** (`w_reconstruct.py`) from u, v, ssh.
 - **Per-particle FailureReason diagnostics** — why each particle died.
 - **Beaching model** (TODO 2.2) — 4 combinable criteria (depth/coastal_element/on_failure/stochastic), tidal resuspension (never/auto/stochastic/auto_or_stochastic), Fortran fix_* freeze via the alive-mask.
@@ -36,7 +37,7 @@ capabilities from the source — the mechanics are already written down:
   big-mesh** experiment (millions of particles, runs that outlive one allocation,
   region cropping): the order-of-operations (isolate clone → crop+validate →
   wait-for-extraction → probe → load-probe → resumable dependency chain) and the
-  setup pitfalls to avoid. The other skills: **`kelp-analysis`** (reading
+  setup pitfalls to avoid. The other skills: **`kelp-nemo`** (NEMO input adaptation: variable names per version, mesh_mask vs domain_cfg, halo/fold/crop pitfalls), **`kelp-analysis`** (reading
   trajectory output at the writer's chunking; cohort statistics, denominators,
   censoring, timing numbers), **`kelp-visualize`** (figures, montages,
   videos; the figure contract), **`kelp-diagnose`** (a run slower than
@@ -51,7 +52,7 @@ capabilities from the source — the mechanics are already written down:
 - **Ready templates** — `examples/config_*.yaml` (genericized real runs):
   `config_global_2d_10yr.yaml` (2D, multi-year, node velocities, pulsed release,
   rotated frame), `config_global_2d_1yr.yaml` (simpler), `config_weddell_3d.yaml`
-  (3D, W + T/S sampling), `config_nemo.yaml` (structured C-grid),
+  (3D, W + T/S sampling), `config_nemo.yaml` / `config_nemo_cgrid_3d.yaml` (NEMO exact C-grid, 2-D / 3-D),
   `config_healpix_2d.yaml` / `config_healpix_3d.yaml` (HEALPix stores),
   `config_fesom14_levelwise.yaml` (3-D on FESOM 1.4 level-wise output, the mesh
   from the files' cell polygons). Copy and set the paths.
@@ -122,6 +123,8 @@ kelp/                     ← repo root
 │   │   └── config.py         ← YAML → AppConfig
 │   ├── numerics/             ← math kernels (Numba hot paths)
 │   │   ├── interpolate.py    ← u/v interpolation: leastsq, barycentric, edge_leastsq
+│   │   ├── nemo_cgrid.py     ← NEMO exact C-grid: flux interpolator, 3-D Euler/RK step
+│   │   │                        (fractional level coordinate), T-cell sampling
 │   │   ├── integrators.py    ← Euler / RK2 / RK4 / RK45 (2D + 3D), fused kernels,
 │   │   │                        diffusion + time-aware dispatch
 │   │   ├── temporal_reconstruct.py ← 4-snapshot PCHIP in time
@@ -133,7 +136,9 @@ kelp/                     ← repo root
 │   │   └── vertical_sigma.py ← sigma layer/W helpers (FESOM-C)
 │   ├── readers/              ← registry: get_reader("fesomc" | "fesom2" | "fesom14" | "nemo" | "healpix"); NetCDF + Zarr + kerchunk;
 │   │                            the reader hook prepare + the stamp options shared by tracking and `kelp info`
-│   │                            (structured.py = curvilinear→quad-Mesh foundation; nemo.py = NEMO adapter, 2-D;
+│   │                            (structured.py = curvilinear→quad-Mesh foundation; nemo/ = NEMO package: reader.py (C-grid 2-D/3-D +
+│   │                             T-point 2-D) + _layout (raster layouts, seam/fold, detection), _mesh (C-grid mesh),
+│   │                             _vertical (zps thicknesses, W from continuity) — docs/nemo.md;
 │   │                             healpix.py = HEALPix dual/pixel mesh builder + native reader, 2-D and 3-D — docs/healpix.md;
 │   │                             fesom14/ = FESOM 1.4 package: reader.py + _ascii_mesh, _polygons (triangles from cell
 │   │                             polygons), _layout (the two data forms, the validity predicate), _timeaxis (record times))
@@ -144,7 +149,7 @@ kelp/                     ← repo root
 │   └── cli/main.py           ← `kelp run|info`, argparse subcommands
 ├── examples/                 ← runnable YAML configs only (genericized real runs):
 │      config_global_2d_10yr.yaml, config_global_2d_1yr.yaml,
-│      config_weddell_3d.yaml, config_nemo.yaml, config_healpix_2d.yaml,
+│      config_weddell_3d.yaml, config_nemo.yaml, config_nemo_cgrid_3d.yaml, config_healpix_2d.yaml,
 │      config_healpix_3d.yaml, config_fesom14_levelwise.yaml
 ├── utils/                    ← README.md (what each tool is for),
 │                               extract_fesom_region.py (region → Zarr subset),
@@ -190,22 +195,22 @@ this file:
 | [`docs/dev/mesh.md`](docs/dev/mesh.md) | `core/geometry.py`, `core/mesh.py` |
 | [`docs/dev/core.md`](docs/dev/core.md) | `core/particles.py`, `core/release.py`, `core/particles_gen.py`, `core/io.py`, `core/rotation.py` |
 | [`docs/dev/writers.md`](docs/dev/writers.md) | `writers.py` |
-| [`docs/dev/numerics.md`](docs/dev/numerics.md) | `numerics/interpolate.py`, `numerics/vertical_uv.py`, `numerics/vertical.py`, `numerics/vertical_sigma.py`, `numerics/diffusion.py`, `numerics/beaching.py`, `numerics/sampling.py`, `w_reconstruct.py` |
-| [`docs/dev/integrators.md`](docs/dev/integrators.md) | `numerics/integrators.py`, `numerics/temporal_reconstruct.py` |
+| [`docs/dev/numerics.md`](docs/dev/numerics.md) | `numerics/interpolate.py`, `numerics/vertical_uv.py`, `numerics/vertical.py`, `numerics/vertical_sigma.py`, `numerics/diffusion.py`, `numerics/beaching.py`, `numerics/sampling.py`, `numerics/nemo_cgrid.py`, `w_reconstruct.py` |
+| [`docs/dev/integrators.md`](docs/dev/integrators.md) | `numerics/integrators.py`, `numerics/temporal_reconstruct.py`; the 3-D step of `numerics/nemo_cgrid.py` |
 | [`docs/dev/tracking.md`](docs/dev/tracking.md) | `tracking.py`, `cli/main.py` |
 | [`docs/dev/readers.md`](docs/dev/readers.md) | `readers/` |
 | [`docs/dev/visualization.md`](docs/dev/visualization.md) | `visualization/` |
 
 ## Test patterns
 
-Tests use synthetic data built in `tmp_path` fixtures or small committed fixtures under `tests/data/` (e.g. `test_real_mesh.py`, `test_regression.py`) — no external data needed (exceptions: the `@slow` suites, and the data-gated HEALPix suites — see `KELP_TEST_DATA` in their docstrings).
+Tests use synthetic data built in `tmp_path` fixtures or small committed fixtures under `tests/data/` (e.g. `test_real_mesh.py`, `test_regression.py`) — no external data needed (exceptions: the `@slow` suites, the data-gated HEALPix suites — see `KELP_TEST_DATA` in their docstrings — and the data-gated NEMO suites: `KELP_TEST_NEMO_DATA`, built by `utils/fetch_nemo_test_data.py`, `docs/nemo.md` "Test data").
 
 - Canonical mesh: 3×3 grid (9 nodes, 8 triangles) centred at (5°, 5°) — interior node gets ~6 surrounding elements for robust interpolation.
 - Constant velocity fields so displacement is analytic: `Δlon ≈ U·dt / (cos(lat)·METERS_PER_DEG_LAT)`.
 - Output format 2 is pinned by `tests/test_output_format.py` (layout, CF attributes, time units per calendar, the record clock in both modes incl. backward/cycle/chain cuts, release variables, velocity NaN rule, lazy restart block, format-1 reads, concat refusals).
 
 ```bash
-python -m pytest tests/          # default: 4837 collected (4795 pass, 42 data/plot skips as of 2026-11-17), 47 slow deselected
+python -m pytest tests/          # default: 4957 collected (4901 pass, 56 data/plot skips as of 2026-11-17), 47 slow deselected
 python -m pytest tests/ -m slow  # Parcels comparison + data-gated HEALPix-twin / W-sign suites
 ```
 
@@ -243,7 +248,7 @@ project's internal backlog items, not links to a file in the repository.
 - **Sampling on sigma meshes**: mid-layer `(K-1, N)` scalars (T/S) are sampled per neighbour at the particle's DEPTH (bottom-aware), not along the sigma surfaces like W and the u/v layer (review of fix/sigma-step) — make `sampling._loop_sample_mid_sigma` sigma-following with the method's `H_p`.
 - **Output**: no Fortran-compatible ASCII `.dat` writer; multi-realization runs write one file per realization (`_rN`), no single-file mode.
 - **W reconstruction**: edge-flux divergence (exact FESOM2 match, needs edge connectivity) and proper z-star layer distribution for the ALE correction not done. (The divergence kernels' antimeridian fragility was gate-fixed 2026-07, same idiom as the leastsq cores — no raw-lon-delta consumers remain.)
-- **Structured / NEMO grids** (TODO 4.6): v1 shipped (`readers/structured.py` + `readers/nemo.py`) is **2-D, E/N-aligned grids only** — NEMO `grid_U`/`grid_V` are along the local grid axes, so a grid whose axes deviate > 2° from E/N (skewed/curvilinear/global ORCA) is rejected. Staged follow-ups, in priority order: **(1) vector rotation** — rotate grid-relative u/v into geographic E/N (from `gcos`/`gsin` or the coordinates), the gate that lifts the E/N-only restriction and is the prerequisite for everything below (a *fully reversed* axis — i→west / j→south, caught by the same signed-angle metric — additionally needs an index/winding flip, not just a rotation angle); **(2) global ORCA** — north-fold seam dedup + east-west periodicity (the foundation grows `periodic_x`/`north_fold`); **(3) 3-D** — `deptht`/`e3t`/partial cells, W on interfaces → `VelocityField.w (K, N)`, per-node bottom depth from bathy, exact `e1t*e2t` areas; **(4) offline converter** `utils/nemo_to_mesh.py` (same foundation, writes a FESOM-C-format mesh); **(5)** em/m1 diffusion onto T-points (fails fast now) + validate `beaching.dry_mask_var` (read via the scalar infra but **untested/unguarded** on NEMO — not a fail-fast); **(6) ROMS/MOM6 adapters** (same `structured.py`); exact C-grid scheme (Delandmeter & van Sebille 2019) = a separate interpolator (C→T averaging loses divergence — coastal streamlines may slightly cut land).
+- **NEMO / structured grids** (TODO 4.6): the exact C-grid path (`readers/nemo/`, `numerics/nemo_cgrid.py`) is shipped for 2-D and 3-D z-levels (zps); refusals and open items: `docs/nemo.md` §6, §8. The default T-point path (`nemo_grid: tpoint`) stays 2-D, E/N-aligned grids only; follow-ups there: vector rotation, global ORCA, 3-D, an offline `utils/nemo_to_mesh.py` converter, em/m1 diffusion onto T-points, ROMS/MOM6 adapters (same `structured.py`).
 
 ## Conventions
 

@@ -25,8 +25,8 @@ The topic documentation for users is one level up, in `docs/` (entry point
 | [mesh.md](mesh.md) | `core/geometry.py`, `core/mesh.py` |
 | [core.md](core.md) | `core/particles.py`, `core/release.py`, `core/particles_gen.py`, `core/io.py`, `core/rotation.py` |
 | [writers.md](writers.md) | `writers.py` |
-| [numerics.md](numerics.md) | `numerics/interpolate.py`, `numerics/vertical_uv.py`, `numerics/vertical.py`, `numerics/vertical_sigma.py`, `numerics/diffusion.py`, `numerics/beaching.py`, `numerics/sampling.py`, `w_reconstruct.py` |
-| [integrators.md](integrators.md) | `numerics/integrators.py`, `numerics/temporal_reconstruct.py` |
+| [numerics.md](numerics.md) | `numerics/interpolate.py`, `numerics/vertical_uv.py`, `numerics/vertical.py`, `numerics/vertical_sigma.py`, `numerics/diffusion.py`, `numerics/beaching.py`, `numerics/sampling.py`, `numerics/nemo_cgrid.py`, `w_reconstruct.py` |
+| [integrators.md](integrators.md) | `numerics/integrators.py`, `numerics/temporal_reconstruct.py`; the 3-D step of `numerics/nemo_cgrid.py` |
 | [tracking.md](tracking.md) | `tracking.py`, `cli/main.py` |
 | [readers.md](readers.md) | `readers/` |
 | [visualization.md](visualization.md) | `visualization/` |
@@ -158,6 +158,14 @@ Paths are below `src/kelp/`.
   [mesh.md](mesh.md); the stage helpers, the lazy payload and the failure-reason
   merge in [core.md](core.md) (`core/io.py`, `core/particles.py`); the edge walk in
   [tracking.md](tracking.md).
+- **`numerics/nemo_cgrid.py`** — the numerics of the NEMO C-grid path
+  (`uv_interp: nemo_cgrid`): the flux interpolator (Numba kernel
+  `_interp_nemo_cgrid_core`, the `nemo_cgrid` entry of the `interpolate.py`
+  registry), the 3-D Euler / RK2 / RK4 step on the fractional level coordinate
+  (`nemo_cgrid3d_step`, called from the integrators' 3-D dispatch) and the T-cell
+  sampling (`sample_field_nemo_cgrid`). Notes: [numerics.md](numerics.md) (the
+  interpolator), [integrators.md](integrators.md) (the 3-D step); user page
+  [../nemo.md](../nemo.md).
 
 ### readers/
 
@@ -214,8 +222,14 @@ Paths are below `src/kelp/`.
   `Mesh` (a quad of four neighbouring cell centres is kept only when all four are
   wet; the nodes are the wet cell centres that belong to at least one such quad).
   Notes: [readers.md](readers.md).
-- **`readers/nemo.py`** — NEMO adapter, version 1: 2-D, grids aligned with east and
-  north only (others are refused); node-layout u/v. Notes: [readers.md](readers.md).
+- **`readers/nemo/`** — NEMO (a package: `reader.py` with `NemoReader`; `_layout.py`,
+  `_mesh.py`, `_vertical.py`). Default T-point path: 2-D, grids aligned with east and
+  north only (others are refused), the `structured.py` mesh, node-layout u/v. Exact
+  C-grid path `mesh.nemo_grid: cgrid`: raster layouts, seam and north fold and their
+  detection (`_layout.py`), the F-point / T-cell mesh (`_mesh.py`), partial-step checks,
+  thicknesses and W from continuity (`_vertical.py`); any grid orientation incl. global
+  ORCA, 2-D + 3-D z-levels / zps; numerics in `numerics/nemo_cgrid.py`. Notes:
+  [readers.md](readers.md); user page [../nemo.md](../nemo.md).
 
 ### Top level
 
@@ -267,7 +281,7 @@ of them exported):
 
 ## Dependency graph (imports)
 
-Generated from the import statements (2026-10-04; `vertical_uv` added 2026-10-17, `readers/fesom14/` 2026-10-19); "lazy" = imported inside a
+Generated from the import statements (2026-10-04; `vertical_uv` added 2026-10-17, `readers/fesom14/` 2026-10-19, `readers/nemo/` and `numerics/nemo_cgrid.py` 2026-11-18); "lazy" = imported inside a
 function. Third-party: numpy everywhere, numba optional in the kernels, xarray
 in the readers, netCDF4/zarr in the writer.
 
@@ -285,14 +299,15 @@ writers.py                ← particles (netCDF4 / zarr)
 w_reconstruct.py          ← geometry (refuses FESOM 1.4 meshes by their metadata, no import)
 numerics/temporal_reconstruct.py ← io
 numerics/vertical_uv.py   ← io, mesh
-numerics/interpolate.py   ← geometry, io, mesh, particles, temporal_reconstruct, vertical_uv
+numerics/interpolate.py   ← geometry, io, mesh, particles, nemo_cgrid, temporal_reconstruct, vertical_uv
 numerics/vertical.py      ← mesh, temporal_reconstruct
 numerics/vertical_sigma.py ← mesh
 numerics/diffusion.py     ← geometry, mesh, interpolate
 numerics/beaching.py      ← particles, diffusion
 numerics/sampling.py      ← mesh, vertical, vertical_sigma
 numerics/integrators.py   ← geometry, io, mesh, particles, diffusion, interpolate, vertical,
-                            vertical_uv (lazy: temporal_reconstruct, vertical_sigma)
+                            vertical_uv (lazy: temporal_reconstruct, vertical_sigma, nemo_cgrid)
+numerics/nemo_cgrid.py    ← geometry, mesh, particles (lazy: integrators)
 readers/__init__.py       ← standalone (registry + shared helpers)
 readers/fesom2.py, fesomc.py ← config, io, mesh, readers helpers (fesom2 lazy: rotation)
 readers/fesom14/          ← reader.py: io, mesh, rotation, readers helpers, fesom2 (mesh helpers), _ascii_mesh,
@@ -300,10 +315,11 @@ readers/fesom14/          ← reader.py: io, mesh, rotation, readers helpers, fe
 readers/healpix.py        ← geometry, mesh, readers helpers (lazy: io, rotation, Kh name helpers,
                             vertical_uv)
 readers/structured.py     ← mesh
-readers/nemo.py           ← io, mesh, readers helpers, structured
+readers/nemo/             ← reader.py: io, mesh, readers helpers, structured, _layout, _mesh, _vertical
+                            (lazy: fesom2 rotation helpers, rotation); _mesh: mesh, _layout, _vertical (scipy)
 tracking.py               ← config, geometry, io, mesh, particles, release, diffusion,
                             integrators, vertical_uv, readers (lazy: writers, shared_fields, beaching,
-                            sampling, temporal_reconstruct, rotation, readers.fesom2, __version__)
+                            sampling, nemo_cgrid, temporal_reconstruct, rotation, readers.fesom2, __version__)
 visualization/*           ← core.geometry, core.mesh, core.particles (lazy: rotation)
 cli/main.py               ← __version__ (lazy per subcommand: run → config, tracking; info → config, mesh, readers)
 ```

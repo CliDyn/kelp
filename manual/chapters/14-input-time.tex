@@ -12,9 +12,10 @@ node can share one copy of each snapshot. The in-memory read-ahead that serves t
 
 A reader is selected by \conf{mesh.type}: \conf{fesom2}, \conf{fesom14}, \conf{fesomc}, \conf{nemo} or
 \conf{healpix}. Each
-provides the mesh, opens the forcing, and reads one snapshot at a time; the NEMO reader builds its mesh with
-the engine's generic builder for structured grids, which turns the wet cell centres of a logically
-rectangular grid into nodes and every four adjacent wet centres into a quadrilateral element. The forcing is opened \emph{lazily}: the dataset is mapped through \code{xarray}
+provides the mesh, opens the forcing, and reads one snapshot at a time; on its T-point path the NEMO reader
+builds its mesh with the engine's generic builder for structured grids, which turns the wet cell centres of a
+logically rectangular grid into nodes and every four adjacent wet centres into a quadrilateral element, and on
+its C-grid path it builds the mesh of the model's own staggered grid (\cref{sec:mesh-sources}). The forcing is opened \emph{lazily}: the dataset is mapped through \code{xarray}
 without loading the field arrays, and a snapshot is materialized only when a step requires it.
 \begin{description}[font=\normalfont\bfseries,style=nextline,leftmargin=1.5em]
   \item[FESOM2] The mesh comes from a mesh-diagnostics file (three naming conventions are recognised), an
@@ -59,8 +60,12 @@ without loading the field arrays, and a snapshot is materialized only when a ste
     separate store with an identical time axis (\conf{data.ncinput\_eta}), and the vertical levels from
     \conf{mesh.levels} (\cref{sec:vert-coord}).
   \item[NEMO] The grid-T file is the input; the grid-U and grid-V files are found by substituting the grid
-    token in its name and must share its time axis exactly. The first version is two-dimensional and requires
-    a grid aligned with east and north.
+    token in its name, or given by \conf{data.ncinput\_u} and \conf{data.ncinput\_v}, and must share its
+    time axis exactly; several files per grid are joined along time. The mesh file is a \code{mesh\_mask.nc}
+    or \code{domain\_cfg.nc}. The T-point path is two-dimensional and requires a grid aligned with east and
+    north; the C-grid path (\conf{mesh.nemo\_grid: cgrid}) reads the face velocities of any NEMO grid, in
+    two and three dimensions, and recomputes the vertical velocity from continuity (\conf{data.ncinput\_w}
+    is refused).
 \end{description}
 A reader may also provide a hook \fn{prepare}, which checks the opened data against the mesh. It runs at every
 entry: right after the data are opened, before any output file exists, and again at the entry of each

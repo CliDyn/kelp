@@ -208,6 +208,10 @@ def _open_run_dataset(reader, mesh, config, verbose: bool = False):
         # the multi-year exact layout (Av.fesom.<year>.nc) is discovered
         # from it
         extra["diffusion"] = diff
+    if getattr(config.data, "ncinput_u", ""):
+        if config.mesh.type != "nemo":
+            raise ValueError("data.ncinput_u applies to mesh.type 'nemo' only")
+        extra["u_path"] = config.data.ncinput_u
     extra.update(_time_option_kwargs(config))
     extra.update(_dry_mask_kwargs(config))
     ds = reader.open_dataset(config.data.ncinput,
@@ -726,10 +730,11 @@ def _time_axis_label(ds, data_cfg) -> str:
     ones, each once, joined by ``", "``), else the dataset's ``source``
     encoding, else ``"the dataset"``."""
     paths = []
-    for key in ("ncinput", "ncinput_v", "ncinput_w", "ncinput_eta"):
-        p = str(getattr(data_cfg, key, "") or "")
-        if p and p not in paths:
-            paths.append(p)
+    for key in ("ncinput", "ncinput_u", "ncinput_v", "ncinput_w", "ncinput_eta"):
+        v = getattr(data_cfg, key, "") or ""
+        for p in ([str(q) for q in v] if isinstance(v, (list, tuple)) else [str(v)]):
+            if p and p not in paths:
+                paths.append(p)
     if paths:
         return ", ".join(paths)
     source = (getattr(ds, "encoding", None) or {}).get("source")

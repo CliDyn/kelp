@@ -174,10 +174,16 @@ def _sample_record_fields(state, mesh, vel, sample_interp, Dmin=0.5):
     """
     if not getattr(vel, "scalars", None):
         return None
+    from .numerics.nemo_cgrid import sample_field_nemo_cgrid
     from .numerics.sampling import sample_field
     alive = state.status == ParticleStatus.ALIVE
     out = {}
     for name, arr in vel.scalars.items():
+        if getattr(mesh, "_nemo_cgrid", False):
+            out[name] = sample_field_nemo_cgrid(arr, mesh, state.lon, state.lat,
+                                           state.z, alive=alive,
+                                           nearest=state.nearest_node)
+            continue
         out[name] = sample_field(
             arr, mesh, state.lon, state.lat,
             zs=state.z if arr.ndim == 2 else None,
@@ -847,8 +853,8 @@ def _shared_fields_tag(config) -> str:
         "mesh": asdict(config.mesh),
         "mode": asdict(config.mode),
         "data": {k: getattr(config.data, k, None)
-                 for k in ("ncinput", "ncinput_v", "ncinput_w",
-                           "ncinput_eta")},
+                 for k in ("ncinput", "ncinput_u", "ncinput_v",
+                           "ncinput_w", "ncinput_eta")},
         "velocity_float32": getattr(config.numerics,
                                     "velocity_float32", False),
         "diffusion": None,
@@ -877,7 +883,8 @@ def _shared_fields_tag(config) -> str:
         k: _path_fingerprint(v) for k, v in (
             ("mesh", getattr(config.mesh, "meshpath", None)),
             *((k, getattr(config.data, k, None))
-              for k in ("ncinput", "ncinput_v", "ncinput_w", "ncinput_eta")))
+              for k in ("ncinput", "ncinput_u", "ncinput_v", "ncinput_w",
+                        "ncinput_eta")))
         if v}
     ident["engine"] = _kelp_version()
     # The run GENERATION: stats cannot see an in-place rewrite of a nested
@@ -901,7 +908,13 @@ def _shared_fields_tag(config) -> str:
 def _path_fingerprint(path) -> list:
     """(name, size, mtime_ns) of a file, or of each top-level entry of a
     directory (a Zarr store, a multi-year directory); 'missing' otherwise."""
+    import glob
     import os
+    if isinstance(path, (list, tuple)):          # a YAML list: each entry in turn
+        return [f for p in path for f in _path_fingerprint(p)]
+    if any(c in str(path) for c in "*?["):      # a glob: its files, each stat'ed
+        return [[os.path.basename(f), os.stat(f).st_size, os.stat(f).st_mtime_ns]
+                for f in sorted(glob.glob(str(path)))] or ["missing"]
     try:
         st = os.stat(path)
     except OSError:
@@ -926,6 +939,29 @@ def _path_fingerprint(path) -> list:
 # Time-averaging midpoint shift
 # ---------------------------------------------------------------------------
 
+def _refuse_nemo_cgrid_unsupported(config) -> None:
+    """Exact C-grid (``uv_interp: nemo_cgrid``): refuse the options that would read
+    node/element fields it does not carry."""
+    n = config.numerics
+    bad = []
+    if n.integrator == "rk45":
+        bad.append("integrator rk45")
+    if getattr(n, "temporal_reconstruction", "linear") != "linear":
+        bad.append("numerics.temporal_reconstruction")
+    if n.diffusion.enabled and n.diffusion.scheme != "uniform":
+        bad.append(f"diffusion scheme {n.diffusion.scheme!r}")
+    if config.mode.Fdrift3D and n.diffusion.enabled:
+        bad.append("diffusion in 3-D")
+    if getattr(n.beaching, "enabled", False):
+        bad.append("beaching")
+    if config.mode.Fdrift3D and getattr(n, "elem_search", "local") == "walk":
+        bad.append("elem_search 'walk' in 3-D")
+    if bad:
+        raise NotImplementedError(
+            "numerics.uv_interp 'nemo_cgrid' (exact C-grid) does not support: "
+            + ", ".join(bad))
+
+
 # --- u/v interpolation x layout compatibility (spec 2026-06-06) ---
 def _validate_uv_compat(uv_layout: str, uv_interp: str,
                         uv_vertical_option: str = "layer", *,
@@ -938,6 +974,11 @@ def _validate_uv_compat(uv_layout: str, uv_interp: str,
     u/v on a z-level ``mesh`` (when given) need the element bottoms and no
     ice-shelf cavities (:func:`_check_linear_element_mesh`; a sigma mesh
     needs neither)."""
+    if (uv_layout == "nemo_cgrid") != (uv_interp == "nemo_cgrid"):
+        raise ValueError(
+            "numerics.uv_interp 'nemo_cgrid' and the C-grid face layout go "
+            f"together (NEMO with mesh.nemo_grid: cgrid); got uv_layout="
+            f"{uv_layout!r}, uv_interp={uv_interp!r}.")
     if uv_layout == "node" and uv_interp in ("leastsq", "edge_leastsq"):
         raise ValueError(
             "node-based velocities (uv_layout='node', e.g. FESOM2 "
@@ -2082,7 +2123,7 @@ def run_single_realization(
         writer.set_global_attr("temporal_interp", int(bool(temporal_interp)))
         writer.set_global_attr("temporal_reconstruction", str(
             getattr(numerics, "temporal_reconstruction", "linear")))
-        if getattr(mode, "Fdrift3D", False):
+        if getattr(mode, "Fdrift3D", False) and numerics.uv_interp != "nemo_cgrid":   # nemo_cgrid: W is recomputed
             writer.set_global_attr("w_interp", str(
                 getattr(numerics, "w_interp", "leastsq")))
             writer.set_global_attr("w_positive", str(
@@ -2245,7 +2286,9 @@ def run_single_realization(
             next_idx_raw = file_idx + direction
             have_next = False
             if file_times is not None:
-                if on_exhausted == "cycle":
+                if on_exhausted == "cycle" and n_time_total > 1:
+                    # (one cycled record is steady: no next snapshot, so no
+                    # "dt exceeds dt_to_next" downgrade warning every run)
                     next_idx = next_idx_raw % n_time_total
                     have_next = True
                 elif 0 <= next_idx_raw < n_time_total:
@@ -3090,6 +3133,12 @@ def run_tracking(
             suggestion = "mean"
             hint = ("healpix products are typically daily means stamped at "
                     "the END of the averaging window (ng5 convention)")
+        elif "nemo" in mesh_type:
+            suggestion = "instant"
+            hint = ("NEMO (XIOS) stamps a mean at the CENTRE of its averaging "
+                    "window, which needs no midpoint shift")
+            stamp_hint = (" To say so explicitly, set data.time_stamp: centre "
+                          "and data.time_window.")
         else:
             suggestion = "instant"
             hint = "FESOM-C typically writes instantaneous snapshots"
@@ -3373,7 +3422,7 @@ def run_tracking(
             if attrs:
                 sample_var_attrs[name] = attrs
         print(f"  Sampling:          {', '.join(user_sample_vars)} "
-              f"(method={sample_interp})")
+              f"(method={'cell value' if config.numerics.uv_interp == 'nemo_cgrid' else sample_interp})")
 
     # -- uv_interp x uv_layout fail-fast (pre-writer; spec 2026-06-06) --
     # The probe is metadata-only (dims/sizes).  Readers without it keep
@@ -3387,6 +3436,13 @@ def run_tracking(
                             uv_vertical_option=_uv_vertical_option(
                                 config.mode),
                             mesh=mesh)
+    if config.numerics.uv_interp == "nemo_cgrid":
+        _refuse_nemo_cgrid_unsupported(config)
+    if (config.mesh.type == "nemo" and config.mode.Fdrift3D
+            and getattr(config.mesh, "nemo_grid", "tpoint") != "cgrid"):
+        raise NotImplementedError(
+            "the NEMO reader is 3-D only with mesh.nemo_grid: cgrid; set "
+            "mode.Fdrift3D: false for the T-point path.")
     if config.numerics.uv_interp != "leastsq":
         print(f"  uv_interp:         {config.numerics.uv_interp}")
     if (getattr(mesh, "metadata", None)
@@ -3622,7 +3678,10 @@ def run_tracking(
                 **_time_metadata(config, str(time_avg)),
                 "kelp_version": _kelp_version(),
             }
-            if getattr(config.mode, "Fdrift3D", False):
+            if getattr(mesh, "_nemo_cgrid_layout", None) is not None:
+                meta["nemo_cgrid_layout"] = mesh._nemo_cgrid_layout.label()    # incl. the open edges
+                meta["nemo_partial_cells"] = mesh._nemo_cgrid_partial
+            if getattr(config.mode, "Fdrift3D", False) and config.numerics.uv_interp != "nemo_cgrid":
                 meta["w_interp"] = str(config.numerics.w_interp)
                 # the file-side W convention and the 2026-09-23 reader
                 # contract (readers convert producer W to the internal
@@ -3688,7 +3747,7 @@ def run_tracking(
                 _pw = getattr(config.numerics, _pn, None)
                 if _pw is not None:
                     meta[_pn] = [float(_pw[0]), float(_pw[1])]
-            if user_sample_vars:
+            if user_sample_vars and config.numerics.uv_interp != "nemo_cgrid":   # nemo_cgrid: cell values
                 meta["sample_interp"] = sample_interp
             if config.numerics.uv_interp != "leastsq":
                 meta["uv_interp"] = config.numerics.uv_interp

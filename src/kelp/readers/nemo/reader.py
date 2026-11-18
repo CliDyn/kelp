@@ -1,0 +1,784 @@
+"""NEMO reader (``mesh.type: nemo``): ``@register("nemo")``.
+
+Two paths, chosen by ``mesh.nemo_grid``:
+
+- ``cgrid``: the exact Arakawa C-grid path (user page ``docs/nemo.md``).  The
+  mesh is built on the model's own staggering (F-point nodes, wet T-cell
+  elements, one dry ring; :mod:`._mesh`) from the canonical form of every
+  raster (:mod:`._layout`: E-W seam, T- and F-point-pivot north fold, with or
+  without the halo); u/v stay on the faces (``uv_layout="nemo_cgrid"``,
+  interpolated by :mod:`kelp.numerics.nemo_cgrid`).  2-D, and 3-D on z-levels
+  with partial bottom cells, W from continuity (:mod:`._vertical`).
+  ``mesh.rotation`` is supported.
+- ``tpoint`` (default): 2-D, grids whose axes are aligned with east / north
+  only (a grid whose axes deviate > 2 deg is refused).  The mesh is the
+  generic T-point quad mesh of :mod:`kelp.readers.structured`; u/v are
+  averaged from the faces to the T-points (node layout, the run needs
+  ``numerics.uv_interp: barycentric``).  Scalars (temp/salt/ssh) are already at
+  T-points.
+
+File layout: NEMO splits output by C-grid point into ``*_grid_T.nc`` (temp/salt/
+ssh), ``*_grid_U.nc`` (u), ``*_grid_V.nc`` (v), ``*_grid_W.nc`` (w).  Point
+``data.ncinput`` at the **grid_T** file; the grid_U/grid_V siblings are derived by
+swapping the ``grid_T`` token in the basename (override with
+``data.ncinput_u`` / ``data.ncinput_v``).  ``grid_W`` is never read: in 3-D, W is
+recomputed from the u/v fluxes (``data.ncinput_w`` / ``open_dataset``'s
+``w_path`` are refused).  The land-sea mask + coordinates come from
+``mesh.meshpath`` (``mesh_mask.nc`` / ``domain_cfg.nc``); the T-point path falls
+back to the grid_T file's ``nav_lon``/``nav_lat`` with an all-wet mask.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional, Sequence
+
+import numpy as np
+import xarray as xr
+
+from ...core.io import VelocityField
+from ...core.mesh import Mesh
+from .. import register, _detect_engine
+from ..structured import build_structured_mesh, c_grid_to_t, field_to_nodes
+from ._layout import _read_layout_flags, detect_nemo_cgrid_layout, nemo_cgrid_to_canonical
+from ._mesh import build_nemo_cgrid_mesh
+from ._vertical import (_check_zps_rule, _refuse_unsupported_vertical, nemo_cgrid_thickness,
+                        nemo_cgrid_w_from_continuity)
+
+
+# Variable-name aliases (NEMO output naming varies by config / XIOS field defs).
+_U_ALIASES = ("uo", "vozocrtx", "uos", "u", "ubar")
+_V_ALIASES = ("vo", "vomecrty", "vos", "v", "vbar")
+_W_ALIASES = ("wo", "vovecrtz", "w")
+_SSH_ALIASES = ("ssh", "zos", "sossheig", "sshn")
+_LON_ALIASES = ("nav_lon", "glamt", "longitude", "lon")
+_LAT_ALIASES = ("nav_lat", "gphit", "latitude", "lat")
+_TMASK_ALIASES = ("tmask", "tmaskutil", "mask")
+
+
+def _engine(path):
+    return _detect_engine(str(path))
+
+
+_CALENDAR_ALIASES = {"360d": "360_day", "365d": "noleap", "366d": "all_leap"}
+
+
+def _expand(spec) -> list:
+    """One grid's files: a list/tuple as given, a string with glob characters
+    expanded (sorted; no match refuses), else the one path."""
+    if isinstance(spec, (list, tuple)):
+        files = [str(f) for f in spec]
+    elif any(c in str(spec) for c in "*?["):
+        import glob
+        files = sorted(glob.glob(str(spec)))
+        if not files:
+            raise FileNotFoundError(f"NEMO reader: no file matches {str(spec)!r}")
+    else:
+        files = [str(spec)]
+    if not files:
+        raise FileNotFoundError("NEMO reader: an empty file list")
+    return files
+
+
+def _open_nemo(spec) -> xr.Dataset:
+    """Open one grid's file(s); ``xr.open_dataset`` that accepts NEMO/XIOS
+    calendar spellings (``360d`` -> ``360_day``, ``365d`` -> ``noleap``,
+    ``366d`` -> ``all_leap``), which cftime rejects.  Several files (a list or
+    a glob) are joined along time with ``open_mfdataset`` (lazy, one chunk per
+    file) and must be in strictly increasing time order.  A single file
+    without such an alias opens as one dataset."""
+    files = _expand(spec)
+    eng = _engine(files[0])
+
+    def decode(raw):
+        fix = {n: _CALENDAR_ALIASES[str(v.attrs["calendar"]).lower()]
+               for n, v in raw.variables.items()
+               if str(v.attrs.get("calendar", "")).lower() in _CALENDAR_ALIASES}
+        for n, cal in fix.items():
+            raw[n].attrs["calendar"] = cal
+        return xr.decode_cf(raw), bool(fix)
+
+    if len(files) == 1:
+        raw = xr.open_dataset(files[0], engine=eng, decode_times=False)
+        ds, fixed = decode(raw)
+        if not fixed:
+            raw.close()
+            return xr.open_dataset(files[0], engine=eng)
+        ds.set_close(raw.close)               # closing the dataset closes the raw handle
+        return ds
+    with xr.open_dataset(files[0], engine=eng, decode_times=False) as first:
+        tname = next((d for d in first.dims if d.lower().startswith("time")), None)
+    if tname is None:
+        raise ValueError(f"NEMO reader: several files need a time dimension "
+                         f"to be joined along; {files[0]!r} has none")
+    # every file is decoded on its own (each carries its own time epoch)
+    ds = xr.open_mfdataset(files, engine=eng, decode_times=False, combine="nested",
+                           concat_dim=tname, data_vars="minimal", coords="minimal",
+                           compat="override", chunks={},
+                           preprocess=lambda d: decode(d)[0])
+    if tname in ds.indexes:
+        ix = ds.indexes[tname]
+        if not (ix.is_monotonic_increasing and ix.is_unique):
+            ds.close()
+            raise ValueError(
+                f"NEMO reader: the time axis of {len(files)} files (first "
+                f"{files[0]!r}) is not strictly increasing: overlapping, repeated "
+                "or out-of-order files")
+    return ds
+
+
+def _first(ds, aliases: Sequence[str], cfg_name: Optional[str] = None):
+    """Return the variable name to use: an explicit ``cfg_name`` override if set,
+    else the first present alias (``None`` if no alias matches).
+
+    An explicit override is a REQUIREMENT, not a preference: if ``cfg_name`` is
+    set but absent from the dataset it raises ``KeyError`` rather than silently
+    falling back to an alias (a typoed ``var_u`` must not quietly read a
+    different velocity product).
+    """
+    if cfg_name:
+        if cfg_name in ds.variables:
+            return cfg_name
+        raise KeyError(
+            f"NEMO reader: configured variable {cfg_name!r} not found in the "
+            f"dataset (present: {list(ds.variables)[:12]}…).")
+    for nm in aliases:
+        if nm and nm in ds.variables:
+            return nm
+    return None
+
+
+def _time_values(ds):
+    """Return a NEMO dataset's time-coordinate values (``None`` if it has none)."""
+    tn = next((d for d in ds.dims if d.lower().startswith("time")), None)
+    if tn is not None and tn in ds.variables:
+        return ds[tn].to_numpy()
+    return None
+
+
+def _time_len(ds):
+    """Return the length of a NEMO dataset's time dimension (``None`` if none)."""
+    tn = next((d for d in ds.dims if d.lower().startswith("time")), None)
+    return int(ds.sizes[tn]) if tn is not None else None
+
+
+def _squeeze_to_2d(arr: np.ndarray) -> np.ndarray:
+    """Drop singleton leading axes (time/depth) to get a (y, x) field."""
+    a = np.asarray(arr)
+    while a.ndim > 2 and a.shape[0] == 1:
+        a = a[0]
+    if a.ndim != 2:
+        raise ValueError(
+            f"expected a 2-D (y, x) field after squeezing, got shape {a.shape}")
+    return a
+
+
+def _surface_2d(da: xr.DataArray) -> np.ndarray:
+    """Select the surface level + squeeze a NEMO field to (y, x).
+
+    Picks index 0 of any vertical dim (deptht/depthu/depthv/z/nav_lev/...).
+    """
+    for d in da.dims:
+        dl = d.lower()
+        if dl.startswith("depth") or dl in ("z", "nav_lev", "lev", "deptht"):
+            da = da.isel({d: 0})
+    return _squeeze_to_2d(da.values)
+
+
+def _read_raster(da, layout, kind, name, *, vector=False, check=False, surface=False,
+                 face_levels=None):
+    """The ONLY way the nemo_cgrid path reads a raster: ``da`` (a DataArray or array,
+    trailing dims the raw ``(ny, nx)`` of ``layout``; ``surface`` takes the
+    surface level of a depth dimension) -> its canonical float64 form
+    (:func:`nemo_cgrid_to_canonical`), so no raw halo / fold array ever meets a
+    canonical-shape one.  ``kind`` is the C-grid point (``"T"``, ``"U"``,
+    ``"V"``), ``vector`` only for u and v.  ``check=True`` REFUSES when a halo /
+    fold copy of the raw raster differs from its canonical point: used for
+    every raster that defines the flux (u, v of every record, tmask, e1t / e2t,
+    e2u / e1v, e3t_0 / e3u_0 / e3v_0).  The T / S samples, bathymetry
+    and the file's ``e3t`` are canonicalised silently (their stale copies
+    -- ``bathy_metry`` on the fold row, eddy-induced velocities -- are real)."""
+    a = _surface_2d(da) if surface else np.asarray(da)
+    a = nemo_cgrid_to_canonical(a, layout, kind, vector=vector, check=check, name=name)
+    if face_levels is not None:
+        # u / v live on faces: zero wherever the face mask (derived from tmask,
+        # not from what the file holds on land faces) says land
+        a = np.where(np.arange(a.shape[0])[:, None, None] < face_levels, a, 0.0) \
+            if a.ndim == 3 else np.where(face_levels > 0, a, 0.0)
+    return a
+
+
+def _max_axis_misalignment_deg(lon2d: np.ndarray, lat2d: np.ndarray) -> float:
+    """Max deviation (deg) of the grid i-axis from EAST and j-axis from NORTH.
+
+    NEMO ``grid_U``/``grid_V`` velocities are along the local grid axes.  v1
+    treats them as geographic east/north, which is only valid when the grid is
+    locally aligned with E/N (regular lat/lon, or pre-rotated output).  A skewed
+    / curvilinear (e.g. ORCA) grid needs vector rotation (a staged follow-up);
+    this metric drives the fail-fast.
+    """
+    def _dev(dlon, dlat, latmid, want_east):
+        e = ((dlon + 180.0) % 360.0 - 180.0) * np.cos(np.deg2rad(latmid))
+        n = dlat
+        # SIGNED angle of the axis vector from the wanted geographic direction,
+        # then |.|: an axis that points the WRONG WAY (i decreasing east -> west,
+        # or j decreasing north -> south) reads ~180deg and is rejected. Using
+        # abs(e)/abs(n) here would fold west onto east / south onto north and
+        # silently flip the sign of the grid-relative u/v we read as east/north.
+        ang = (np.degrees(np.arctan2(n, e)) if want_east           # from EAST
+               else np.degrees(np.arctan2(e, n)))                  # from NORTH
+        ang = np.abs(ang)
+        return float(np.nanmax(ang)) if ang.size else 0.0
+
+    # i-axis (along x): should point east
+    di_lat = 0.5 * (lat2d[:, :-1] + lat2d[:, 1:])
+    dev_i = _dev(np.diff(lon2d, axis=1), np.diff(lat2d, axis=1), di_lat, True)
+    # j-axis (along y): should point north
+    dj_lat = 0.5 * (lat2d[:-1, :] + lat2d[1:, :])
+    dev_j = _dev(np.diff(lon2d, axis=0), np.diff(lat2d, axis=0), dj_lat, False)
+    return max(dev_i, dev_j)
+
+
+_ALIGN_TOL_DEG = 2.0
+
+
+def _sibling(path: str, letter: str) -> Optional[str]:
+    """Derive a NEMO grid sibling by swapping the grid_X token in the FILENAME.
+
+    Only the basename is rewritten — never directory components, so a parent
+    directory like ``grid_T_run/`` is left untouched (a whole-path replace would
+    point ``data/grid_T_run/EXP_grid_T.nc`` at a different directory).
+    """
+    p = Path(str(path))
+    name = p.name
+    for src in ("grid_T", "grid_U", "grid_V", "grid_W",
+                "gridT", "gridU", "gridV", "gridW"):
+        if src in name:
+            tgt = src[:-1] + letter
+            cand = str(p.with_name(name.replace(src, tgt, 1)))
+            if cand != str(p) and Path(cand).exists():
+                return cand
+    return None
+
+def _siblings(files, letter):
+    """The grid_<letter> file of every grid_T file (``None`` when one is missing)."""
+    out = [_sibling(f, letter) for f in files]
+    return None if None in out else out
+
+
+def _rename_tz_da(da):
+    """``da`` with its time and depth dimensions renamed ``time`` / ``z``."""
+    ren = {}
+    for d in da.dims:
+        dl = d.lower()
+        if dl.startswith("time"):
+            ren[d] = "time"
+        elif dl.startswith("depth") or dl in ("nav_lev", "lev", "z"):
+            ren[d] = "z"
+    return da.rename(ren) if ren else da
+
+
+def _grid_point(da) -> str:
+    """C-grid point of a field from its dimension / coordinate names
+    (``depthu``, ``nav_lon_grid_U``, ...); ``"T"`` when nothing says otherwise."""
+    import re
+    names = [str(n).lower() for n in (*da.dims, *da.coords)]
+    names += [str(da.attrs.get("coordinates", "")).lower()]
+    for n in names:
+        m = re.search(r"depth([uvwf])\b|grid_([uvwf])\b|_([uvwf])_(?:lon|lat)", n)
+        if m:
+            return next(g for g in m.groups() if g).upper()
+    return "T"
+
+
+def _refuse_unsupported_mode(mode_cfg, where):
+    """Fail fast on mode settings the T-point path cannot honour."""
+    if mode_cfg is None:
+        return
+    if getattr(mode_cfg, "sigma_mean", False):
+        raise NotImplementedError(
+            "the NEMO T-point path tracks the surface level only; "
+            "mode.sigma_mean (a vertical mean) is not supported "
+            "(3-D: mesh.nemo_grid: cgrid with mode.Fdrift3D).")
+    layer = getattr(mode_cfg, "sigma_layer", None)
+    if layer not in (None, 0):
+        # _surface_2d always takes index 0 of every depth dimension.
+        raise NotImplementedError(
+            "the NEMO T-point path tracks the surface level only; "
+            f"mode.sigma_layer = {layer!r} is not supported (use 0 or null; "
+            "3-D: mesh.nemo_grid: cgrid with mode.Fdrift3D).")
+
+
+@register("nemo")
+class NemoReader:
+    """Reader for NEMO output: the exact C-grid path and the T-point path."""
+
+    @staticmethod
+    def load_mesh(mesh_cfg) -> Mesh:
+        if (getattr(mesh_cfg, "rotation", None) is not None
+                and getattr(mesh_cfg, "nemo_grid", "tpoint") != "cgrid"):
+            # The T-point path has no vector-rotation of its averaged u/v
+            # (mirrors FESOM-C); the nemo_cgrid path needs none (its u/v come from
+            # the cell geometry in the mesh frame).
+            raise ValueError(
+                "mesh.rotation is not supported by the NEMO reader with "
+                "mesh.nemo_grid: tpoint (no vector-rotation path); use "
+                "rotation: null, or mesh.nemo_grid: cgrid.")
+        path = str(mesh_cfg.meshpath)
+        ds = _open_nemo(path)
+        try:
+            if getattr(mesh_cfg, "nemo_grid", "tpoint") == "cgrid":
+                return NemoReader._load_nemo_cgrid_mesh(ds, path, mesh_cfg)
+            lon_n = _first(ds, _LON_ALIASES)
+            lat_n = _first(ds, _LAT_ALIASES)
+            if lon_n is None or lat_n is None:
+                raise KeyError(
+                    f"NEMO mesh {path!r} must contain nav_lon/nav_lat "
+                    f"(or glamt/gphit). Found: {list(ds.variables)[:12]}…")
+            lon2d = _squeeze_to_2d(ds[lon_n].values)
+            lat2d = _squeeze_to_2d(ds[lat_n].values)
+            # Fail-fast: u/v are taken as geographic east/north, valid only on
+            # a grid whose axes align with E/N. A curvilinear / rotated grid
+            # (e.g. global ORCA) needs vector rotation, which the C-grid path avoids.
+            mis = _max_axis_misalignment_deg(lon2d, lat2d)
+            if mis > _ALIGN_TOL_DEG:
+                raise NotImplementedError(
+                    f"NEMO T-point path: the grid axes deviate {mis:.1f}° from "
+                    f"geographic east/north (> {_ALIGN_TOL_DEG}°), so its "
+                    "grid-relative u/v cannot be used as east/north without "
+                    "vector rotation. The T-point path supports "
+                    "geographic-aligned grids (regular lat/lon or pre-rotated "
+                    "output) only; use mesh.nemo_grid: cgrid for this grid.")
+            tmask_n = _first(ds, _TMASK_ALIASES)
+            if tmask_n is not None:
+                wet = _surface_2d(ds[tmask_n]) > 0.5
+            else:
+                wet = np.ones(lon2d.shape, dtype=bool)
+            depth2d = None
+            for dn in ("hdept", "hdepw", "bathy_meter", "bathy_metry",
+                       "bathymetry", "Bathymetry"):
+                if dn in ds.variables:
+                    depth2d = _squeeze_to_2d(ds[dn].values)
+                    break
+            r_earth = getattr(mesh_cfg, "r_earth", None)
+            mesh = build_structured_mesh(
+                lon2d, lat2d, wet, depth2d=depth2d, name="nemo", r_earth=r_earth)
+        finally:
+            ds.close()
+        return mesh
+
+    @staticmethod
+    def _load_nemo_cgrid_mesh(ds, path, mesh_cfg) -> Mesh:
+        """Exact C-grid mesh (``mesh.nemo_grid: cgrid``): F-point cells from
+        glamf/gphif + tmask.  No axis-alignment gate: the C-grid interpolator
+        works in index space and returns geographic u/v itself."""
+        try:
+            glamf, gphif = _squeeze_to_2d(ds["glamf"].values), _squeeze_to_2d(ds["gphif"].values)
+        except KeyError:
+            raise KeyError(
+                f"mesh.nemo_grid: cgrid needs glamf/gphif (F-point coordinates) "
+                f"in the mesh file {path!r}; found: {list(ds.variables)[:12]}…"
+            ) from None
+        tl = _first(ds, ("glamt", "nav_lon"))
+        tp = _first(ds, ("gphit", "nav_lat"))
+        if tl is None or tp is None:
+            raise KeyError(
+                f"mesh.nemo_grid: cgrid needs the T-point coordinates "
+                f"(glamt/gphit or nav_lon/nav_lat) in {path!r} to classify the "
+                "grid (regional / global ORCA)")
+        layout, notes = detect_nemo_cgrid_layout(
+            _squeeze_to_2d(ds[tl].values), _squeeze_to_2d(ds[tp].values), glamf, gphif,
+            _read_layout_flags(ds))
+        print(f"  NEMO C-grid layout: {layout.label()}")
+        for n in notes:
+            print(f"    note: {n}")
+
+        def rd(nm, kind, check=True):
+            return _read_raster(ds[nm].squeeze(), layout, kind, nm, check=check)
+        glamf = nemo_cgrid_to_canonical(glamf, layout, "F", name="glamf")
+        gphif = nemo_cgrid_to_canonical(gphif, layout, "F", name="gphif")
+        _refuse_unsupported_vertical(ds, path)
+        tmask_n = _first(ds, ("tmask",))
+        if tmask_n is not None:
+            tm3 = rd(tmask_n, "T") > 0.5          # boolean: no float64 3-D copy kept
+        elif all(v in ds.variables for v in ("bottom_level", "top_level", "e3t_1d")):
+            # domain_cfg.nc (NEMO 4.x): no tmask; wet levels 1..bottom_level
+            bot = rd("bottom_level", "T")
+            tm3 = ((np.arange(1, ds["e3t_1d"].size + 1)[:, None, None] <= bot)
+                   & (bot > 0))
+        else:
+            raise KeyError(
+                f"mesh.nemo_grid: cgrid needs tmask (mesh_mask.nc) or top_level, "
+                f"bottom_level and e3t_1d (domain_cfg.nc) in the mesh file {path!r}")
+        wet = tm3[0] if tm3.ndim == 3 else tm3
+        depth2d = None
+        vert = {}
+        zps_refusal = None
+        if tm3.ndim == 3 and all(
+                v in ds.variables for v in ("e3t_1d", "e1t", "e2t")):
+            # 3-D z-levels: interfaces from the 1-D e3t; partial (zps) bottom
+            # cells from e3t_0 (without it: full reference cells)
+            e3 = np.squeeze(ds["e3t_1d"].values).astype(np.float64)
+            zw = np.r_[0.0, np.cumsum(e3)]   # not gdepw_1d: its differences are
+            # up to 1e-3 off e3t_1d, which the model's fluxes use
+            nlev = tm3.sum(0)
+            if not (tm3 == (np.arange(tm3.shape[0])[:, None, None] < nlev)).all():
+                raise ValueError("mesh.nemo_grid: cgrid 3-D: tmask is not a "
+                                 "contiguous wet column from the surface "
+                                 "(ice-shelf cavities are not supported)")
+            e3b = e3u0 = e3v0 = None
+            zps_refusal = None
+            if all(v in ds.variables for v in ("e3t_0", "e3u_0", "e3v_0")):
+                e3t0, e3u0, e3v0 = (rd(v, k) for v, k in
+                                    (("e3t_0", "T"), ("e3u_0", "U"), ("e3v_0", "V")))
+                jj, ii = np.nonzero(nlev > 0)
+                e3b = np.zeros(nlev.shape)
+                e3b[jj, ii] = e3t0[nlev[jj, ii] - 1, jj, ii]
+                above = np.arange(e3.size)[:, None, None] < nlev - 1     # not the bottom cell
+                ref = np.broadcast_to(e3[:, None, None], e3t0.shape)
+                if (np.abs(e3t0 - ref)[above] > 1e-3 * ref[above]).any():
+                    raise NotImplementedError(
+                        f"mesh file {path!r}: e3t_0 differs from e3t_1d above the "
+                        "bottom cell (s-coordinates / terrain-following levels); "
+                        "only z-levels with partial bottom cells (zco / zps) are "
+                        "supported")
+                _check_zps_rule(zw, nlev, e3b, e3u0, e3v0)
+            else:
+                zps = str(ds.attrs.get("VertCoord", "")).strip().lower() == "zps"
+                for src in (ds.attrs, ds.variables):
+                    if "ln_zps" in src:
+                        zps = zps or bool(np.asarray(getattr(src["ln_zps"], "values", src["ln_zps"])).any())
+                if zps:
+                    # only a 3-D run is affected: refused at its first read
+                    zps_refusal = (
+                        f"mesh file {path!r}: the vertical grid has partial steps (zps) but the "
+                        "file lacks e3t_0 / e3u_0 / e3v_0; full reference cells would misplace the "
+                        "floor and the fluxes (use a mesh_mask / domain_cfg that carries them)")
+            for nm in ("e1t", "e2t"):
+                if (np.asarray(ds[nm]) <= 0).any():
+                    raise ValueError(
+                        f"the mesh file's {nm} has non-positive entries: zero-filled "
+                        "tiles (land-processor elimination when it was assembled)? "
+                        "regenerate it without land elimination or use domain_cfg.nc")
+            vert = dict(nlev2d=nlev, zw=zw, e3b=e3b, e3u0=e3u0, e3v0=e3v0,
+                        area=rd("e1t", "T") * rd("e2t", "T"))
+            print(f"  NEMO C-grid 3-D: {tm3.shape[0]} levels, "
+                  + ("partial bottom cells (e3t_0, e3u_0, e3v_0)" if e3b is not None else
+                     "full reference cells (no e3t_0 / e3u_0 / e3v_0 in the mesh file)"))
+        for dn in (() if vert else ("hdept", "hdepw", "bathy_meter", "bathy_metry",
+                                    "bathymetry", "Bathymetry")):
+            if dn in ds.variables:
+                depth2d = rd(dn, "T", check=False)
+                break
+        widths = {}
+        if vert and not ("e2u" in ds.variables and "e1v" in ds.variables):
+            raise KeyError(
+                f"mesh.nemo_grid: cgrid 3-D needs the face widths e2u and e1v in the "
+                f"mesh file {path!r} (mesh_mask.nc / domain_cfg.nc carry them)")
+        if "e2u" in ds.variables and "e1v" in ds.variables:
+            widths = dict(e2u=rd("e2u", "U"), e1v=rd("e1v", "V"))
+            print("  NEMO C-grid: fluxes use the model face widths e2u/e1v")
+        else:
+            print("  NEMO C-grid: e2u/e1v not in the mesh file; fluxes use plane "
+                  "edge lengths (cos at each edge's mean latitude)")
+        from ..fesom2 import POLE_WARN_LAT, _resolve_rotation_angles
+        angles = _resolve_rotation_angles(mesh_cfg)
+        max_lat = float(np.nanmax(np.abs(gphif)))
+        if angles is None and max_lat > POLE_WARN_LAT:
+            import warnings
+            warnings.warn(
+                f"NEMO C-grid mesh reaches |lat| = {max_lat:.2f} deg - the "
+                "lon/lat cell geometry degenerates near the pole (containment "
+                "and the local plane fail there); set mesh.rotation: fesom2.",
+                RuntimeWarning, stacklevel=2)
+        if angles is not None:
+            # Rotate the F-points AS POINTS; the interpolator builds u/v from
+            # the cell geometry, so it returns them in the rotated frame with
+            # no vector rotation (the face values are grid-relative normals;
+            # the widths e2u/e1v are lengths, frame-free).
+            from ...core.rotation import euler_matrix, rotate_lonlat
+            glamf, gphif = rotate_lonlat(glamf, gphif, euler_matrix(*angles))
+            print(f"    rotated frame: alpha/beta/gamma = {tuple(angles)} "
+                  "(pole-safe)")
+        mesh = build_nemo_cgrid_mesh(glamf, gphif, wet, depth2d=depth2d, name="nemo",
+                                layout=layout,
+                                partial_cells=getattr(mesh_cfg, "nemo_partial_cells", "shrunk"),
+                                r_earth=getattr(mesh_cfg, "r_earth", None),
+                                **widths, **vert)
+        mesh.rotation_angles = angles
+        mesh._nemo_cgrid_zps_refusal = zps_refusal
+        return mesh
+
+    @staticmethod
+    def open_dataset(path, v_path=None, w_path=None, mode_cfg=None, u_path=None) -> xr.Dataset:
+        """Assemble grid_T (+ derived/overridden grid_U, grid_V) into
+        ONE dataset with vars u, v, ssh, temp, salt sharing (time, [z],
+        y, x) — so the per-step reader and the prefetch ``isel(time=slice)`` work.
+
+        Every path argument may be a glob or a list: the files of one grid are
+        joined along time.  grid_U/grid_V default to the name-siblings of
+        each grid_T file (the ``grid_T`` token swapped); ``u_path`` / ``v_path``
+        replace that for files without the token.  grid_W is never read and
+        ``w_path`` is refused (W comes from continuity).
+        """
+        _refuse_unsupported_mode(mode_cfg, "open_dataset")
+        if w_path:
+            raise ValueError(
+                "NEMO reader: data.ncinput_w is not used -- W is recomputed from "
+                "the u/v fluxes (continuity); remove it.")
+        t_files = _expand(path)
+        u_files = _expand(u_path) if u_path else _siblings(t_files, "U")
+        v_files = _expand(v_path) if v_path else _siblings(t_files, "V")
+        if u_files is None or v_files is None:
+            raise FileNotFoundError(
+                "NEMO reader: could not locate the grid_U / grid_V files of "
+                f"{path!r}. They must be name-siblings of the grid_T files (the "
+                "'grid_T' token swapped to 'grid_U'), or be given by "
+                "data.ncinput_u / data.ncinput_v.")
+        dsT = _open_nemo(t_files)
+        dsU = _open_nemo(u_files)
+        dsV = _open_nemo(v_files)
+
+        # The merge below takes the time axis from grid_T only and indexes every
+        # variable by the same integer timestep, so grid_U / grid_V MUST share
+        # grid_T's timestamps. A mismatched (e.g. shifted / differently-sampled)
+        # axis would silently pair u(t_i) with ssh(t_j) — fail fast instead.
+        # Three layers: record COUNT (works even with no decodable time coord, so
+        # a cadence mismatch can't slip through); ALL-OR-NONE coordinate presence
+        # (a coord on one side but not the other can't be validated -> refuse,
+        # never graft T's axis onto an unlabelled sibling); exact TIMESTAMP
+        # comparison when both carry a coordinate.
+        nT, tT = _time_len(dsT), _time_values(dsT)
+        for nm, dsX in (("grid_U", dsU), ("grid_V", dsV)):
+            nX = _time_len(dsX)
+            if nT is not None and nX is not None and nX != nT:
+                raise ValueError(
+                    f"NEMO reader: {nm} has {nX} time records but grid_T has "
+                    f"{nT}. U/V/T must be on the same time axis so a timestep "
+                    "index refers to one physical time.")
+            tX = _time_values(dsX)
+            if nX is not None and (tT is None) != (tX is None):
+                raise ValueError(
+                    f"NEMO reader: {nm} and grid_T disagree on whether a time "
+                    "coordinate is present, so their pairing cannot be "
+                    "verified. Write all of grid_T/U/V with a time coordinate "
+                    "(or none of them).")
+            if tT is not None and tX is not None and (
+                    tX.shape != tT.shape or not np.array_equal(tX, tT)):
+                raise ValueError(
+                    f"NEMO reader: {nm} time axis does not match grid_T "
+                    f"({tX.shape} vs {tT.shape}; or differing timestamps). "
+                    "U/V/T must be written on the same time axis so a "
+                    "timestep index refers to one physical time.")
+
+        cfg = mode_cfg
+        u_n = _first(dsU, _U_ALIASES, getattr(cfg, "var_u", None) if cfg else None)
+        v_n = _first(dsV, _V_ALIASES, getattr(cfg, "var_v", None) if cfg else None)
+        if u_n is None or v_n is None:
+            raise KeyError("NEMO reader: u/v variable not found in grid_U/grid_V "
+                           f"(looked for {_U_ALIASES} / {_V_ALIASES}).")
+
+
+        data = {"u": _rename_tz_da(dsU[u_n]), "v": _rename_tz_da(dsV[v_n])}
+        ssh_n = _first(dsT, _SSH_ALIASES, getattr(cfg, "var_eta", None) if cfg else None)
+        if ssh_n is not None:
+            data["ssh"] = _rename_tz_da(dsT[ssh_n])
+        # carry sampled T-point scalars (temp/salt/any) through under their names.
+        # A missing/typoed sample_var is dropped silently HERE but caught at the
+        # run_tracking startup probe (read_scalar_fields raises ValueError on an
+        # absent var before any I/O), so it is never a silent wrong answer.
+        for nm in (getattr(cfg, "sample_vars", None) or []):
+            for ds_x, g in ((dsT, "T"), (dsU, "U"), (dsV, "V")):
+                if nm in ds_x.variables:
+                    pt = _grid_point(ds_x[nm])
+                    if g != "T" or pt != "T":
+                        raise ValueError(
+                            f"NEMO reader: sample_vars {nm!r} lives on the "
+                            f"{pt if g == 'T' else g}-points; only T-point fields "
+                            "(grid_T: temperature, salinity, ...) can be sampled")
+                    data[nm] = _rename_tz_da(dsT[nm])
+                    break
+
+        merged = xr.Dataset({k: v.variable for k, v in data.items()})
+        if getattr(cfg, "Fdrift3D", False) and "e3t" in dsT.variables:
+            merged.attrs["nemo_t_files"] = t_files     # prepare() reads e3t from them (z*/vvl check)
+        # Preserve a usable time axis (``.variable`` dropped coords) so dt
+        # auto-detect / temporal_interp work, mirroring the other readers.
+        tname = next((d for d in dsT.dims if d.lower().startswith("time")), None)
+        if tname is not None and tname in dsT.variables:
+            # keep attrs and encoding: the output's time:calendar comes from
+            # them (bare values made a 'gregorian' axis 'proleptic_gregorian')
+            tv = dsT[tname].variable
+            merged = merged.assign_coords(time=xr.Variable(
+                ("time",), tv.values, tv.attrs, tv.encoding))
+        elif "time" in merged.dims and "time" not in merged.coords:
+            # No decodable time coordinate anywhere: still give the merged "time"
+            # dim an integer coordinate so ds["time"] exists downstream
+            # (extract_time_info treats a plain arange as "no real time" ->
+            # the run must set numerics.dt explicitly), instead of leaving a
+            # bare dim that KeyErrors in extract_time_info / the writer.
+            merged = merged.assign_coords(
+                time=np.arange(merged.sizes["time"], dtype=np.int64))
+        return merged
+
+    @staticmethod
+    def probe_uv_layout(ds, mode_cfg=None, mesh=None) -> str:
+        # NEMO u/v are averaged onto T-points -> node layout (needs barycentric),
+        # or kept on the faces for the exact C-grid scheme (mesh.nemo_grid: cgrid).
+        # Surfacing it here lets run_tracking fail fast BEFORE creating a writer.
+        if mesh is not None and getattr(mesh, "_nemo_cgrid", False):
+            return "nemo_cgrid"
+        return "node"
+
+    @staticmethod
+    def read_velocities(ds, timestep, mesh, mode_cfg=None, diffusion=None,
+                        sample_vars=None, velocity_float32=False) -> VelocityField:
+        _refuse_unsupported_mode(mode_cfg, "read_velocities")
+        # em/m1 spatial diffusion would need Kh fields read onto T-points (node
+        # layout); not wired yet -> fail fast (uniform diffusion works: its Kh is
+        # a config scalar, not read from the dataset).
+        if (diffusion is not None
+                and getattr(diffusion, "enabled", False)
+                and getattr(diffusion, "scheme", "uniform") in ("em", "m1")):
+            raise NotImplementedError(
+                "NEMO T-point path: only uniform diffusion is supported "
+                "(em/m1 read spatial Kh fields, not yet mapped to T-points).")
+        vd = np.float32 if velocity_float32 else np.float64
+        if getattr(mesh, "_nemo_cgrid", False):
+            lay = mesh._nemo_cgrid_layout
+            scal = (NemoReader.read_scalar_fields(ds, timestep, mesh, sample_vars,
+                                                  mode_cfg) if sample_vars else None)
+            if getattr(mode_cfg, "Fdrift3D", False):
+                return NemoReader._read_nemo_cgrid_3d(ds, timestep, mesh, vd, scal)
+            faces = [_read_raster(ds[nm].isel(time=timestep), lay, k, nm, vector=True,
+                                  check=True, surface=True,
+                                  face_levels=mesh._nemo_cgrid_face_levels[k]).reshape(-1).astype(vd, copy=False)
+                     for nm, k in (("u", "U"), ("v", "V"))]
+            return VelocityField(
+                u=faces[0], v=faces[1], eta=np.zeros(mesh.n_nodes), w=None,
+                uv_layout="nemo_cgrid", scalars=scal)
+        if getattr(mode_cfg, "Fdrift3D", False):
+            raise NotImplementedError(
+                "NEMO reader: mode.Fdrift3D needs mesh.nemo_grid: cgrid; the T-point "
+                "path is 2-D only. Use mesh.nemo_grid: cgrid or mode.Fdrift3D: false.")
+        node_id = mesh._structured_node_id
+
+        u2d = _surface_2d(ds["u"].isel(time=timestep))
+        v2d = _surface_2d(ds["v"].isel(time=timestep))
+        u_t, v_t = c_grid_to_t(u2d, v2d, node_id)   # node-indexed, float64
+
+        eta = np.zeros(mesh.n_nodes, dtype=np.float64)
+        if "ssh" in ds.variables:
+            eta = field_to_nodes(
+                _squeeze_to_2d(ds["ssh"].isel(time=timestep).values), node_id)
+            # A wet T-node should carry valid ssh; guard against a grid_T mask
+            # that disagrees with tmask (masked/NaN ssh at a wet node) poisoning
+            # eta and, with beaching use_eta, the drying logic.
+            eta = np.nan_to_num(eta, nan=0.0, posinf=0.0, neginf=0.0)
+
+        scalars = None
+        if sample_vars:
+            scalars = NemoReader.read_scalar_fields(
+                ds, timestep, mesh, sample_vars, mode_cfg)
+
+        return VelocityField(
+            u=u_t.astype(vd, copy=False), v=v_t.astype(vd, copy=False),
+            eta=eta, w=None, uv_layout="node", scalars=scalars)
+
+    @staticmethod
+    def prepare(mesh, ds) -> None:
+        """z*/vvl check (3-D nemo_cgrid only; changes nothing): when ``grid_T`` carries
+        ``e3t`` (read here from the files ``open_dataset`` recorded, never merged
+        into the run's fields), warn if records 0 / last deviate from the
+        reference thickness.  Fixed reference thicknesses (``e3*_0``) are
+        used either way, so z* transports are off by about eta/H."""
+        if not (getattr(mesh, "_nemo_cgrid", False) and mesh._nemo_cgrid_zw.size
+                and "nemo_t_files" in ds.attrs):
+            return
+        ny, nx = mesh._structured_shape
+        nlev = mesh._nemo_cgrid_nlev_raster
+        ref = nemo_cgrid_thickness(mesh._nemo_cgrid_zw, np.where(nlev > 0, nlev - 1, -1),
+                              mesh._nemo_cgrid_e3b.reshape(ny, nx))
+        wet = np.arange(ref.shape[0])[:, None, None] < nlev
+        raw = _open_nemo(ds.attrs["nemo_t_files"])
+        try:
+            e3t = _rename_tz_da(raw["e3t"])
+            dev = max(float(np.nanmax(np.abs(_read_raster(e3t.isel(time=r), mesh._nemo_cgrid_layout,
+                                                          "T", "e3t") - ref)[wet] / ref[wet]))
+                      for r in (0, e3t.sizes["time"] - 1))
+        finally:
+            raw.close()
+        if dev > 1e-4:
+            import warnings
+            warnings.warn(
+                f"NEMO C-grid 3-D: the file's e3t differs from the reference "
+                f"e3t_0 by up to {dev:.1%} (records 0 and last): z*/vvl "
+                "detected. Fixed reference thicknesses (e3*_0) are used, so "
+                "the transports are off by about eta/H (z* is not supported "
+                "yet).", RuntimeWarning, stacklevel=2)
+
+    @staticmethod
+    def _read_nemo_cgrid_3d(ds, timestep, mesh, vd, scalars):
+        """3-D faces of one record on the partial-step cells, plus the W
+        that makes them non-divergent up to float32 rounding (``nemo_cgrid_w_from_continuity``)."""
+        if getattr(mesh, "_nemo_cgrid_zps_refusal", None):
+            raise ValueError(mesh._nemo_cgrid_zps_refusal)
+        ny, nx = mesh._structured_shape
+        zw = mesh._nemo_cgrid_zw
+        if zw.size == 0:
+            raise ValueError("mode.Fdrift3D with mesh.nemo_grid: cgrid needs a "
+                             "3-D mesh_mask (3-D tmask, e3t_1d, e1t, e2t)")
+        lay = mesh._nemo_cgrid_layout
+        uv = []
+        for nm, k in (("u", "U"), ("v", "V")):
+            a = _read_raster(ds[nm].isel(time=timestep), lay, k, nm, vector=True, check=True,
+                             face_levels=mesh._nemo_cgrid_face_levels[k])
+            if a.shape != (zw.size - 1, ny, nx):
+                raise ValueError(f"NEMO {nm} shape {a.shape} != (K, ny, nx) "
+                                 f"{(zw.size - 1, ny, nx)}")
+            uv.append(a.astype(vd).astype(np.float64))   # w consistent with stored u/v
+        e2u, e1v = (m.reshape(ny, nx) for m in (mesh._nemo_cgrid_e2u, mesh._nemo_cgrid_e1v))
+        e3u, e3v = (nemo_cgrid_thickness(zw, getattr(mesh, f"_nemo_cgrid_kb{n}").reshape(ny, nx),
+                                    getattr(mesh, f"_nemo_cgrid_e3{n}").reshape(ny, nx))
+                    for n in ("u", "v"))
+        w = nemo_cgrid_w_from_continuity(uv[0], uv[1], e2u, e1v, e3u, e3v,
+                                    mesh._nemo_cgrid_area.reshape(ny, nx),
+                                    mesh._nemo_cgrid_nlev_raster)
+        return VelocityField(
+            u=uv[0].reshape(uv[0].shape[0], -1).astype(vd),
+            v=uv[1].reshape(uv[1].shape[0], -1).astype(vd),
+            w=w.reshape(w.shape[0], -1).astype(vd), eta=np.zeros(mesh.n_nodes),
+            uv_layout="nemo_cgrid", scalars=scalars)
+
+    @staticmethod
+    def read_scalar_fields(ds, timestep, mesh, varnames, mode_cfg=None) -> dict:
+        _refuse_unsupported_mode(mode_cfg, "read_scalar_fields")
+        if getattr(mesh, "_nemo_cgrid", False):
+            # T-cell values on the raster (land -> NaN: the files carry 0.0
+            # there), flattened (ny*nx,) / (K, ny*nx) for sample_field_nemo_cgrid
+            ny, nx = mesh._structured_shape
+            out = {}
+            for nm in varnames:
+                if nm not in ds.variables:
+                    raise ValueError(f"NEMO reader: sampled variable {nm!r} not "
+                                     "in the dataset (grid_T, mode.sample_vars).")
+                three = getattr(mode_cfg, "Fdrift3D", False)
+                a = _read_raster(ds[nm].isel(time=timestep), mesh._nemo_cgrid_layout, "T", nm,
+                                 surface=not three)
+                if three:
+                    nl = mesh._nemo_cgrid_nlev_raster
+                    a = np.where(np.arange(a.shape[0])[:, None, None] < nl, a, np.nan)
+                    out[nm] = a.reshape(a.shape[0], -1)
+                else:
+                    out[nm] = np.where(mesh._nemo_cgrid_nlev_raster > 0, a, np.nan).reshape(-1)
+            return out
+        node_id = mesh._structured_node_id
+        out = {}
+        for nm in varnames:
+            if nm not in ds.variables:
+                raise ValueError(
+                    f"NEMO reader: sampled variable {nm!r} not in the dataset "
+                    "(it must be a T-point field in grid_T and listed in "
+                    "mode.sample_vars at open_dataset time).")
+            f2d = _surface_2d(ds[nm].isel(time=timestep))
+            out[nm] = field_to_nodes(f2d, node_id)
+        return out
