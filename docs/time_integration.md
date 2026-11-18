@@ -203,14 +203,20 @@ between snapshots, the end of the range) it **downgrades** that step to steady
 mode (every stage reuses the start field) and emits one `RuntimeWarning` per
 realization rather than extrapolating beyond the bracket. The comparison
 allows for the roundoff of the run clock: with a `dt` that is not a whole
-number of seconds, `sim_time` carries a few ulp of error, so a step meant to
-end on a snapshot ends slightly before or after it. A step that passes the
-snapshot by at most `1e-9·dt` ends on it (`dt_to_next` is set to `dt`), and a
+number of seconds, `sim_time += dt` accumulates rounding error, so a step meant
+to end on a snapshot ends slightly before or after it. A step that passes the
+snapshot by at most `5e-10·dt` ends on it (`dt_to_next` is set to `dt`), and a
 step that starts at most that far before a snapshot starts on it (the bracket
-above it, `_resolve_time_bracket`'s `snap`); `1e-9·dt` is also the band
-`reconstruct_pchip` accepts around its interval. Before 2026-11-18 the
-tolerance was an absolute 1 ns, below the clock's resolution, and such steps
-fell back about half the time. Euler accepts
+above it, `_resolve_time_bracket`'s `snap`); the band is half of the `1e-9`
+band `reconstruct_pchip` accepts around its interval, so the last stage of a
+step that ends on a snapshot stays inside it. Before 2026-11-18 the tolerance
+was an absolute 1 ns, below the clock's resolution, and such steps fell back
+about half the time. The band covers the clock's error only while it is small:
+the error grows with the number of steps and with the distance from the first
+record, so with a fractional `dt` a run of more than a few thousand steps (a
+few dozen when it starts decades along the axis) outgrows it, and its steps
+onto snapshots fall back as before. A `dt` that is a whole number of seconds,
+on records stamped at whole or half seconds, keeps the clock exact. Euler accepts
 `vel_next`/`dt_to_next` but its velocity ignores them, since it has only the
 single `c_0 = 0` stage (on sigma meshes they still give the column's surface at
 the end of the step).

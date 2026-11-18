@@ -53,11 +53,14 @@ A step longer than the time to its target snapshot, $\dt>\Delta t_T$, would plac
 beyond the bracketing pair. Such a step runs on a steady velocity --- the field at its start --- and the
 engine warns once per realization and reports the number of such steps at the end of a verbose run.
 This happens at the end of the record, on a start between snapshots, and whenever $\dt$ does not
-divide the snapshot interval: every step that straddles a snapshot then runs steady. A step that
-reaches a snapshot to within the rounding error of the run clock, $10^{-9}\,\dt$, ends on it, and a
-step that starts that close before a snapshot starts on it; with a $\dt$ that is not a whole number
-of seconds the clock is never exact, and steps meant to land on a snapshot used to run steady about
-half of the time.
+divide the snapshot interval: every step that straddles a snapshot then runs steady. With a $\dt$
+that is not a whole number of seconds the run clock accumulates rounding error, so a step meant to
+land on a snapshot ends slightly before or after it. A step that reaches a snapshot to within
+$5\cdot10^{-10}\,\dt$ ends on it, and a step that starts that close before a snapshot starts on it;
+such steps used to run steady about half of the time. The rounding error grows with the number of
+steps and with the distance from the first record, so the band covers the first few thousand steps
+of a run from the first record and fewer further along the axis. A $\dt$ that is a whole number of
+seconds keeps the clock exact.
 
 \section{The order cap, and monotone-cubic reconstruction}\label{sec:temp-pchip}
 

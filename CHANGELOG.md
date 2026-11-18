@@ -78,16 +78,20 @@ the tracker was developed privately from 2026-06.
 ### Fixed
 
 - With a time step that is not a whole number of seconds, the run clock carries
-  rounding errors of a few nanoseconds, and an RK2 or RK4 step that should end
-  exactly on a record ended slightly before or after it. If it ended after the
+  rounding errors, and an RK2 or RK4 step that should end exactly on a record
+  ended slightly before or after it. If it ended after the
   record, the step ran on the steady velocity of its start instead of the
   velocity interpolated in time; if it ended before, the next step did. Each
   such step moved a particle several metres off its interpolated path (17 m for
   a step of 2.4 days at a few millimetres per second). A step now counts as
-  ending on a record when it misses it by no more than 10⁻⁹ of the time step,
-  and a step that starts that close before a record starts on it. Runs whose
-  time step is a whole number of seconds, on records stamped at whole seconds,
-  are unchanged.
+  ending on a record when it misses it by no more than 5·10⁻¹⁰ of the time
+  step, and a step that starts that close before a record starts on it. The
+  rounding error grows as the run goes on, so this holds for the first few
+  thousand steps of a run that starts at the first record and for fewer steps
+  further along the time axis; beyond that, such steps fall back as before. A
+  time step that is a whole number of seconds avoids the problem: runs with
+  one, on records stamped at whole seconds, have an exact clock and are
+  unchanged.
 
 ## [1.1.0] - 2026-11-16
 
