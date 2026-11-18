@@ -201,7 +201,16 @@ itself refuses a step that would (`ValueError` from the time-aware helpers);
 the tracking loop never sends one: when the step would pass the bracket (a start
 between snapshots, the end of the range) it **downgrades** that step to steady
 mode (every stage reuses the start field) and emits one `RuntimeWarning` per
-realization rather than extrapolating beyond the bracket. Euler accepts
+realization rather than extrapolating beyond the bracket. The comparison
+allows for the roundoff of the run clock: with a `dt` that is not a whole
+number of seconds, `sim_time` carries a few ulp of error, so a step meant to
+end on a snapshot ends slightly before or after it. A step that passes the
+snapshot by at most `1e-9·dt` ends on it (`dt_to_next` is set to `dt`), and a
+step that starts at most that far before a snapshot starts on it (the bracket
+above it, `_resolve_time_bracket`'s `snap`); `1e-9·dt` is also the band
+`reconstruct_pchip` accepts around its interval. Before 2026-11-18 the
+tolerance was an absolute 1 ns, below the clock's resolution, and such steps
+fell back about half the time. Euler accepts
 `vel_next`/`dt_to_next` but its velocity ignores them, since it has only the
 single `c_0 = 0` stage (on sigma meshes they still give the column's surface at
 the end of the step).

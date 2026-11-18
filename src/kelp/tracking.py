@@ -2199,6 +2199,13 @@ def run_single_realization(
         if np.issubdtype(_ds_times.dtype, np.datetime64):
             _t0_epoch = _ds_times[0]
 
+    # Snapshot band of the run clock: a step within 1e-9 of dt of a snapshot
+    # ends on it, a step that starts that close before one starts on it
+    # (``_resolve_time_bracket``).  1e-9 of dt is also the band
+    # reconstruct_pchip accepts around its interval, so a PCHIP stage may
+    # pass the snapshot by that much.
+    _snap = 1e-9 * max(float(dt), 1.0)
+
     # Last fully-executed (global step, file_idx) for the final checkpoint;
     # stays None if the loop breaks before any step runs (see end of loop).
     last_global_step_i = None
@@ -2230,7 +2237,7 @@ def run_single_realization(
             # on-snapshot backward query bracket downward.
             bracket = _resolve_time_bracket(
                 sim_time, file_times, n_time_total, on_exhausted,
-                direction=direction, cycle=cyc,
+                direction=direction, cycle=cyc, snap=_snap,
             )
             if bracket is None:
                 if verbose:
@@ -2345,7 +2352,14 @@ def run_single_realization(
         # Downgrade to steady if tracking dt exceeds the bracket
         # (start-between-snapshots, end-of-range, irregular spacing).
         # RK stages lose their intra-step time order here — warn once.
-        if dt_to_next is not None and dt > dt_to_next + 1e-9:
+        # A step that passes the snapshot by no more than ``_snap`` (the
+        # roundoff of the run clock) ends ON it instead: dt_to_next = dt, so
+        # the last stage takes vel_next exactly.  Before, the absolute 1 ns
+        # tolerance sat below the clock's resolution and such a step fell
+        # back about half the time (final review of the exact cycle period).
+        if dt_to_next is not None and dt_to_next < dt <= dt_to_next + _snap:
+            dt_to_next = dt
+        if dt_to_next is not None and dt > dt_to_next:
             if _downgrade_count == 0 and _is_multistage:
                 warnings.warn(
                     f"step {step_i}: dt={dt:.3g}s exceeds dt_to_next="
@@ -2376,10 +2390,10 @@ def run_single_realization(
                        mode, diff_cfg, sample_vars)
                 sigma_eta_start = _eta_at_time(
                     sim_time, file_times, n_time_total, *_ea, pchip=_pch,
-                    cycle=cyc)
+                    cycle=cyc, snap=_snap)
                 sigma_eta_end = _eta_at_time(
                     sim_time + dt * direction, file_times, n_time_total, *_ea,
-                    pchip=_pch, cycle=cyc)
+                    pchip=_pch, cycle=cyc, snap=_snap)
             else:
                 # discrete mode: the step starts at this record and ends at
                 # the next one
@@ -2499,7 +2513,7 @@ def run_single_realization(
                     # re-lerped field value at sim_time is direction-free.
                     rec_bracket = _resolve_time_bracket(
                         sim_time, file_times, n_time_total, on_exhausted,
-                        direction=direction, cycle=cyc,
+                        direction=direction, cycle=cyc, snap=_snap,
                     )
                     if rec_bracket is not None:
                         # keep the PCHIP stencil of this bracket — the next
@@ -2711,6 +2725,7 @@ def _resolve_time_bracket(
     direction: int = 1,
     *,
     cycle: Optional[Tuple[float, float]],
+    snap: float = 0.0,
 ):
     """Resolve (idx_a, idx_b, ta, tb, wrapped_time) for sim_time.
 
@@ -2737,6 +2752,14 @@ def _resolve_time_bracket(
     Strictly inside a bracket the tuple is direction-independent (the
     direction-dependent ``vel_next``/``dt_to_next`` live in
     ``_build_vel_payload``).
+
+    ``snap`` (seconds, default 0) widens "exactly on a snapshot" to the
+    roundoff of the run clock: a query at most ``snap`` before the next
+    snapshot along the motion counts as on it — forward it starts the
+    interval above that snapshot, backward the band of the downward shift
+    is ``max(1e-6, snap)``.  The run loop passes ``1e-9 * max(dt, 1)``: a dt
+    that is not a whole number of seconds leaves ``sim_time`` a few ulp off
+    the snapshot a step was meant to reach.
     """
     t_start = file_times[0]
     t_end = file_times[-1]
@@ -2773,11 +2796,33 @@ def _resolve_time_bracket(
                        if n_time_total > 1 else 1.0)
             tb = ta + last_dt
 
-    # Backward on-snapshot shift (tolerance matches the range check above).
+    # Forward on-snapshot shift: a query within ``snap`` below the next
+    # snapshot resolves as the query exactly on it does — the interval that
+    # starts there, the position at its bottom (alpha = 0).
+    if (direction > 0 and snap > 0.0 and idx_a_mod != idx_b_mod
+            and tb - sim_time_wrapped <= snap):
+        s = idx_b_mod
+        if on_exhausted == "cycle":
+            s_next = (s + 1) % n_time_total
+        else:
+            s_next = min(s + 1, n_time_total - 1)
+        ta_new = file_times[s]
+        tb_new = file_times[s_next]
+        if on_exhausted == "cycle" and tb_new <= ta_new:
+            if cycle is not None:
+                tb_new = ta_new + cycle[1]
+            else:
+                last_dt = (file_times[-1] - file_times[-2]
+                           if n_time_total > 1 else 1.0)
+                tb_new = ta_new + last_dt
+        return s, s_next, ta_new, tb_new, ta_new
+
+    # Backward on-snapshot shift (tolerance matches the range check above,
+    # or ``snap`` when wider).
     # Covers both shapes the forward resolution produces at a snapshot:
     # ta == sim_time (mid-range / clamped top in stop mode, alpha = 0) and
     # the fully collapsed stop-mode top (idx_a == idx_b == n-1).
-    if direction < 0 and sim_time_wrapped <= ta + 1e-6:
+    if direction < 0 and sim_time_wrapped <= ta + max(1e-6, snap):
         idx_b_new = idx_a_mod
         if on_exhausted == "cycle":
             idx_a_new = (idx_a_mod - 1) % n_time_total
@@ -2829,14 +2874,16 @@ def _resolve_recon_stencil(bracket, n_time_total: int):
 
 def _eta_at_time(t, file_times, n_time_total, on_exhausted, direction,
                  vel_cache, reader, ds, mesh, mode, diffusion, sample_vars,
-                 pchip=False, *, cycle):
+                 pchip=False, *, cycle, snap=0.0):
     """Surface elevation at time ``t`` as a step starting there would see it
     — the PCHIP stage at c = 0 where ``pchip`` and a 4-snapshot stencil
     exist (bit-identical to ``reconstruct_pchip``), else the linear payload
     blend (``_build_vel_payload``) — or None outside the data.  ``cycle``
-    is the run's cycle rule, as for :func:`_resolve_time_bracket`."""
+    and ``snap`` are the run's cycle rule and snapshot band, as for
+    :func:`_resolve_time_bracket`."""
     bracket = _resolve_time_bracket(t, file_times, n_time_total, on_exhausted,
-                                    direction=direction, cycle=cycle)
+                                    direction=direction, cycle=cycle,
+                                    snap=snap)
     if bracket is None:
         return None
     idx_a, idx_b, ta, tb, tw = bracket

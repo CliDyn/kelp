@@ -75,6 +75,20 @@ the tracker was developed privately from 2026-06.
   KELP (arXiv:2611.18528, https://doi.org/10.48550/arXiv.2611.18528);
   `CITATION.cff` gives it as `preferred-citation`.
 
+### Fixed
+
+- With a time step that is not a whole number of seconds, the run clock carries
+  rounding errors of a few nanoseconds, and an RK2 or RK4 step that should end
+  exactly on a record ended slightly before or after it. If it ended after the
+  record, the step ran on the steady velocity of its start instead of the
+  velocity interpolated in time; if it ended before, the next step did. Each
+  such step moved a particle several metres off its interpolated path (17 m for
+  a step of 2.4 days at a few millimetres per second). A step now counts as
+  ending on a record when it misses it by no more than 10⁻⁹ of the time step,
+  and a step that starts that close before a record starts on it. Runs whose
+  time step is a whole number of seconds, on records stamped at whole seconds,
+  are unchanged.
+
 ## [1.1.0] - 2026-11-16
 
 ### Added — horizontal velocity linear in depth (`mode.uv_vertical`)

@@ -208,8 +208,9 @@ other two keys, since these readers have no time bounds or schedule for it to ac
 windows --- 365~days for the twelve monthly means of a common year, where the span of the records plus the last
 interval would give 364.5~days --- and the interval from the last record to the first record of the next pass
 is the period less the span of the records, 31~days from December to January; the FESOM~1.4 reader gives its
-means the same period from the windows it resolves. Such a cycle needs the interpolated mode and is refused in
-the discrete mode. Snapshots (\conf{instant}) on a calendar-month or calendar-year cadence carry no window, so
+means the same period from the windows it resolves. When the windows differ in length, such a cycle needs the interpolated mode and is
+refused in the discrete mode; windows of equal length, such as the months of a \code{360\_day} calendar, cycle in
+the discrete mode too. Snapshots (\conf{instant}) on a calendar-month or calendar-year cadence carry no window, so
 the period after which they repeat is not known, and \conf{cycle} is refused for them with every reader, the
 FESOM~1.4 reader included. From then on the axis is treated like the FESOM~1.4 reader's: no midpoint
 shift, a \conf{start\_date} matched against the resolved instants (a daily mean stamped at the start of its day
