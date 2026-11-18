@@ -203,7 +203,7 @@ this file:
 
 ## Test patterns
 
-Tests use synthetic data built in `tmp_path` fixtures or small committed fixtures under `tests/data/` (e.g. `test_real_mesh.py`, `test_regression.py`) — no external data needed (exceptions: the `@slow` suites, the data-gated HEALPix suites — see `KELP_TEST_DATA` in their docstrings — and the data-gated NEMO suites: `KELP_TEST_NEMO_DATA`, built by `utils/make_nemo_test_data.py`, `docs/nemo.md` "Test data").
+Tests use synthetic data built in `tmp_path` fixtures or small committed fixtures under `tests/data/` (e.g. `test_real_mesh.py`, `test_regression.py`) — no external data needed (exceptions: the `@slow` suites, the data-gated HEALPix suites — see `KELP_TEST_DATA` in their docstrings — and the data-gated NEMO suites: `KELP_TEST_NEMO_DATA`, built by `utils/fetch_nemo_test_data.py`, `docs/nemo.md` "Test data").
 
 - Canonical mesh: 3×3 grid (9 nodes, 8 triangles) centred at (5°, 5°) — interior node gets ~6 surrounding elements for robust interpolation.
 - Constant velocity fields so displacement is analytic: `Δlon ≈ U·dt / (cos(lat)·METERS_PER_DEG_LAT)`.

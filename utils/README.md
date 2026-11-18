@@ -14,7 +14,7 @@ arguments (`--help`).
 | `sort_seeds.py` | arguments | Sort a seed file by (HEALPix NEST cell, depth) for memory locality — sort first, then shard. |
 | `split_seeds.py` | arguments | Split a seed file into contiguous shards; each shard file carries `# kelp particle_offset N`. |
 | `concat_trajectories.py` | arguments | Merge shard Zarr outputs in shard order; equals the unsharded run bit for bit. Reads output format 2 and format 1; refuses mixed formats (see below). |
-| `make_nemo_test_data.py` | arguments | Download the public ORCA05 / eORCA025 / ORCA2 sources and write the crops of the data-gated NEMO tests (`KELP_TEST_NEMO_DATA`), idempotent, `--verify`. |
+| `fetch_nemo_test_data.py` | arguments | Download the public ORCA05 / eORCA025 / ORCA2 sources and write the crops of the data-gated NEMO tests (`KELP_TEST_NEMO_DATA`), idempotent, `--verify`. |
 
 ---
 
@@ -140,15 +140,15 @@ trajectory output formats (`docs/io_and_time.md` §5):
 
 ---
 
-## `make_nemo_test_data.py` — the data-gated NEMO test directory
+## `fetch_nemo_test_data.py` — the data-gated NEMO test directory
 
 `tests/test_nemo_cgrid_data.py` and `tests/test_nemo_cgrid_lagrangian.py` skip
 unless `KELP_TEST_NEMO_DATA` is set. One command builds it:
 
 ```bash
-python utils/make_nemo_test_data.py all --verify      # default --out ./.tmp/data/nemo_crops
+python utils/fetch_nemo_test_data.py all --verify      # default --out ./.tmp/data/nemo_crops
 export KELP_TEST_NEMO_DATA=$PWD/.tmp/data/nemo_crops
-python utils/make_nemo_test_data.py all --dry-run     # list the source URLs only
+python utils/fetch_nemo_test_data.py all --dry-run     # list the source URLs only
 ```
 
 Sources: ORCA05 = Zenodo 3755721 (CC-BY-4.0; 3.8 GB of year-2011 files fetched into

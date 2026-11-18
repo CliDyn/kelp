@@ -1,4 +1,4 @@
-"""Data-gated (``KELP_TEST_NEMO_DATA``, built by ``utils/make_nemo_test_data.py``): Lagrangian
+"""Data-gated (``KELP_TEST_NEMO_DATA``, built by ``utils/fetch_nemo_test_data.py``): Lagrangian
 benchmarks of the C-grid 3-D path on a 56 x 64 ORCA05 window at the Denmark Strait /
 Iceland-Scotland sill (steady monthly record).
 

@@ -31,7 +31,7 @@ the tracker was developed privately from 2026-06.
   in 3-D. z*/vvl output warns and uses the fixed reference thicknesses.
 - Docs: `docs/nemo.md`, `docs/velocity_interpolation.md` section 8, the
   `examples/config_nemo*.yaml` templates and the `kelp-nemo` skill.
-- `utils/make_nemo_test_data.py` builds the data directory of the data-gated
+- `utils/fetch_nemo_test_data.py` builds the data directory of the data-gated
   NEMO tests (`KELP_TEST_NEMO_DATA`) from public ORCA05, eORCA025 and ORCA2
   sources.
 

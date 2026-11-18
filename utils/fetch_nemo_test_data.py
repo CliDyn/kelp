@@ -50,10 +50,10 @@ Usage
 -----
 ::
 
-    python utils/make_nemo_test_data.py all                # everything
-    python utils/make_nemo_test_data.py orca05 --dry-run   # list what would be fetched
-    python utils/make_nemo_test_data.py all --verify       # + consistency checks
-    python utils/make_nemo_test_data.py verify             # checks only
+    python utils/fetch_nemo_test_data.py all                # everything
+    python utils/fetch_nemo_test_data.py orca05 --dry-run   # list what would be fetched
+    python utils/fetch_nemo_test_data.py all --verify       # + consistency checks
+    python utils/fetch_nemo_test_data.py verify             # checks only
     export KELP_TEST_NEMO_DATA=$PWD/.tmp/data/nemo_crops
 
 Existing output files are never overwritten (idempotent; delete a file to redo it).

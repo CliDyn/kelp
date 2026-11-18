@@ -1,5 +1,5 @@
 """Data-gated (``KELP_TEST_NEMO_DATA``): the exact C-grid path on real NEMO
-crops (built by ``utils/make_nemo_test_data.py``): partial-cell W against the model's W (ORCA05), z* detection and
+crops (built by ``utils/fetch_nemo_test_data.py``): partial-cell W against the model's W (ORCA05), z* detection and
 halo-free T-pivot layouts (eORCA025), the global topologies (ORCA05 F-pivot,
 ORCA2 T-pivot with halos), input robustness.  Skips when the directory or a
 file in it is missing."""

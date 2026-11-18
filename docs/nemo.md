@@ -185,9 +185,9 @@ remove it).
 ### Test data
 
 ```bash
-python utils/make_nemo_test_data.py all --verify     # default --out ./.tmp/data/nemo_crops
+python utils/fetch_nemo_test_data.py all --verify     # default --out ./.tmp/data/nemo_crops
 export KELP_TEST_NEMO_DATA=$PWD/.tmp/data/nemo_crops
-python utils/make_nemo_test_data.py all --dry-run    # list the source URLs only
+python utils/fetch_nemo_test_data.py all --dry-run    # list the source URLs only
 ```
 
 The script downloads the public sources and writes the crops in the layout the
