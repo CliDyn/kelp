@@ -91,7 +91,8 @@ the tracker was developed privately from 2026-06.
   further along the time axis; beyond that, such steps fall back as before. A
   time step that is a whole number of seconds avoids the problem: runs with
   one, on records stamped at whole seconds, have an exact clock and are
-  unchanged.
+  unchanged. The documentation now recommends a time step that is a whole
+  number of seconds and divides the record interval.
 
 ## [1.1.0] - 2026-11-16
 

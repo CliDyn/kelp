@@ -78,7 +78,10 @@ campaign order-of-operations and the setup pitfalls.
    - Discrete mode (`temporal_interp: false`): one file snapshot per step;
      set `dt` equal to the file step (or omit `dt` for auto-detect).
    - Sub-stepping (`temporal_interp: true`): `dt` < file step, velocity
-     interpolated linearly between snapshots.
+     interpolated linearly between snapshots. By default `dt` is a whole number
+     of seconds that divides the file step (3600 → 1800, 900, 720, 600 s): a step
+     that does not divide it, or one with a fractional part (1800/7 s, M2/64),
+     makes the steps onto or across records run on a steady velocity.
    - `n_steps` counts *integration* steps (dt-sized), not file records.
    - Short forcing + long run → `on_exhausted: cycle`. For monthly or yearly
      means set `temporal_interp: true` and, on a mesh type other than

@@ -60,7 +60,10 @@ $5\cdot10^{-10}\,\dt$ ends on it, and a step that starts that close before a sna
 such steps used to run steady about half of the time. The rounding error grows with the number of
 steps and with the distance from the first record, so the band covers the first few thousand steps
 of a run from the first record and fewer further along the axis. A $\dt$ that is a whole number of
-seconds keeps the clock exact.
+seconds keeps the clock exact. The step should therefore be a whole number of seconds that divides
+the snapshot interval: for hourly snapshots 1800, 1200, 900, 720 or \SI{600}{s}, rather than
+$1800/7$~s or a fraction of a tidal period such as $T_{M_2}/64\approx\SI{698.66}{s}$, which is
+neither whole nor a divisor of the hour.
 
 \section{The order cap, and monotone-cubic reconstruction}\label{sec:temp-pchip}
 

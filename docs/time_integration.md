@@ -218,7 +218,11 @@ the first record outgrows it, and a run that starts later outgrows it sooner,
 the sooner the shorter the step (`dt` = 1 day / 7: after about 700 steps from
 10 years in and 120 from 30 years in; `dt` = 1800 s / 7: after 16 and 3); its steps
 onto snapshots fall back as before. A `dt` that is a whole number of seconds,
-on records stamped at whole or half seconds, keeps the clock exact. Euler accepts
+on records stamped at whole or half seconds, keeps the clock exact. **Choose
+`dt` as a whole number of seconds that divides the record interval**: for
+hourly records 1800, 1200, 900, 720 or 600 s, not 1800 s / 7 or a fraction of a
+tidal period (M2/64 ≈ 698.66 s, which neither is whole nor divides the hour).
+Euler accepts
 `vel_next`/`dt_to_next` but its velocity ignores them, since it has only the
 single `c_0 = 0` stage (on sigma meshes they still give the column's surface at
 the end of the step).
