@@ -213,8 +213,10 @@ step that ends on a snapshot stays inside it. Before 2026-11-18 the tolerance
 was an absolute 1 ns, below the clock's resolution, and such steps fell back
 about half the time. The band covers the clock's error only while it is small:
 the error grows with the number of steps and with the distance from the first
-record, so with a fractional `dt` a run of more than a few thousand steps (a
-few dozen when it starts decades along the axis) outgrows it, and its steps
+record, so with a fractional `dt` a run of more than about 6000 steps from
+the first record outgrows it, and a run that starts later outgrows it sooner,
+the sooner the shorter the step (`dt` = 1 day / 7: after about 700 steps from
+10 years in and 120 from 30 years in; `dt` = 1800 s / 7: after 16 and 3); its steps
 onto snapshots fall back as before. A `dt` that is a whole number of seconds,
 on records stamped at whole or half seconds, keeps the clock exact. Euler accepts
 `vel_next`/`dt_to_next` but its velocity ignores them, since it has only the
