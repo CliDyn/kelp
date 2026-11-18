@@ -196,7 +196,8 @@ between snapshots — is the subject of `time_integration.md`. In discrete mode 
 (`tracking._check_discrete_dt`);
 in temporal-interpolation mode no check makes `dt` divide the file step, and a
 step that straddles a snapshot runs on a steady velocity (one warning per
-realization).
+realization); a step that reaches a snapshot to within `1e-9·dt`, the
+roundoff of the run clock, ends on it (`time_integration.md`).
 
 ### Time-averaged output and the midpoint shift
 
