@@ -194,11 +194,11 @@ That blending — and the accuracy caveat that comes with linear interpolation
 between snapshots — is the subject of `time_integration.md`. In discrete mode a
 `dt` unlike the file step, or irregular record times, are refused at startup
 (`tracking._check_discrete_dt`);
-in temporal-interpolation mode no check makes `dt` divide the file step, and a
-step that straddles a snapshot runs on a steady velocity (one warning per
-realization); a step that reaches a snapshot to within `5e-10·dt`, the
-roundoff of the run clock, ends on it (`time_integration.md`, which also gives
-the limit of that band on long runs with a fractional `dt`).
+in temporal-interpolation mode RK2, RK4 and RK45 refuse a `dt` that does not
+put every record the run reaches on the step grid (`tracking._check_step_grid`;
+a step that straddled a snapshot ran on a steady velocity), and a step that
+reaches a snapshot to within `1e-5·dt`, the roundoff of the run clock, ends
+exactly on it and sets the clock to it (`time_integration.md`).
 
 ### Time-averaged output and the midpoint shift
 

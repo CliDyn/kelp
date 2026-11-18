@@ -201,28 +201,29 @@ itself refuses a step that would (`ValueError` from the time-aware helpers);
 the tracking loop never sends one: when the step would pass the bracket (a start
 between snapshots, the end of the range) it **downgrades** that step to steady
 mode (every stage reuses the start field) and emits one `RuntimeWarning` per
-realization rather than extrapolating beyond the bracket. The comparison
-allows for the roundoff of the run clock: with a `dt` that is not a whole
-number of seconds, `sim_time += dt` accumulates rounding error, so a step meant
-to end on a snapshot ends slightly before or after it. A step that passes the
-snapshot by at most `5e-10·dt` ends on it (`dt_to_next` is set to `dt`), and a
-step that starts at most that far before a snapshot starts on it (the bracket
-above it, `_resolve_time_bracket`'s `snap`); the band is half of the `1e-9`
-band `reconstruct_pchip` accepts around its interval, so the last stage of a
-step that ends on a snapshot stays inside it. Before 2026-11-18 the tolerance
-was an absolute 1 ns, below the clock's resolution, and such steps fell back
-about half the time. The band covers the clock's error only while it is small:
-the error grows with the number of steps and with the distance from the first
-record, so with a fractional `dt` a run of more than about 6000 steps from
-the first record outgrows it, and a run that starts later outgrows it sooner,
-the sooner the shorter the step (`dt` = 1 day / 7: after about 700 steps from
-10 years in and 120 from 30 years in; `dt` = 1800 s / 7: after 16 and 3); its steps
-onto snapshots fall back as before. A `dt` that is a whole number of seconds,
-on records stamped at whole or half seconds, keeps the clock exact. **Choose
-`dt` as a whole number of seconds that divides the record interval**: for
-hourly records 1800, 1200, 900, 720 or 600 s, not 1800 s / 7 or a fraction of a
-tidal period (M2/64 ≈ 698.66 s, which neither is whole nor divides the hour).
-Euler accepts
+realization rather than extrapolating beyond the bracket. A step that crosses
+a snapshot without ending on it would lose the time interpolation this way, so
+for RK2, RK4 and RK45 the run refuses, when it starts, a `dt` that does not put
+the snapshots on the step grid (`tracking._check_step_grid`, in `run_tracking`
+before any output and in `run_single_realization` for direct callers): every
+snapshot the run reaches must be a whole number of steps from the run's start
+(under `cycle` the snapshots of every pass, so the seam too); counted from the
+start, so the output's record times, start + n·dt, stay on the snapshots. For hourly records
+that admits 1800, 1200, 900, 720 or 600 s but not 698.66 s (M2/64); for monthly
+means stamped at the window centres (29.5 to 31 days apart) any divisor of half
+a day. With a step that crossed an hourly record every fifth step, a particle
+in a tidal current of 0.5 m/s drifted up to 49 m off its interpolated path.
+Euler, with its single stage, is not checked; the downgrade remains for the end
+of the range. The snapshot band (`_snapshot_band`, `1e-5·max(dt, 1 s)`)
+absorbs the roundoff of the run clock (with a `dt` that is not a whole number
+of seconds, `sim_time += dt` carries rounding error) and of decoded stamps
+(up to a microsecond): a step that reaches the snapshot ahead to within it ends
+exactly on it — its length is `dt_to_next`, so its last stage takes `vel_next`
+and a PCHIP stage time stays inside its interval — and the clock is set to the
+snapshot after the step, so the roundoff never accumulates past a snapshot; a
+query that close below a snapshot starts on it (`_resolve_time_bracket`'s
+`snap`). Before 2026-11-18 the tolerance was an absolute 1 ns, below the
+clock's resolution, and such steps fell back about half the time. Euler accepts
 `vel_next`/`dt_to_next` but its velocity ignores them, since it has only the
 single `c_0 = 0` stage (on sigma meshes they still give the column's surface at
 the end of the step).

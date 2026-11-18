@@ -165,14 +165,16 @@ def _m_d(period: float, seam: float) -> str:
 
 
 def test_fesom14_monthly_cycle_equals_the_records_written_twice(tmp_path):
-    """450 daily steps on twelve monthly means: through the seam December ->
-    January and into the second pass, as on the records written twice."""
+    """900 half-day steps (the centres of noleap months lie whole half days
+    apart, so the steps land on them) on twelve monthly means: through the
+    seam December -> January and into the second pass, as on the records
+    written twice."""
     year = _monthly_data(tmp_path / "year")
     twice = _monthly_data(tmp_path / "twice", copies=2)
-    cfg = _year_cfg(tmp_path, year, "cycle.nc", n_steps=450,
-                    on_exhausted="cycle")
-    ref = _year_cfg(tmp_path, twice, "ref.nc", n_steps=450,
-                    on_exhausted="stop")
+    cfg = _year_cfg(tmp_path, year, "cycle.nc", n_steps=900,
+                    on_exhausted="cycle", numerics={"dt": DAY / 2})
+    ref = _year_cfg(tmp_path, twice, "ref.nc", n_steps=900,
+                    on_exhausted="stop", numerics={"dt": DAY / 2})
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         _run(cfg)
@@ -303,12 +305,12 @@ def _m_w(dmin: float, dmax: float, period: float) -> str:
 def test_monthly_means_cycle_for_each_stamp_convention(tmp_path):
     """Twelve monthly means stamped at the start, the centre or the end of
     their month, each read with the matching options and ``cycle``: the same
-    run bit for bit, 450 daily steps through the seam December -> January,
-    equal to the doubled reference; the period is 365 d (the legacy rule:
-    364.5 d) and no legacy-period warning is given."""
+    run bit for bit, 900 half-day steps through the seam December ->
+    January, equal to the doubled reference; the period is 365 d (the legacy
+    rule: 364.5 d) and no legacy-period warning is given."""
     world = _year_world(tmp_path)
     twice = _year_world(tmp_path, copies=2)
-    num = {"dt": DAY, "n_steps": 450}
+    num = {"dt": DAY / 2, "n_steps": 900}
     out = {}
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -504,8 +506,9 @@ def test_realizations_start_whole_exact_periods_apart(tmp_path, start_date):
     data = _monthly_data(tmp_path / "data")
 
     def _pair(name, run_interval):
-        cfg = _timed(_cfg(tmp_path, data=data, out=f"{name}.nc"),
-                     start_date=start_date, n_steps=40, on_exhausted="cycle",
+        cfg = _timed(_cfg(tmp_path, data=data, out=f"{name}.nc",
+                          numerics={"dt": DAY / 2}),
+                     start_date=start_date, n_steps=80, on_exhausted="cycle",
                      num_runs=2, run_interval=run_interval)
         _run(cfg)
         out = Path(cfg.data.output_path)
@@ -595,7 +598,7 @@ def test_run_variants(tmp_path, monkeypatch, variant):
     prefetch.  PCHIP in time with ``cycle``: the run goes through the seam
     (where the bracket falls back to linear) with every record finite and
     the exact period."""
-    num = {"dt": DAY, "n_steps": 450}
+    num = {"dt": DAY / 2, "n_steps": 900}
     if variant == "prefetch":
         twice = _year_world(tmp_path, copies=2)
         kw = dict(calendar="noleap", n_rec=24, time_stamp="centre",
@@ -626,7 +629,7 @@ def test_run_variants(tmp_path, monkeypatch, variant):
                    numerics={**num, "temporal_reconstruction": "pchip"},
                    time_stamp="start", time_window="calendar_month")
     got = load_trajectories(cfg.data.output_path)
-    assert got["time"].shape == (450,)
+    assert got["time"].shape == (900,)
     for key in ("time", "lon", "lat", "z"):
         assert np.isfinite(got[key]).all(), key
     assert _period(cfg.data.output_path) == 365 * DAY
@@ -666,7 +669,7 @@ def _legacy_run(tmp_path, case):
     if case == "mean_monthly":
         cfg, _ = _case(tmp_path, _year_world(tmp_path), case,
                        MONTH_EDGES[1:] * DAY, calendar="noleap", n_rec=12,
-                       time=cyc, numerics={"dt": DAY, "n_steps": 400},
+                       time=cyc, numerics={"dt": DAY / 2, "n_steps": 800},
                        time_averaging="mean")
         return cfg
     world = _world(tmp_path)
@@ -677,7 +680,7 @@ def _legacy_run(tmp_path, case):
                        time_window="calendar_day")
     elif case == "frac_interp":
         cfg, _ = _case(tmp_path, world, case, FRAC, time=cyc,
-                       numerics={"dt": 900.0, "n_steps": 32},
+                       numerics={"dt": 3600.1 / 4, "n_steps": 32},
                        time_stamp="start", time_window="3600.1 s")
     elif case == "frac_discrete_back":
         cfg, _ = _case(tmp_path, world, case, FRAC, interp=False,

@@ -74,25 +74,33 @@ the tracker was developed privately from 2026-06.
 - `README.md` and `CITATION.cff` ask users to cite the article that describes
   KELP (arXiv:2611.18528, https://doi.org/10.48550/arXiv.2611.18528);
   `CITATION.cff` gives it as `preferred-citation`.
+- A run with `temporal_interp: true` and the RK2, RK4 or RK45 integrator is
+  refused when it starts unless every record it reaches is a whole number of
+  time steps from its start. A time-interpolated
+  RK step takes the velocity at its start and at the record ahead, so a step
+  that crossed a record without ending on it ran on the steady velocity of its
+  start, with a single warning per run. With hourly records and a step of
+  698.66 s, a 64th of the M2 period, every fifth step did so, and a particle in
+  a tidal current of 0.5 m/s drifted up to 49 m off its interpolated path. The
+  message names time steps that fit: for hourly records 1800, 1200, 900, 720 or
+  600 s; for monthly means stamped at the centres of their windows, which lie
+  29.5 to 31 days apart, any divisor of half a day, so a daily step is refused
+  there. The Euler integrator, which has a single stage, and the discrete mode
+  are not affected.
 
 ### Fixed
 
 - With a time step that is not a whole number of seconds, the run clock carries
   rounding errors, and an RK2 or RK4 step that should end exactly on a record
-  ended slightly before or after it. If it ended after the
-  record, the step ran on the steady velocity of its start instead of the
-  velocity interpolated in time; if it ended before, the next step did. Each
-  such step moved a particle several metres off its interpolated path (17 m for
-  a step of 2.4 days at a few millimetres per second). A step now counts as
-  ending on a record when it misses it by no more than 5·10⁻¹⁰ of the time
-  step, and a step that starts that close before a record starts on it. The
-  rounding error grows as the run goes on, so this holds for the first few
-  thousand steps of a run that starts at the first record and for fewer steps
-  further along the time axis; beyond that, such steps fall back as before. A
-  time step that is a whole number of seconds avoids the problem: runs with
-  one, on records stamped at whole seconds, have an exact clock and are
-  unchanged. The documentation now recommends a time step that is a whole
-  number of seconds and divides the record interval.
+  ended slightly before or after it. If it ended after the record, the step ran
+  on the steady velocity of its start instead of the velocity interpolated in
+  time; if it ended before, the next step did. Each such step moved a particle
+  several metres off its interpolated path (17 m for a step of 2.4 days at a
+  few millimetres per second). A step that reaches a record to within 10⁻⁵ of
+  the time step now ends exactly on it, and the run clock is set to the record,
+  so the rounding error never builds up beyond one interval between records,
+  however long the run. Runs whose time step is a whole number of seconds, on
+  records stamped at whole seconds, are unchanged.
 
 ## [1.1.0] - 2026-11-16
 

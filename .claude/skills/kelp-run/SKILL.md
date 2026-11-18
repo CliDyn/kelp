@@ -176,8 +176,8 @@ gate (ask, then wait for an explicit yes) holds for every run.
      json.dump(engine, open(os.path.join(out_dir, "engine.json"), "w"), indent=2)   # next to the result table; a README engine line is pasted from it, after the run
      ```
    - **Time regime:** if the forcing has many snapshots and you want smooth
-     sub-step motion, `temporal_interp: true` with `dt` < file step, a whole number
-     of seconds that divides it (kelp-config, step 3). If you want
+     sub-step motion, `temporal_interp: true` with `dt` < file step that puts every
+     record on a step boundary (refused otherwise; kelp-config, step 3). If you want
      one step per snapshot, `temporal_interp: false` with `dt` = file step. A
      long run on short/periodic forcing → `on_exhausted: cycle`.
    - **Diffusion:** none → omit. Constant eddy diffusivity → `scheme: uniform`

@@ -49,7 +49,7 @@ track\_failure\_reason & bool & \code{false} & Record why each particle died (\c
 \toprule
 \normalfont Key & Type & Default & Description \\
 \midrule \endhead
-dt & float (s) & auto & Integration step. Defaults to the snapshot interval. In the discrete mode it must equal the record spacing, and irregular record times (calendar months) are refused --- use \conf{temporal\_interp}, where it may be smaller: best a whole number of seconds that divides the snapshot interval (\cref{sec:temp-linear}). \\
+dt & float (s) & auto & Integration step. Defaults to the snapshot interval. In the discrete mode it must equal the record spacing, and irregular record times (calendar months) are refused --- use \conf{temporal\_interp}, where it may be smaller; with RK2, RK4 or RK45 every snapshot the run reaches must be a whole number of steps from the start, or the run is refused (\cref{sec:temp-linear}). \\
 file\_dt & float (s) & auto & Time between stored snapshots; auto-detected from the time coordinate. When the axis cannot be decoded it defines $t_i=i\,\Delta t$ (\cref{sec:input-axis}). \\
 integrator & str & \code{euler} & \code{euler} / \code{rk2} / \code{rk4} / \code{rk45} (\cref{ch:integration}). \\
 rk45\_tol\_m & float (m) & \code{1.0} & Adaptive scheme: error tolerance per substep, $>0$ (\cref{sec:int-rk45}). \\

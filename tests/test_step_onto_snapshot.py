@@ -8,11 +8,11 @@ fix, a step that ended after the record exceeded the remaining interval by
 more than the absolute 1 ns tolerance and fell back to steady velocity for
 the whole step; a step that ended before it left the next step a bracket a
 few nanoseconds long, so that step fell back.  Each costs metres per step.
-Now a step within 5e-10 of ``dt`` of the record ends on it, and a step that
-starts within that band before a record starts on it (half of the 1e-9 band
-``reconstruct_pchip`` accepts, so a PCHIP step that ends on a record stays
-inside it).  The resolver's band, the sigma surface and a step that passes the
-record by more than the band are pinned too.
+Now a step within the snapshot band (``_snapshot_band``, 1e-5 of ``dt``) of
+the record ends exactly on it -- its length is the distance to the record and
+the clock is set to the record -- and a step that starts within that band
+before a record starts on it.  The resolver's band, the sigma surface and a
+PCHIP step longer than its interval by less than the band are pinned too.
 
 Fixture: the FESOM 1.4 monthly means of ``tests/test_exact_cycle_runs.py``
 (uniform ``uo = 2e-4 * (1 + k)`` m/s for record ``k``, ``vo = wo = 0``,
@@ -182,12 +182,14 @@ def test_sigma_steps_onto_records_keep_time_interpolation(tmp_path):
     assert np.isfinite(load_trajectories(cfg.data.output_path)["z"]).all()
 
 
-def test_pchip_step_longer_than_its_record_interval_falls_back(tmp_path):
+def test_pchip_step_within_the_band_of_its_record_interval_ends_on_it(
+        tmp_path):
     """One RK4 step of 10800.0000108 s from a record on records 10800 s apart,
-    PCHIP in time: the step passes the next record by 1.08e-5 s, beyond the
-    band, and falls back to steady velocity with the warning, as before the
-    fix — it must not end on the record, where its last stage would lie
-    outside the 1e-9 band reconstruct_pchip accepts around its interval."""
+    PCHIP in time: the step passes the next record by 1.08e-5 s, inside the
+    snapshot band, so it ends exactly on the record (its length is the
+    distance to it) and keeps the reconstruction — no fallback, and no stage
+    time outside the interval reconstruct_pchip accepts (a step 1.08e-5 s
+    longer than its interval raised there once)."""
     src = _sigma_file(tmp_path / "src", n_rec=7)
     with xr.open_dataset(src, decode_times=False) as d:
         one = d.load()
@@ -202,5 +204,5 @@ def test_pchip_step_longer_than_its_record_interval_falls_back(tmp_path):
                          out=f"p{start}.nc", integrator="rk4",
                          temporal_interp=True,
                          temporal_reconstruction="pchip", time_dir=d)
-        fallbacks = _run_quiet(cfg)
-        assert len(fallbacks) == 1 and "step 0" in fallbacks[0], fallbacks
+        assert not _run_quiet(cfg)
+        assert np.isfinite(load_trajectories(cfg.data.output_path)["z"]).all()

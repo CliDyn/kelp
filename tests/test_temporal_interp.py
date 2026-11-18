@@ -723,14 +723,19 @@ class TestDowngradeWarning:
     """When dt > dt_to_next the RK stages fall back to steady velocity;
     this should be observable via a RuntimeWarning + summary counter."""
 
-    def test_warns_once_when_dt_exceeds_bracket(self, tmp_path):
+    def test_warns_once_when_dt_exceeds_bracket(self, tmp_path, monkeypatch):
         import warnings
         from kelp.tracking import track_particles
         from kelp.readers import get_reader
 
         # File cadence 300s, but tracker dt 900s → dt > dt_to_next every step.
         # Interpolated mode: in discrete mode this dt is refused outright
-        # (tracking._check_discrete_dt, 2026-09-24).
+        # (tracking._check_discrete_dt, 2026-09-24), and since 2026-11-18 so
+        # it is for RK with time interpolation (tracking._check_step_grid,
+        # tests/test_step_grid.py); the fallback stays as a guard, pinned
+        # here with that check switched off.
+        monkeypatch.setattr("kelp.tracking._check_step_grid",
+                            lambda **kw: None)
         nc_path = str(_make_fesomc_timed(
             tmp_path, n_time=6, dt_seconds=300.0,
             u_val=0.05, v_val=0.0,
