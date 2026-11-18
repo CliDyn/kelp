@@ -8,8 +8,11 @@ fix, a step that ended after the record exceeded the remaining interval by
 more than the absolute 1 ns tolerance and fell back to steady velocity for
 the whole step; a step that ended before it left the next step a bracket a
 few nanoseconds long, so that step fell back.  Each costs metres per step.
-Now a step within 1e-9 of ``dt`` of the record ends on it, and a step that
-starts within that band before a record starts on it.
+Now a step within 5e-10 of ``dt`` of the record ends on it, and a step that
+starts within that band before a record starts on it (half of the 1e-9 band
+``reconstruct_pchip`` accepts, so a PCHIP step that ends on a record stays
+inside it).  The resolver's band, the sigma surface and a step that passes the
+record by more than the band are pinned too.
 
 Fixture: the FESOM 1.4 monthly means of ``tests/test_exact_cycle_runs.py``
 (uniform ``uo = 2e-4 * (1 + k)`` m/s for record ``k``, ``vo = wo = 0``,
@@ -32,11 +35,16 @@ import pytest
 pytest.importorskip("netCDF4")
 pytest.importorskip("cftime")
 
+import xarray as xr  # noqa: E402
+
 from kelp.core.geometry import METERS_PER_DEG_LAT  # noqa: E402
+from kelp.tracking import _resolve_time_bracket  # noqa: E402
 from kelp.writers import load_trajectories  # noqa: E402
 
-from tests.test_exact_cycle_runs import (_assert_doubled_reference,  # noqa: E402
-                                         _monthly_data, _year_cfg)
+from tests.test_exact_cycle_runs import (EDGES,  # noqa: E402
+                                         _assert_doubled_reference,
+                                         _monthly_data, _sigma_cfg,
+                                         _sigma_file, _year_cfg)
 from tests.test_fesom14_tracking import DAY, SEEDS, _run  # noqa: E402
 
 #: the first two intervals between the record centres (Jan-Feb, Feb-Mar)
@@ -119,3 +127,80 @@ def test_pchip_step_onto_a_record_keeps_the_reconstruction(tmp_path):
                               "temporal_reconstruction": "pchip"})
     assert not _run_quiet(cfg)
     assert np.isfinite(load_trajectories(cfg.data.output_path)["lon"]).all()
+
+
+# --- the bracket resolver's band, the sigma surface, PCHIP's band ---------
+
+#: record centres of the noleap months (``EDGES`` of the exact-cycle tests), s
+_FT = ((EDGES[:-1] + EDGES[1:]) / 2) * DAY
+_YEAR = (365 * DAY, 31 * DAY)
+
+
+def test_bracket_band_backward_shift_beyond_the_old_microsecond():
+    """Backward, 50 us above record 3: inside a band of 200 us the query is
+    on the record (the interval below it, position at its top); the old
+    fixed band of 1 us left it in the interval above."""
+    q = _FT[3] + 5e-5
+    got = _resolve_time_bracket(q, _FT, 12, "stop", direction=-1,
+                                cycle=None, snap=2e-4)
+    assert got == (2, 3, _FT[2], _FT[3], _FT[3])
+    assert _resolve_time_bracket(q, _FT, 12, "stop", direction=-1,
+                                 cycle=None, snap=0.0) == (
+        3, 4, _FT[3], _FT[4], q)
+
+
+@pytest.mark.parametrize("on_exhausted, cycle, q, want", [
+    # stop: 100 us before the last record = on it (the collapsed bracket)
+    ("stop", None, _FT[-1] - 1e-4, (11, 11, _FT[11], _FT[11], _FT[11])),
+    # exact cycle: 100 us before the end of the seam = record 0 of the next
+    # pass, position at the bottom of [0, 1]
+    ("cycle", _YEAR, _FT[0] + 365 * DAY - 1e-4,
+     (0, 1, _FT[0], _FT[1], _FT[0])),
+    # mid-axis
+    ("stop", None, _FT[4] - 1e-4, (4, 5, _FT[4], _FT[5], _FT[4])),
+])
+def test_bracket_band_forward_shift(on_exhausted, cycle, q, want):
+    assert _resolve_time_bracket(q, _FT, 12, on_exhausted, direction=1,
+                                 cycle=cycle, snap=2e-4) == want
+
+
+def test_bracket_band_leaves_queries_outside_it_alone():
+    for q in (_FT[4] - 1e-3, _FT[4] + 1e-3, _FT[7] - 3e-4):
+        for d in (1, -1):
+            assert (_resolve_time_bracket(q, _FT, 12, "stop", direction=d,
+                                          cycle=None, snap=2e-4)
+                    == _resolve_time_bracket(q, _FT, 12, "stop", direction=d,
+                                             cycle=None, snap=0.0)), (q, d)
+
+
+def test_sigma_steps_onto_records_keep_time_interpolation(tmp_path):
+    """FESOM-C sigma run, records 1800 s apart, dt = 1800 s / 7: before the
+    fix step 28 started 2e-12 s before record 4 and fell back."""
+    path = _sigma_file(tmp_path / "sig", n_rec=7)
+    cfg = _sigma_cfg(path, n_steps=42, dt=1800.0 / 7, temporal_interp=True)
+    assert not _run_quiet(cfg)
+    assert np.isfinite(load_trajectories(cfg.data.output_path)["z"]).all()
+
+
+def test_pchip_step_longer_than_its_record_interval_falls_back(tmp_path):
+    """One RK4 step of 10800.0000108 s from a record on records 10800 s apart,
+    PCHIP in time: the step passes the next record by 1.08e-5 s, beyond the
+    band, and falls back to steady velocity with the warning, as before the
+    fix — it must not end on the record, where its last stage would lie
+    outside the 1e-9 band reconstruct_pchip accepts around its interval."""
+    src = _sigma_file(tmp_path / "src", n_rec=7)
+    with xr.open_dataset(src, decode_times=False) as d:
+        one = d.load()
+    one = one.assign_coords(time=("time", np.arange(7) * 10800.0,
+                                  {"units": "seconds since 2001-01-01",
+                                   "calendar": "noleap"}))
+    (tmp_path / "run").mkdir()
+    path = tmp_path / "run" / "fesomc.nc"
+    one.to_netcdf(path)
+    for start, d in ((1, 1.0), (3, -1.0)):
+        cfg = _sigma_cfg(path, start=start, n_steps=1, dt=10800.0000108,
+                         out=f"p{start}.nc", integrator="rk4",
+                         temporal_interp=True,
+                         temporal_reconstruction="pchip", time_dir=d)
+        fallbacks = _run_quiet(cfg)
+        assert len(fallbacks) == 1 and "step 0" in fallbacks[0], fallbacks

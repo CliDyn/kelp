@@ -2199,12 +2199,17 @@ def run_single_realization(
         if np.issubdtype(_ds_times.dtype, np.datetime64):
             _t0_epoch = _ds_times[0]
 
-    # Snapshot band of the run clock: a step within 1e-9 of dt of a snapshot
+    # Snapshot band of the run clock: a step within 5e-10 of dt of a snapshot
     # ends on it, a step that starts that close before one starts on it
-    # (``_resolve_time_bracket``).  1e-9 of dt is also the band
-    # reconstruct_pchip accepts around its interval, so a PCHIP stage may
-    # pass the snapshot by that much.
-    _snap = 1e-9 * max(float(dt), 1.0)
+    # (``_resolve_time_bracket``).  Half of the 1e-9 band reconstruct_pchip
+    # (and the fused PCHIP kernels) accept around their interval: a step
+    # that ends on the snapshot is longer than its bracket by up to the
+    # band, and its last stage must stay inside PCHIP's band (fix check
+    # 2026-11-18).  The band covers the clock's roundoff only while that
+    # stays small: ``sim_time += dt`` accumulates it, so with a dt that is not
+    # a whole number of seconds a long run, or one far along the axis,
+    # outgrows it and its steps onto snapshots fall back as before.
+    _snap = 5e-10 * max(float(dt), 1.0)
 
     # Last fully-executed (global step, file_idx) for the final checkpoint;
     # stays None if the loop breaks before any step runs (see end of loop).
@@ -2757,9 +2762,9 @@ def _resolve_time_bracket(
     roundoff of the run clock: a query at most ``snap`` before the next
     snapshot along the motion counts as on it — forward it starts the
     interval above that snapshot, backward the band of the downward shift
-    is ``max(1e-6, snap)``.  The run loop passes ``1e-9 * max(dt, 1)``: a dt
-    that is not a whole number of seconds leaves ``sim_time`` a few ulp off
-    the snapshot a step was meant to reach.
+    is ``max(1e-6, snap)``.  The run loop passes ``5e-10 * max(dt, 1)``: a
+    dt that is not a whole number of seconds leaves ``sim_time`` off the
+    snapshot a step was meant to reach by its accumulated roundoff.
     """
     t_start = file_times[0]
     t_end = file_times[-1]
