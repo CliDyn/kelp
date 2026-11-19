@@ -235,7 +235,7 @@ _REFUSALS = {
         "A", dict(edit=_put("avg_wo", K - 1, dim="level_w")),
         dict(levels=LEV), ValueError,
         (FRAG_XW, "'avg_wo' has 5 entries on 'level_w'",
-         "(source.levels) has 6 interfaces")),
+         "(source.levels) has K = 6 interfaces")),
     "thetao_k_plus_1": (
         "A", dict(edit=_put("avg_thetao", K + 1)), dict(levels=LEV),
         ValueError,
@@ -249,9 +249,25 @@ _REFUSALS = {
     "p_table_one_short": (
         "P", {}, dict(levels=LEV[:5], max_levels=3), ValueError,
         (FRAG_XW, "'avg_wo' has 6 entries on 'level'",
-         "(source.levels) has 5 interfaces")),
+         "(source.levels) has K = 5 interfaces")),
     "u_live_tail": (
         "A", dict(edit=_put("avg_uoe", K, value=1.0)),
+        dict(levels=LEV, max_levels=M), ValueError,
+        (FRAG_XP, "'avg_uoe' has 6 entries on 'level_x'",
+         "in source record 0 (time 2020-01-02")),
+    # any non-NaN value in the K-th plane is data: 0.0 and +-inf too
+    "u_zero_tail": (
+        "A", dict(edit=_put("avg_uoe", K, value=0.0)),
+        dict(levels=LEV, max_levels=M), ValueError,
+        (FRAG_XP, "'avg_uoe' has 6 entries on 'level_x'",
+         "in source record 0 (time 2020-01-02")),
+    "u_posinf_tail": (
+        "A", dict(edit=_put("avg_uoe", K, value=np.inf)),
+        dict(levels=LEV, max_levels=M), ValueError,
+        (FRAG_XP, "'avg_uoe' has 6 entries on 'level_x'",
+         "in source record 0 (time 2020-01-02")),
+    "u_neginf_tail": (
+        "A", dict(edit=_put("avg_uoe", K, value=-np.inf)),
         dict(levels=LEV, max_levels=M), ValueError,
         (FRAG_XP, "'avg_uoe' has 6 entries on 'level_x'",
          "in source record 0 (time 2020-01-02")),
@@ -344,6 +360,35 @@ def test_bed_uses_source_var_u(tmp_path):
     assert "deptho" in ds.variables
     np.testing.assert_array_equal(ds["deptho"].values,
                                   _bed(ds["healpix_index"].values))
+
+
+def test_lengths_checked_in_the_written_store(tmp_path, monkeypatch):
+    """The lengths are checked again on the written store, reopened: a
+    reopen that shows u one entry short on its level dim is a RuntimeError
+    naming the variable, the dim, the found and the expected length; the
+    written store stays on disk.  (u alone on ``level_x``, K-1 entries, so
+    one variable can be short.)"""
+    a = _src(tmp_path, "A", edit=_put("avg_uoe", K - 1))
+    out = tmp_path / "ext.zarr"
+    open_zarr = xr.open_zarr
+    reopened = []
+
+    def short_reopen(store, *args, **kwargs):
+        reopened.append(str(store))
+        return open_zarr(store, *args, **kwargs).isel(
+            level_x=slice(0, M - 2))
+
+    monkeypatch.setattr(xr, "open_zarr", short_reopen)
+    with pytest.raises(RuntimeError) as ei:
+        extract_region(_xcfg(a, out, levels=LEV, max_levels=M))
+    msg = str(ei.value)
+    assert "in the written store" in msg, msg
+    assert "'avg_uoe' has 2 entries on 'level_x', expected 3" in msg, msg
+    assert reopened == [str(out)]
+    assert out.exists()
+    with open_zarr(out) as ds:
+        assert ds["avg_uoe"].dims == ("time", "level_x", "value")
+        assert ds.sizes["level_x"] == M - 1
 
 
 def test_two_store_eta_with_a_table(tmp_path):
@@ -591,10 +636,42 @@ def test_unchanged_and_new_defaults(tmp_path, leg):
 # --dry-run (S5)
 # ---------------------------------------------------------------------------
 
-def test_dry_run_checks_metadata_only(tmp_path, capsys):
+def _recording_open(reads):
+    """An ``_open_healpix_store`` for the extractor module: the store read
+    into memory, every variable on the cell dim a dask array that appends
+    its name to ``reads`` whenever a block of it is computed (a data
+    read); dims, sizes and attributes stay readable without a read."""
+    from kelp.readers.healpix import _open_healpix_store
+
+    def opener(path):
+        with _open_healpix_store(path) as ds:
+            ds = ds.load()
+        for nm in list(ds.data_vars):
+            if "value" not in ds[nm].dims:
+                continue
+
+            def logged(block, nm=nm):
+                reads.append(nm)
+                return block
+
+            arr = ds[nm].chunk().data
+            ds[nm] = ds[nm].copy(data=arr.map_blocks(
+                logged, dtype=arr.dtype, meta=np.array((), arr.dtype)))
+        return ds
+    return opener
+
+
+def test_dry_run_checks_metadata_only(tmp_path, capsys, monkeypatch):
     """A dry run makes every metadata check (X-L refuses) but reads no
-    plane: the last-level check is announced as not run, nothing is
-    written."""
+    plane: the last-level check is announced as not run, the bed of the
+    cut (``keep < K``, no depth variable in the source) is not computed,
+    no data variable is read, nothing is written.  The same config
+    without ``--dry-run`` reads u (the recorder sees reads) and is
+    refused by the last-level check."""
+    import extract_healpix_region as xhr
+
+    reads = []
+    monkeypatch.setattr(xhr, "_open_healpix_store", _recording_open(reads))
     a = _src(tmp_path, "A", tag="xl", edit=_put("avg_thetao", K + 1))
     out = tmp_path / "ext_xl.zarr"
     with pytest.raises(ValueError, match="a layer variable needs 5 entries"):
@@ -608,4 +685,10 @@ def test_dry_run_checks_metadata_only(tmp_path, capsys):
     printed = capsys.readouterr().out
     assert "dry run — the last-level check of" in printed, printed
     assert "avg_uoe" in printed.split("last-level check of", 1)[1]
+    assert reads == [], reads
+    assert not out2.exists()
+
+    with pytest.raises(ValueError, match=FRAG_XP):
+        extract_region(_xcfg(a2, out2, levels=LEV, max_levels=M))
+    assert "avg_uoe" in reads, reads
     assert not out2.exists()

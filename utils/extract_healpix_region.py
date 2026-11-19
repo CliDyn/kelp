@@ -432,7 +432,7 @@ def _assemble_and_write(cfg, ds, ds_eta, hp, nside, order, npix, names,
                 raise ValueError(
                     f"the vertical velocity {w_name!r} has {n} entries on "
                     f"{wd!r}, but the interface table ({table_label}) has "
-                    f"{k_src} interfaces; w must sit on exactly the K "
+                    f"K = {k_src} interfaces; w must sit on exactly the K "
                     "interfaces — check that the table lists the "
                     "INTERFACE depths of the source store.")
         for nm, (vd, n) in vaxes.items():
