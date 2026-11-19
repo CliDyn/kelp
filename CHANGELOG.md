@@ -101,6 +101,27 @@ the tracker was developed privately from 2026-06.
   KELP (arXiv:2611.18528, https://doi.org/10.48550/arXiv.2611.18528);
   `CITATION.cff` gives it as `preferred-citation`.
 
+### Fixed
+
+- NEMO C-grid, 3-D: a particle at or below the floor of its column (below a
+  partial bottom cell's own thickness, or below the deepest interface) sampled
+  the bottom-water value of `mode.sample_vars`; it now samples NaN, like the zero
+  velocity it has there. The depth is converted to the fractional level of the
+  containing cell, as the step does.
+- NEMO C-grid, 3-D: a particle that crossed a side face without changing its
+  fractional level (no vertical velocity) kept its old depth in metres. With
+  `mesh.nemo_partial_cells: shrunk`, a crossing into a column with a thinner
+  partial bottom cell left that depth below the new column's floor, and the
+  particle stopped there at the next step while the same run with `porous` went
+  on. The depth is now measured again in the cell where the step ends, so both
+  settings give the same horizontal paths.
+- NEMO C-grid, 2-D: a 2-D run on a standard 3-D `mesh_mask` or `domain_cfg`
+  weighted its surface fluxes by the 3-D partial-cell thicknesses, which slowed
+  the flow next to a shallow one-level column (0.17 instead of 0.5 m/s in a
+  synthetic case). A 2-D run now uses the surface faces only and gives the same
+  trajectories with the 3-D mesh file as with its 2-D form; its output no longer
+  carries the 3-D attribute `nemo_partial_cells`.
+
 ## [1.1.0] - 2026-11-16
 
 ### Added — horizontal velocity linear in depth (`mode.uv_vertical`)

@@ -4,18 +4,26 @@
   ``_interp_nemo_cgrid_core`` and its entries ``interp_nemo_cgrid`` (2-D, the
   ``numerics.uv_interp: nemo_cgrid`` entry of the interpolator registry in
   :mod:`.interpolate`), ``interp_nemo_cgrid_single`` and ``interp_nemo_cgrid3d``.
+  A 2-D evaluation (a field without ``w``) reads the surface faces without the
+  3-D thicknesses, also on a mesh built from a 3-D mesh_mask / domain_cfg.
 - **3-D step** ``nemo_cgrid3d_step`` (``mode.Fdrift3D``), called by the Euler /
   RK2 / RK4 steps of :mod:`.integrators`.
-- **Sampling** ``sample_field_nemo_cgrid``: the cell value of a T-point scalar.
+- **Sampling** ``sample_field_nemo_cgrid``: the cell value of a T-point scalar
+  (3-D: NaN at or below the column's floor, where the velocity is zero).
 
 The 3-D step runs in the fractional level coordinate ``s = k + zeta`` (level ``k``,
 ``zeta`` the fraction within the containing cell's own thickness; the porous /
 TRACMASS view of the C-grid): inside a cell the kernel is the index-space
 scheme ``dxi/dt = Uflux/Vol``, ``dzeta/dt = Wflux/Vol``, and a side-face
 crossing keeps ``s`` (the same flux per unit ``zeta`` on both sides), so a
-crossing from a thick cell into a thinner neighbour can never put a particle
-below the neighbour's floor.  ``state.z`` stays metres everywhere else: ``z``
--> ``s`` with the start cell, ``s`` -> ``z`` with the end cell.  The metres are
+crossing into a thinner partial bottom cell at the same level lands inside it,
+above its floor.  A face that is closed at the particle's level (a neighbour
+with fewer levels) carries no flux, but a large step can overshoot it like a
+coast in 2-D and end below that column's floor: the particle stays there,
+ALIVE, with zero velocity (land is not handled in the code; such particles are
+filtered post hoc, ``docs/nemo.md`` section 1).  ``state.z`` stays metres
+everywhere else: ``z`` -> ``s`` with the start cell, ``s`` -> ``z`` with the
+end cell (an unchanged ``s`` in an unchanged cell keeps ``z``).  The metres are
 measured on ``mesh._nemo_cgrid_zw`` (cumulative ``e3t_1d``; a diagnostic of ``s``,
 the dynamics use the thicknesses), plus the partial bottom cell's own
 thickness; depth in metres therefore jumps at a face between cells of
@@ -234,7 +242,15 @@ def _loop_interp_nemo_cgrid(P, alive_mask, lons, lats, zs, nn_nodes, elems, time
         ok[i] = success
 
 
-def _nemo_cgrid_args(mesh, vel):
+_ABSENT = np.empty(0)     # stands in for an absent w field (and, in 2-D, for zw)
+
+
+def _nemo_cgrid_args(mesh, vel, three_d):
+    """The mesh arguments of :func:`_interp_nemo_cgrid_core`.  A 2-D evaluation
+    (``three_d`` false: the field has no ``w``) gets an empty ``zw``, so it never
+    takes the kernel's 3-D thickness branch, also on a mesh built from a 3-D
+    mesh_mask / domain_cfg (whose partial cells would weight the surface fluxes
+    by ``e3face / e3cell``)."""
     if not getattr(mesh, "_nemo_cgrid", False):
         raise ValueError(
             "uv_interp 'nemo_cgrid' needs a C-grid mesh (NEMO reader with "
@@ -246,12 +262,10 @@ def _nemo_cgrid_args(mesh, vel):
             mesh.nodes_lon, mesh.nodes_lat, mesh._nemo_cgrid_corners,
             mesh._nemo_cgrid_elem_ji, mesh._nemo_cgrid_nlev,
             int(mesh._structured_shape[1]),
-            mesh._nemo_cgrid_e2u, mesh._nemo_cgrid_e1v, mesh._nemo_cgrid_area, mesh._nemo_cgrid_zw,
+            mesh._nemo_cgrid_e2u, mesh._nemo_cgrid_e1v, mesh._nemo_cgrid_area,
+            mesh._nemo_cgrid_zw if three_d else _ABSENT,
             mesh._nemo_cgrid_e3b, mesh._nemo_cgrid_kbu, mesh._nemo_cgrid_e3u,
             mesh._nemo_cgrid_kbv, mesh._nemo_cgrid_e3v)
-
-
-_ABSENT = np.empty(0)     # stands in for an absent w field
 
 
 def interp_nemo_cgrid_single(xp: float, yp: float, layer: int, mesh, vel, node_idx: int,
@@ -283,7 +297,7 @@ def interp_nemo_cgrid_single(xp: float, yp: float, layer: int, mesh, vel, node_i
     ok : bool
         False outside every element.
     """
-    a = _nemo_cgrid_args(mesh, vel)
+    a = _nemo_cgrid_args(mesh, vel, False)
     U, V, _W, ok = _interp_nemo_cgrid_core(xp, yp, 0.0, int(node_idx), int(elem),
                                       time_dir, *a, vel.u, vel.v, _ABSENT)
     return U, V, ok
@@ -298,7 +312,8 @@ def interp_nemo_cgrid3d(lon, lat, z, mask, mesh, vel, nn_nodes, time_dir=1.0, *,
     lon, lat : ndarray (P,)
         Positions (deg).
     z : ndarray (P,)
-        Fractional level ``s`` on a 3-D mesh; ignored on a 2-D one.
+        Fractional level ``s`` for a 3-D field (``vel.w`` set); ignored for a
+        2-D one, which reads the surface faces without the 3-D thicknesses.
     mask : ndarray of bool (P,)
         Particles to evaluate.
     mesh : Mesh
@@ -322,13 +337,13 @@ def interp_nemo_cgrid3d(lon, lat, z, mask, mesh, vel, nn_nodes, time_dir=1.0, *,
     ok : ndarray of bool (P,)
         False for a point outside every element, or beyond the dry ring.
     """
-    a = _nemo_cgrid_args(mesh, vel)
+    w_f = _ABSENT if vel.w is None else np.ascontiguousarray(vel.w).reshape(-1)
+    a = _nemo_cgrid_args(mesh, vel, w_f.shape[0] > 0)
     P = lon.shape[0]
     U = np.zeros(P); V = np.zeros(P); W = np.zeros(P)
     ok = np.zeros(P, dtype=bool)
     el = (np.full(P, -1, dtype=np.int32) if elems is None
           else np.asarray(elems, dtype=np.int32))
-    w_f = _ABSENT if vel.w is None else np.ascontiguousarray(vel.w).reshape(-1)
     uf = np.ascontiguousarray(vel.u).reshape(-1)
     vf = np.ascontiguousarray(vel.v).reshape(-1)
     args = (P, mask, lon, lat, np.asarray(z, dtype=np.float64), nn_nodes, el,
@@ -478,9 +493,12 @@ def nemo_cgrid3d_step(state: ParticleState, vel, mesh, dt: float, time_dir: floa
     nn = np.where(failed, nn0, nn)
     status = state.status.copy()
     status[failed] = ParticleStatus.OUTSIDE
-    # unchanged s keeps z (a particle at rest, or on land, is not re-measured)
-    z = np.where(s == s0, state.z,
-                 _level_coord(mesh, np.where(failed, e0, e1), np.where(failed, ok0, in_dom), s=s))
+    # an unchanged s in the start cell keeps z (a particle at rest, or on land,
+    # is not re-measured); after a side-face crossing the same s has another
+    # depth where the bottom cell is thinner (shrunk), so it is re-measured in
+    # the end cell
+    keep = ~alive | failed | ((s == s0) & (e1 == e0))
+    z = np.where(keep, state.z, _level_coord(mesh, e1, in_dom, s=s))
     # vel_w in m/s: the first stage's ds/dt times the start cell's thickness
     _, e3 = _cell_thickness(mesh, e0, ok0, np.floor(s0).astype(int))
     w_ms = first[2] * e3
@@ -507,8 +525,11 @@ def sample_field_nemo_cgrid(values, mesh, lons, lats, zs=None, *, alive=None,
     lons, lats : ndarray (P,)
         Particle positions (deg).
     zs : ndarray (P,) or None
-        Depths (m); required for layer-wise ``values``, the layer is the one
-        containing the depth.
+        Depths (m); required for layer-wise ``values``.  The depth is converted
+        to the fractional level ``s`` of the containing cell (as the 3-D step
+        does, :func:`_level_coord`): the layer is ``floor(s)``, and a depth at
+        or below the column's floor (``s >= nlev``: below the partial bottom
+        cell's own thickness, or below ``zw[K]``) samples NaN.
     alive : ndarray of bool (P,) or None
         Particles to sample (default: all).
     nearest : ndarray of int (P,) or None
@@ -518,7 +539,8 @@ def sample_field_nemo_cgrid(values, mesh, lons, lats, zs=None, *, alive=None,
     -------
     ndarray (P,)
         The value of the wet cell (and layer) containing the particle; NaN
-        outside every cell, for a dry-ring cell, or for a dead particle.
+        outside every cell, for a dry-ring cell, at or below the column's
+        floor (layer-wise ``values``), or for a dead particle.
     """
     P = len(lons)
     alive = np.ones(P, dtype=bool) if alive is None else np.asarray(alive)
@@ -533,9 +555,12 @@ def sample_field_nemo_cgrid(values, mesh, lons, lats, zs=None, *, alive=None,
     flat = (mesh._nemo_cgrid_elem_ji[e, 0] * mesh._structured_shape[1]
             + mesh._nemo_cgrid_elem_ji[e, 1])
     if values.ndim == 2:
-        zw = mesh._nemo_cgrid_zw
-        k = np.clip(np.searchsorted(zw, zs[idx], side="right") - 1, 0, values.shape[0] - 1)
-        out[idx] = values[k, flat]
+        # the level coordinate of the containing cell, as the step measures it:
+        # at or below the column's floor (s >= nlev) is land, NaN
+        s = _level_coord(mesh, e, ok, z=np.asarray(zs, dtype=np.float64)[idx])
+        k = np.clip(np.floor(s).astype(int), 0, values.shape[0] - 1)
+        land = s >= mesh._nemo_cgrid_nlev_raster.reshape(-1)[flat]
+        out[idx] = np.where(land, np.nan, values[k, flat])
     else:
         out[idx] = values[flat]
     out[idx[~ok]] = np.nan

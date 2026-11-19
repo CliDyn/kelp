@@ -3680,7 +3680,8 @@ def run_tracking(
             }
             if getattr(mesh, "_nemo_cgrid_layout", None) is not None:
                 meta["nemo_cgrid_layout"] = mesh._nemo_cgrid_layout.label()    # incl. the open edges
-                meta["nemo_partial_cells"] = mesh._nemo_cgrid_partial
+                if getattr(config.mode, "Fdrift3D", False):    # metres of a partial cell: 3-D only
+                    meta["nemo_partial_cells"] = mesh._nemo_cgrid_partial
             if getattr(config.mode, "Fdrift3D", False) and config.numerics.uv_interp != "nemo_cgrid":
                 meta["w_interp"] = str(config.numerics.w_interp)
                 # the file-side W convention and the 2026-09-23 reader

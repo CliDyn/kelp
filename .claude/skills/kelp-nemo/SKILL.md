@@ -23,6 +23,8 @@ output. The default `tpoint` path is 2-D, E/N-aligned grids only.
    `nav_lon/nav_lat`), `e2u`, `e1v`. 3-D also: `e3t_1d`, `e1t`, `e2t`, and
    `e3t_0`, `e3u_0`, `e3v_0` (partial cells; without them full reference
    cells are assumed — wrong on zps output, check `VertCoord` / `ncdump -h`).
+   A 2-D run uses the surface faces only: a 3-D `mesh_mask` / `domain_cfg`
+   gives the same trajectories as its 2-D form.
 2. **Velocity files**: u in grid_U, v in grid_V; T/S and `ssh` in grid_T. W is
    NOT read: the reader computes it from continuity (equal to the model's W
    on ORCA05); grid_W is never read (`ncinput_w` is refused).
@@ -68,7 +70,8 @@ output. The default `tpoint` path is 2-D, E/N-aligned grids only.
 | `time_counter` | time axis | automatic; record times via `data.time_averaging` or `time_stamp`/`time_window`/`time_offset` |
 
 `sample_vars` accept T-point fields only (U/V/W/F-point variables refuse) and
-return the T-cell value, NaN on land.
+return the T-cell value, NaN on land (3-D: also at or below the column's floor,
+where the velocity is zero).
 
 ## Pitfalls
 
