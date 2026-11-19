@@ -176,7 +176,7 @@ the remaining keys are not even validated.
 | `nemo_partial_cells` | `"shrunk"` | **nemo only, `nemo_grid: cgrid` 3-D.** Metres of the fractional level inside a partial bottom cell. `"shrunk"` (NEMO <= 4.2): the cell spans `[top, top + e3t_0]`, `z = top + s*e3t_0`. `"porous"` (NEMO 5): it spans the full reference layer, `z = top + s*e3t_1d(k)`. Only depth in metres differs (seeds' z -> s, output z): fluxes, W, lon/lat and the s-trajectories are identical; written to the output of a 3-D run as the attribute `nemo_partial_cells` (a 2-D run ignores the key). |
 | `healpix_geometry` | `"dual"` | **healpix only.** Mesh mapping of the pixelation: `"dual"` = nodes are pixel centres (node-layout u/v ⇒ `uv_interp: barycentric` required); `"pixel"` = elements are the pixels themselves, nodes are pixel corners (element-layout u/v ⇒ the fused `leastsq` kernels and `edge_leastsq` apply). `"pixel"` is **2-D only in v1**: `sample_vars`, spatial Kh (em/m1) and `Fdrift3D` fail fast. See docs/healpix.md §1b. |
 | `crop_bbox` | `null` | **healpix only.** Regional crop applied at mesh build: a pixel-centre test against `[W, E, S, N]` (degrees; `W > E` = a window crossing the dateline). A raw span `E − W ≥ 360` (e.g. `[-180, 180, S, N]`) means **all longitudes** (a pure latitude band); `W` and `E` that name the *same* meridian after wrapping (e.g. `[180, -180]` or `[350, -10]`) are ambiguous (0°- or 360°-wide) and are rejected with a pointer to the `span ≥ 360` form. The memory lever for zoom ≥ 10 — particles die at the crop edge like at any mesh boundary. |
-| `levels` | `null` | **healpix only.** Vertical interface depths for stores whose level axis is bare indices (GRIB kerchunk streams, e.g. ng5): a FESOM `aux3d.out` path (line 1 = K, then K interface depths; the node-bathymetry tail is ignored) **or** an inline list of metres. In 2-D it also provides per-cell bathymetry (deepest finite level of the u column → interface depth), which the beaching depth criteria need; without it (and without a `deptho` variable in the store) `mesh.depth` is all zeros. Values are `abs()`-ed and must be strictly increasing. |
+| `levels` | `null` | **healpix only.** Vertical interface depths for stores whose level axis is bare indices (GRIB kerchunk streams, e.g. ng5): a FESOM `aux3d.out` path (line 1 = K, then K interface depths; the node-bathymetry tail is ignored) **or** an inline list of metres. In 2-D it also provides per-cell bathymetry (deepest finite level of the u column → interface depth), which the beaching depth criteria need; without it (and without a `deptho` variable in the store) `mesh.depth` is all zeros. Values are `abs()`-ed and must be strictly increasing. They are the K **interface** depths, not the K−1 layer mid-depths: in 3-D every vertical axis of the store is checked strictly against the full table (before any `mode.max_levels` cut) — w exactly K entries; u, v and the 3-D scalars read (`sample_vars`, the beaching dry mask) K−1, or K with an empty last level — and a mismatch is refused (u, v and w before any output file exists and in `kelp info`; `healpix.md` §2). A store that carries its own `level_interfaces_m` table uses it; a `levels` that differs from it is refused. |
 
 ## 5. `data` — input and output files
 
@@ -248,7 +248,13 @@ detected from the path:
 - **Regional extracts** made by `utils/extract_healpix_region.py` are
   consumed transparently (the reader finds `healpix_index` inside): point
   both `meshpath` and `ncinput` at the extract; no `ncinput_eta` (ssh was
-  merged at extraction); `crop_bbox` composes as a further crop.
+  merged at extraction); `crop_bbox` composes as a further crop. An extract
+  written with an interface table carries it (`level_interfaces_m`), so a
+  3-D run on it needs no `levels`. A 3-D extract cut with
+  `region.max_levels` by the extractor before version 1.1 (attribute
+  `tool = "extract_healpix_region v1.0"`) runs as before, with a warning
+  that names the bottom layer it does not use: extract the region again
+  from the whole store to use that layer (`healpix.md` §4).
 
 **FESOM 1.4 (`mesh.type: fesom14`)** — files are grouped by what they hold,
 never by their names:

@@ -46,7 +46,10 @@ against the mesh: `run_tracking` calls it right after the dataset is opened,
 before any output file exists, and each realization calls it again at its
 entry, after the `max_levels` cut (`kelp info` calls it once). The FESOM 1.4
 reader uses it to compare the sizes, the level axis, the node coordinates and
-the wet mask of the first record of every variable with the mesh.
+the wet mask of the first record of every variable with the mesh. A hook
+declared as `prepare(mesh, ds, *, mode_cfg=None)` is given the run's mode as
+well: the HEALPix reader uses it in 3-D runs to check the vertical axes of u,
+v and w at the first record against the interface table (`healpix.md` §2).
 
 Whether a given path is a NetCDF file or a Zarr store is decided by
 `_detect_engine`: a `.zarr` suffix, or a directory that contains a `.zattrs`

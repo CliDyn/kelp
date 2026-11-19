@@ -8,13 +8,18 @@
 # sea water velocity"); the reader negates it into KELP's positive-down depth
 # rate (mode.w_positive: auto -> the HEALPix default, up).
 # GRIB level axes carry only indices, so 3-D REQUIRES mesh.levels — the
-# FESOM aux3d.out interface table (or an inline list of metres).  Per-cell
-# bathymetry = the deepest finite u level's interface depth.
+# FESOM aux3d.out interface table (or an inline list of metres).  These are
+# the 70 INTERFACE depths, not the 69 layer mid-depths: the reader checks
+# every vertical axis against them (w exactly K entries; u, v, T, S K-1, or K
+# with an empty last level) and refuses a mismatch before any output file
+# exists (kelp info gives the same verdict).  Per-cell bathymetry = the
+# deepest finite u level's interface depth.
 #
 # Memory: a zoom-9 3-D snapshot is ~3.7 GB in float64 (u+v+w) — use
 # velocity_float32 and/or cut a regional extract first
 # (utils/extract_healpix_region.py with source.levels set: the extract
-# then carries its own interface table and needs no mesh.levels here).
+# then carries its own interface table and needs no mesh.levels here; a 3-D
+# extract cut with region.max_levels needs that table).
 #
 # Paths are placeholders -- edit for your machine.
 # =========================================================================

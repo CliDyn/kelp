@@ -65,7 +65,10 @@ into its own small dataclass. (Every key is documented in
    called right after (`readers._prepare_dataset`), before anything reads the
    dataset on the mesh and before any output file exists; each realization
    calls it again at its entry (`run_single_realization`, after the
-   `max_levels` cut), so a run with R realizations prepares 1 + R times. The
+   `max_levels` cut), so a run with R realizations prepares 1 + R times. A
+   hook declared as `prepare(mesh, ds, *, mode_cfg=None)` also gets the run's
+   mode: the HEALPix hook uses it to check the vertical axes of u, v and w of a
+   3-D run against the interface table (`healpix.md` §2). The
    engine keeps no record of what a mesh was prepared for.
 
 4. **Load the seed particles.** `read_seeds_with_release(config.data.inicloud)`

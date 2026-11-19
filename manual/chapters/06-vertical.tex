@@ -72,7 +72,9 @@ the separate array \code{depth}. FESOM2 meshes hold the levels in the mesh file.
 them from \code{nod3d.out} or from the depth coordinate of level-wise data, and their per-node floor is
 the depth of each column's last wet level (\cref{sec:mesh-fesom14}). A HEALPix product
 takes them from \conf{mesh.levels} --- the path of a level table or an inline list of depths, required to
-be strictly increasing --- or from the table a regional extract embeds; its per-node floor comes from
+be strictly increasing --- or from the table the store carries (\code{level\_interfaces\_m}, written for
+example by the region-extraction tool), which takes precedence; a \conf{mesh.levels} that differs from it is
+refused (\cref{sec:vert-healpix-axes}). Its per-node floor comes from
 a bathymetry variable when the store has one, otherwise from the deepest level with finite data. For
 the terrain-following \emph{sigma} family of FESOM-C the interface depths are reconstructed per water
 column from a fixed set of fractions $\sigma_k$ and the local column thickness $H$,
@@ -83,6 +85,20 @@ where $d$ is the still-water depth, $\eta$ the sea-surface height, and $D_{\min}
 thickness (default \SI{0.5}{\metre}). With this convention $\sigma=1$ maps to $z=0$ (the surface) and
 $\sigma=0$ maps to $z=H$ (the floor). The key \conf{mode.max\_levels} keeps the top
 \conf{max\_levels} interfaces of either family.
+
+\paragraph{The vertical axes of a HEALPix store.}\label{sec:vert-healpix-axes} The HEALPix reader finds the
+vertical axis of each variable on its own, so the vertical velocity may lie on an axis of its own (for
+example \code{level\_w}) next to the layer variables. Its table lists the $K$ interface depths, not the layer
+mid-depths, and in three dimensions the reader checks the vertical axis of every variable against the full
+table, before any \conf{max\_levels} cut: the vertical velocity must have exactly $K$ entries, and $u$, $v$
+and every scalar read in three dimensions $K-1$ entries, or $K$ entries whose last level holds no data at
+any column the mesh tracks. Anything else is refused with the numbers rather than cut silently --- $u$, $v$
+and $\Wvel$ before any output file exists, sampled scalars in the checks a run makes before writing, a later
+record when it is read. The region-extraction tool applies the same rule before it cuts: with a table,
+\conf{region.max\_levels} set to $M$ keeps $M$ interfaces for $\Wvel$ and $M-1$ entries for the layer variables,
+and the extract carries the table and the source's floor. A three-dimensional extract cut with
+\conf{region.max\_levels} by the tool before version~1.1 keeps one layer below its deepest interface; it
+still runs as before, without that layer, and a warning recommends extracting the region again.
 
 \codenote{The FESOM2 NetCDF and Zarr loaders store the z-levels positive down; the
 \code{mesh.z\_levels} property takes the absolute value once more. Three-dimensional runs on FESOM2's

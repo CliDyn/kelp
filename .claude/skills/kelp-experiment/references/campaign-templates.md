@@ -242,7 +242,15 @@ if IS_HEALPIX_3D:                            # raw/kerchunk store: the vertical 
     assert c.mesh.levels is not None, "generator must write mesh.levels (aux3d path or inline list); extracts embed it"
 ```
 The generator's YAML template therefore carries the line `levels: <aux3d path or [0.0, 5.0, …]>`
-under `mesh:` for HEALPix 3-D — as a written key, not as a comment.
+under `mesh:` for HEALPix 3-D — as a written key, not as a comment. The table lists the K
+INTERFACE depths, not the K−1 layer mid-depths: the reader checks every vertical axis against
+it (w exactly K entries; u, v and the sampled T/S K−1, or K with an empty last level) and
+refuses a mismatch before any output exists — `kelp info` on one shard config shows the verdict
+before the chain is submitted. A regional extract cut with `region.max_levels` by the extractor
+before version 1.1 (attribute `tool = "extract_healpix_region v1.0"`) runs as before, with one
+warning naming the bottom layer it does not use: extract the region again from the whole store
+(with the table, `region.max_levels` at least one more than the old extract's table) before a
+campaign is built on it.
 
 **Generator — the config dict every shard config is written from (copy; the keys
 that decide the campaign live HERE, not in a comment of the config check):**

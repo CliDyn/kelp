@@ -134,7 +134,7 @@ healpix\_geometry & str & \code{dual} & HEALPix: \code{dual} (nodes at pixel cen
 crop\_bbox & [W, E, S, N] & \code{null} & HEALPix: crop to a box; $W>E$ crosses the dateline. \\
 nemo\_grid & str & \code{tpoint} & NEMO: \code{tpoint} (quadrilaterals of T-points, 2-D, grids aligned with east and north) or \code{cgrid} (exact C-grid, 2-D and 3-D; sets \conf{uv\_interp: nemo\_cgrid}). \\
 nemo\_partial\_cells & str & \code{shrunk} & NEMO C-grid, 3-D: depth in metres inside a partial bottom cell, \code{shrunk} (NEMO $\le$ 4.2) or \code{porous} (NEMO 5). \\
-levels & path or list & \code{null} & HEALPix: interface depths, a level-table path or an inline list; needed in 3-D, and in 2-D it sets the node depths when the store has no bathymetry variable. \\
+levels & path or list & \code{null} & HEALPix: the $K$ interface depths (not the layer mid-depths), a level-table path or an inline list; needed in 3-D unless the store carries its own table, and every vertical axis is then checked against them (\cref{sec:vert-coord}); in 2-D it sets the node depths when the store has no bathymetry variable. \\
 \bottomrule
 \end{longtable}
 
