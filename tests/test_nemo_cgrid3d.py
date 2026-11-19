@@ -431,3 +431,181 @@ def test_nemo_cgrid3d_step_refuses_diffusion_and_reconstruction():
     for kw in ({"diffusion": object()}, {"recon": object()}):
         with pytest.raises(NotImplementedError):
             nemo_cgrid3d_step(st, vel, mesh, 1.0, 1.0, "euler", kw)
+
+
+# --- samples below a column's floor, depth after a side-face crossing, 2-D runs on a
+# --- 3-D mesh file (review of PR #6) -----------------------------------------------
+@pytest.mark.parametrize("partial", ["shrunk", "porous"])
+def test_sample_below_the_floor_is_nan(partial):
+    """A particle at or below its column's floor is on land: NaN, like its zero
+    velocity.  The floor is the level coordinate's (``s >= nlev``): the partial
+    bottom cell's own thickness (shrunk) or the reference layer (porous), and
+    ``zw[K]`` in a full column."""
+    nl = np.full((NY, NX), K); nl[2:4, 3:6] = 2
+    e3b = np.full((NY, NX), DZ); e3b[2:4, 3:6] = 4.0
+    mesh, *_ = _box(nl, e3b, partial)
+    kk = np.arange(K)[:, None, None]
+    T = np.where(kk < mesh._nemo_cgrid_nlev_raster, 100.0 * kk + 18.5, np.nan).reshape(K, -1)   # the reader's land mask
+    # T(3, 4): 2 levels, bottom cell 4 m (floor 14 m shrunk, 20 m porous); T(3, 2): 5 full levels (floor 50 m)
+    lon = np.array([3.5, 3.5, 3.5, 1.5, 1.5]) * D
+    lat = np.full(5, 2.5 * D)
+    z = np.array([13.0, 16.0, 25.0, 49.0, 55.0])
+    out = sample_field_nemo_cgrid(T, mesh, lon, lat, z)
+    want = [118.5, np.nan if partial == "shrunk" else 118.5, np.nan, 418.5, np.nan]
+    np.testing.assert_array_equal(out, want)
+
+
+def test_shrunk_side_crossing_with_zero_w_keeps_the_level():
+    """Bottom layer, eastward transport that is the same through every face
+    (``u e2u e3u`` constant: W = 0), into columns whose partial bottom cell is
+    thinner (10 m -> 4 m).  The particle keeps its fractional level across the
+    face, so its depth is re-measured in the thin cell (above its floor) and it
+    moves on; shrunk and porous give the same lon / lat."""
+    e3b = np.full((NY, NX), DZ); e3b[:, 5:] = 4.0
+    res = {}
+    for pc in ("shrunk", "porous"):
+        mesh, e2u, e1v, nl = _box(None, e3b, pc)
+        _, e3u, _ = _zps(nl, e3b)
+        u = np.zeros((K, NY, NX)); v = np.zeros_like(u)
+        flux = 0.25 * e2u[2, 2] * DZ                          # 0.25 m/s in 10 m, 0.625 m/s in 4 m
+        u[K - 1, 1:-1, 1:NX - 2] = flux / (e2u[1:-1, 1:NX - 2] * e3u[K - 1, 1:-1, 1:NX - 2])
+        w = _w(mesh, u, v, e2u, e1v)
+        assert np.abs(w[:, 1:-1, 2:NX - 2]).max() < 1e-15             # no W in the interior columns
+        vel = _vel(mesh, u, v, w)
+        st = make_state([3.9 * D], [2.5 * D], [ZW[K - 1] + 7.0])   # T(3, 4), full cell, s = K - 0.3
+        for _ in range(10):
+            st = nemo_cgrid3d_step(st, vel, mesh, 1800.0, 1.0, "rk4", {})
+        res[pc] = st
+    a, b = res["shrunk"], res["porous"]
+    assert (a.status == ParticleStatus.ALIVE).all() and a.lon[0] > 4.5 * D      # crossed at 4 D, moved on
+    np.testing.assert_allclose(a.u, 0.625, rtol=1e-3)                          # still moving
+    assert a.lon[0] == b.lon[0] and a.lat[0] == b.lat[0]
+    np.testing.assert_allclose(a.z, ZW[K - 1] + 0.7 * 4.0, rtol=1e-12)        # s kept, shrunk metres
+    np.testing.assert_allclose(b.z, ZW[K - 1] + 0.7 * DZ, rtol=1e-12)         # porous metres
+
+
+def _surface_partial_case():
+    """K levels; T(2, 3) is a one-level column whose cell is 3 m thick (partial)."""
+    nl = np.full((NY, NX), K); nl[2, 3] = 1
+    e3b = np.full((NY, NX), DZ); e3b[2, 3] = 3.0
+    return nl, e3b
+
+
+def test_2d_interpolation_ignores_the_3d_thicknesses():
+    """A 2-D field on a mesh that carries the 3-D tables (a standard mesh_mask /
+    domain_cfg) is interpolated as on the 2-D mesh: no e3face / e3cell weights."""
+    from kelp.numerics.nemo_cgrid import interp_nemo_cgrid, interp_nemo_cgrid_single
+    nl, e3b = _surface_partial_case()
+    mesh3, e2u, e1v, nl = _box(nl, e3b)
+    (flon, flat), _ = _grid(NY, NX)
+    mesh2 = build_nemo_cgrid_mesh(flon, flat, nl > 0, e2u=e2u, e1v=e1v)
+    tm = (nl > 0).astype(float)
+    u = np.where((tm[:, :-1] * tm[:, 1:]) > 0, 0.5, 0.0)
+    u = np.concatenate([u, np.zeros((NY, 1))], 1)
+    vel = VelocityField(u=u.ravel(), v=np.zeros(NY * NX), eta=np.zeros(mesh3.n_nodes),
+                        uv_layout="nemo_cgrid")
+    lon = np.array([1.95, 2.5, 2.05, 4.5]) * D; lat = np.array([1.5, 1.5, 1.5, 3.5]) * D
+    got = []
+    for mesh in (mesh3, mesh2):
+        nn = np.array([np.argmin((mesh.nodes_lon - a) ** 2 + (mesh.nodes_lat - b) ** 2)
+                       for a, b in zip(lon, lat)])
+        U, V, ok = interp_nemo_cgrid(make_state(lon, lat), mesh, vel, nn)
+        single = [interp_nemo_cgrid_single(a, b, 0, mesh, vel, n) for a, b, n in zip(lon, lat, nn)]
+        assert ok.all()
+        np.testing.assert_array_equal(U, [s[0] for s in single])
+        got.append((U, V))
+    np.testing.assert_array_equal(got[0][0], got[1][0])
+    np.testing.assert_array_equal(got[0][1], got[1][1])
+    np.testing.assert_allclose(got[0][0][0], 0.5, rtol=1e-3)     # next to the partial column
+
+
+def _write_case(tmp_path, nl, e3b, u, v, *, thetao=None, mesh2d=False, n_time=2):
+    """grid_T / grid_U / grid_V files (u, v, thetao: (K, NY, NX), the same every
+    record) and a mesh_mask.nc on the `_box` grid: the 3-D one (tmask, e3t_1d,
+    e1t, e2t, e3t_0, e3u_0, e3v_0) or, ``mesh2d``, a 2-D one (surface tmask,
+    F points, face widths)."""
+    import pandas as pd
+    import xarray as xr
+    (flon, flat), (tlon, tlat) = _grid(NY, NX)
+    e2u, e1v = _widths(flon, flat)
+    tc = {"time_counter": pd.date_range("2020-01-01", periods=n_time, freq="h")}
+    rec = lambda a: np.broadcast_to(a, (n_time,) + a.shape).copy()
+    dT = {"ssh": (("time_counter", "y", "x"), np.zeros((n_time, NY, NX)))}
+    if thetao is not None:
+        dT["thetao"] = (("time_counter", "deptht", "y", "x"), rec(thetao))
+    xr.Dataset(dT, coords=tc).to_netcdf(tmp_path / "E_grid_T.nc")
+    xr.Dataset({"uo": (("time_counter", "depthu", "y", "x"), rec(u))}, coords=tc).to_netcdf(tmp_path / "E_grid_U.nc")
+    xr.Dataset({"vo": (("time_counter", "depthv", "y", "x"), rec(v))}, coords=tc).to_netcdf(tmp_path / "E_grid_V.nc")
+    d2 = lambda a: (("y", "x"), a)
+    mm = {"nav_lon": d2(tlon), "nav_lat": d2(tlat), "glamf": d2(flon), "gphif": d2(flat),
+          "e2u": d2(e2u), "e1v": d2(e1v)}
+    if mesh2d:
+        mm["tmask"] = (("z", "y", "x"), (nl > 0)[None].astype(float))
+    else:
+        e3t, e3u, e3v = _zps(nl, e3b)
+        d3 = lambda a: (("z", "y", "x"), a)
+        mm.update(tmask=d3((np.arange(K)[:, None, None] < nl).astype(float)),
+                  e1t=d2(e1v), e2t=d2(e2u), e3t_1d=(("z",), np.full(K, DZ)),
+                  e3t_0=d3(e3t), e3u_0=d3(e3u), e3v_0=d3(e3v))
+    name = "mesh_mask_2d.nc" if mesh2d else "mesh_mask.nc"
+    xr.Dataset(mm).to_netcdf(tmp_path / name)
+    return str(tmp_path / "E_grid_T.nc"), str(tmp_path / name)
+
+
+def _run(tmp_path, gt, mm, seeds, *, three_d, n_steps, dt, tag, integrator="rk4", sample_vars=None):
+    import xarray as xr
+    from kelp.core.config import (AppConfig, DataConfig, MeshConfig, ModeConfig,
+                                  NumericsConfig, TimeConfig)
+    from kelp.tracking import run_tracking
+    from kelp.writers import load_trajectories
+    sf = tmp_path / f"seeds_{tag}.dat"
+    sf.write_text("".join(" ".join(f"{c:.9f}" for c in s) + "\n" for s in seeds))
+    out = tmp_path / f"traj_{tag}.nc"
+    cfg = AppConfig(
+        mode=ModeConfig(Fdrift2D=not three_d, Fdrift3D=three_d, sample_vars=sample_vars or []),
+        numerics=NumericsConfig(dt=dt, integrator=integrator, output_freq=1),
+        mesh=MeshConfig(type="nemo", meshpath=mm, nemo_grid="cgrid"),
+        data=DataConfig(ncinput=gt, inicloud=str(sf), output_path=str(out),
+                        time_averaging="instant"),
+        time=TimeConfig(start_time_idx=0, n_steps=n_steps))
+    run_tracking(cfg, temporal_interp=True)
+    with xr.open_dataset(out) as ds:
+        attrs = dict(ds.attrs)
+    return load_trajectories(str(out)), attrs
+
+
+def test_2d_run_is_the_same_with_the_3d_and_the_2d_mesh_file(tmp_path):
+    """The same 2-D run (Fdrift3D false) on a standard 3-D mesh_mask and on its
+    2-D form: identical trajectories, and no ``nemo_partial_cells`` attribute
+    (a 3-D-only setting)."""
+    nl, e3b = _surface_partial_case()
+    u = np.full((K, NY, NX), 0.5); v = np.zeros_like(u)
+    gt, mm3 = _write_case(tmp_path, nl, e3b, u, v)
+    _gt, mm2 = _write_case(tmp_path, nl, e3b, u, v, mesh2d=True)
+    seeds = [(1.95 * D, 1.5 * D), (2.6 * D, 3.5 * D), (5.5 * D, 4.2 * D)]
+    tr3, at3 = _run(tmp_path, gt, mm3, seeds, three_d=False, n_steps=4, dt=300.0, tag="m3")
+    tr2, at2 = _run(tmp_path, gt, mm2, seeds, three_d=False, n_steps=4, dt=300.0, tag="m2")
+    for f in ("lon", "lat", "vel_u", "vel_v", "status"):
+        np.testing.assert_array_equal(tr3[f], tr2[f], err_msg=f)
+    np.testing.assert_allclose(tr3["vel_u"][0, 0], 0.5, rtol=1e-3)
+    assert "nemo_partial_cells" not in at3 and "nemo_partial_cells" not in at2
+
+
+def test_3d_run_samples_nan_below_the_floor_and_records_partial_cells(tmp_path):
+    """Configured 3-D run: a seed below its column's floor (in the partial bottom
+    cell's column, and below zw[K] in a full column) stays on land with zero
+    velocity and samples NaN; a seed in the water samples its cell; the output
+    carries ``nemo_partial_cells``."""
+    nl = np.full((NY, NX), K); nl[2:4, 3:6] = 2
+    e3b = np.full((NY, NX), DZ); e3b[2:4, 3:6] = 4.0
+    u = np.full((K, NY, NX), 0.2); v = np.zeros_like(u)
+    kk = np.arange(K)[:, None, None]
+    theta = np.where(kk < nl, 18.5, 0.0) + 0.0 * u
+    gt, mm = _write_case(tmp_path, nl, e3b, u, v, thetao=theta)
+    seeds = [(3.5 * D, 2.5 * D, 16.0), (1.5 * D, 2.5 * D, 55.0), (1.5 * D, 2.5 * D, 25.0)]
+    tr, attrs = _run(tmp_path, gt, mm, seeds, three_d=True, n_steps=1, dt=600.0, tag="s3",
+                     integrator="euler", sample_vars=["thetao"])
+    np.testing.assert_array_equal(tr["vel_u"][:2, 0], [0.0, 0.0])                # on land
+    assert np.isnan(tr["thetao"][:2]).all()
+    np.testing.assert_array_equal(tr["thetao"][2], 18.5)
+    assert attrs["nemo_partial_cells"] == "shrunk"

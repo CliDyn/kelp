@@ -79,6 +79,10 @@ the `e3t` of the z*/vvl check are canonicalised silently.
 - for 3-D also `e3t_1d`, `e1t`, `e2t`, and `e3t_0`, `e3u_0`, `e3v_0` for
   partial cells (absent: full reference cells; a zps vertical grid without them is refused by a 3-D run).
 
+A 2-D run (`mode.Fdrift3D: false`) reads the surface faces only and does not
+use the 3-D tables of a mesh file (levels, partial cells): a standard 3-D
+`mesh_mask` / `domain_cfg` gives the same trajectories as its 2-D form.
+
 The model output is `data.ncinput` (the grid_T file(s)), with the grid_U /
 grid_V siblings derived by swapping the `grid_T` token in the file
 name. Files without that token take `ncinput_u`, `ncinput_v` explicitly
@@ -103,10 +107,16 @@ Land values in the velocity files (0 or NaN) are irrelevant: the faces a
   cumulative `e3t_1d`; the depth is positive down, in metres.
 - **Fractional level coordinate.** The step runs in `s = k + zeta` (level and
   the fraction within the containing cell). A particle crossing a side face keeps
-  `s`, so a crossing from a thick cell into a thinner neighbour cannot land below
-  its floor. Metres are a diagnostic of `s` and jump at a face between cells of
-  different bottom thickness. Seeds are converted metres to `s` with the start
-  cell.
+  `s`, and its depth in metres is measured again in the new cell, so a crossing
+  into a thinner partial bottom cell at the same level lands inside that cell,
+  above its floor. A face that is closed at the particle's level (a neighbour
+  with fewer levels) carries no flow, but a large step can overshoot it, as a
+  step can overshoot a coast in 2-D, and end below that column's floor; the
+  particle then stays there, ALIVE, with zero velocity (in a synthetic rough
+  field at about 1 m/s: 2 of 600 particles with RK4 and dt 3600 s, none with
+  dt 900 s). Such particles are found with the post-hoc filter of §1. Metres are
+  a diagnostic of `s` and jump at a face between cells of different bottom
+  thickness. Seeds are converted metres to `s` with the start cell.
 - **Partial cells (zps).** The bottom cell has the thickness `e3t_0` there;
   faces use `e3u_0`/`e3v_0` (checked against the zps min rule, else refused).
   `mesh.nemo_partial_cells` chooses the depth in metres of the fractional level in
@@ -131,6 +141,10 @@ Land values in the velocity files (0 or NaN) are irrelevant: the faces a
 
 `mode.sample_vars` returns the **T-cell value** of the containing cell and
 layer (2-D: the surface layer), NaN outside, on land and for dead particles.
+In 3-D the layer is that of the fractional level `s` in the containing cell
+(§4), and a particle at or below its column's floor is on land and samples NaN,
+like its zero velocity: below the partial bottom cell's own thickness
+(`shrunk`; the reference layer with `porous`) or below the last interface.
 There is no interpolation between cells. U/V/W/F-point variables are refused.
 Names are exact (`thetao`, `thetao_con`, `so`, `so_abs`, `votemper`, ...).
 
@@ -177,10 +191,15 @@ and an unset `data.time_averaging` (`instant` is assumed, `running.md`).
   `KELP_TEST_NEMO_DATA` (`tests/test_nemo_cgrid_data.py`,
   `tests/test_nemo_cgrid_lagrangian.py`), built as described under "Test data".
 
-A uniform flow comes out multiplied by `e2u / (dlat * 111120 m)`, i.e. +0.07 %
-with the NEMO radius of 6 371 229 m. Particle paths can still cut a convex land
-corner within about `v*dt/2` of it in an RK stage (rare; a smaller dt does not
-remove it).
+The fluxes use the model's widths and areas (NEMO radius R_NEMO = 6 371 229 m),
+the Jacobian the integrators' plane (111 120 m per degree, R_KELP = 6 366 707 m),
+so every rate in index space is (R_NEMO/R_KELP)^2 = 1.00142 times the model's:
+particles move 0.14 % fast in degrees and in depth (dz/dt, written as `vel_w`),
+and transit times are 0.14 % short. The horizontal velocities written in m/s are
+0.07 % high (a uniform flow comes out multiplied by `e2u / (dlat * 111120 m)` =
+1.00071). The factor is common to every component, so the paths keep their
+shape. Particle paths can still cut a convex land corner within about `v*dt/2`
+of it in an RK stage (rare; a smaller dt does not remove it).
 
 ### Test data
 
