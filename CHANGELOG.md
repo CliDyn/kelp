@@ -173,6 +173,21 @@ the tracker was developed privately from 2026-06.
   29.5 to 31 days apart, any divisor of half a day, so a daily step is refused
   there. The Euler integrator, which has a single stage, and the discrete mode
   are not affected.
+- Under `time.on_exhausted: cycle`, means whose averaging windows are known now
+  repeat after the sum of their windows. The windows are known when
+  `data.time_stamp` is set with `data.time_window: calendar_month` or
+  `calendar_year`, and for FESOM 1.4 output from the files' time bounds or
+  output schedule. Twelve monthly means of a common year therefore repeat after
+  365 days, and the interval from the last December to the first January of the
+  next pass is 31 days; the earlier rule, the span from the first to the last
+  record plus the last interval, gave 364.5 days. A cycled FESOM 1.4 run on
+  monthly means changes accordingly. When the windows differ in length, the
+  cycle needs `numerics.temporal_interp: true` and is refused in discrete mode
+  when the run starts. Snapshots on a monthly or yearly cadence under `cycle`
+  are now refused for FESOM 1.4 as well. Records whose windows are not known
+  keep the earlier rule, which is exact for equally spaced records; when they
+  are irregularly spaced, the run warns once. The output attribute
+  `forcing_cycle_period` records the period used.
 
 ### Fixed
 
