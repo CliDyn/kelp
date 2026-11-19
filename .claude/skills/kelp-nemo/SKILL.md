@@ -109,12 +109,12 @@ numerics: {dt: 3600.0, integrator: rk4, output_freq: 24, temporal_interp: true}
 mesh:
   type: nemo
   nemo_grid: cgrid
-  meshpath: /path/mesh_mask.nc          # or domain_cfg.nc
+  meshpath: path/to/mesh_mask.nc       # or domain_cfg.nc
   # rotation: fesom2                    # Arctic
 data:
-  ncinput: /path/EXP_*_grid_T_*.nc      # grid_U / grid_V siblings by the grid_T token
-  # ncinput_u: /path/EXP_U_*.nc         # when the names lack the token
-  # ncinput_v: /path/EXP_V_*.nc
+  ncinput: path/to/EXP_*_grid_T_*.nc   # grid_U / grid_V siblings by the grid_T token
+  # ncinput_u: path/to/EXP_U_*.nc      # when the names lack the token
+  # ncinput_v: path/to/EXP_V_*.nc
   inicloud: seeds.dat
   output_path: ./.tmp/nemo_tracks.zarr
   time_averaging: instant               # means: time_stamp: centre + time_window instead
