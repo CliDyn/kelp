@@ -130,8 +130,6 @@ the tracker was developed privately from 2026-06.
   however long the run. Runs whose time step is a whole number of seconds, on
   records stamped at whole seconds, are unchanged.
 
-### Fixed
-
 - NEMO C-grid, 3-D: a particle at or below the floor of its column (below a
   partial bottom cell's own thickness, or below the deepest interface) sampled
   the bottom-water value of `mode.sample_vars`; it now samples NaN, like the zero
