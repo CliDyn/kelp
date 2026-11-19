@@ -418,6 +418,8 @@ which collapses the first line to `u_{a,e}` and recovers the original
 single-blend arithmetic exactly. So the lazy machinery changes *when* the blend
 happens, never the numbers it produces.
 
+`uv_interp: nemo_cgrid` is never fused (`velocity_interpolation.md` §8).
+
 
 ## 6. What is called when
 

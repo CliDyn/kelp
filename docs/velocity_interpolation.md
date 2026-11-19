@@ -1,8 +1,8 @@
 # KELP velocity interpolation
 
 > **Covers:** how the horizontal `u`/`v` velocity at a particle is computed once its nearest node and containing element are known — the default least-squares plane fit (and why it is particle-centered), the barycentric/Wachspress vertex blend, and node- vs element-based velocity layouts.
-> **Does not cover:** finding the nearest node / containing element (see `localization.md`); the full weight formulas and normal-equation derivations (see `interpolation.md` §1, §1.1, §7); the vertical `W` velocity (see `vertical.md`); where the velocity layout is detected on input (see `io_and_time.md`, `configuration.md`).
-> **Code:** `src/kelp/numerics/interpolate.py:_interp_leastsq_core`, `src/kelp/numerics/interpolate.py:_interp_barycentric_core`, `src/kelp/numerics/interpolate.py:_interp_barycentric_core_dl`, `src/kelp/numerics/interpolate.py:_interp_leastsq_core_dl`, `src/kelp/numerics/interpolate.py:get_interpolator`.
+> **Does not cover:** the NEMO C-grid path's user-level behaviour (see `nemo.md`); finding the nearest node / containing element (see `localization.md`); the full weight formulas and normal-equation derivations (see `interpolation.md` §1, §1.1, §7); the vertical `W` velocity (see `vertical.md`); where the velocity layout is detected on input (see `io_and_time.md`, `configuration.md`).
+> **Code:** `src/kelp/numerics/interpolate.py:_interp_leastsq_core`, `src/kelp/numerics/interpolate.py:_interp_barycentric_core`, `src/kelp/numerics/interpolate.py:_interp_barycentric_core_dl`, `src/kelp/numerics/interpolate.py:_interp_leastsq_core_dl`, `src/kelp/numerics/interpolate.py:get_interpolator`, `src/kelp/numerics/nemo_cgrid.py:_interp_nemo_cgrid_core`, `src/kelp/numerics/nemo_cgrid.py:interp_nemo_cgrid3d`.
 > **Verified at:** see `docs/doc_map.yaml` (stamped via check_doc_sync --bless).
 
 This document explains how the tracker turns a particle's position into a
@@ -390,3 +390,44 @@ element value (`tests/test_interp_depth_linear_elements.py`) — absolute
 bounds: when member values of opposite sign cancel, the relative error of the
 result is unbounded. Where a member is dry the layer kernel still reads it and
 the two answers differ by design.
+
+## 8. Exact C-grid interpolation (`nemo_cgrid`, NEMO)
+
+`uv_interp: nemo_cgrid` (`mesh.nemo_grid: cgrid`, see `nemo.md`) does not
+interpolate a point velocity from nodes: it moves the particle with the model's
+face fluxes (Delandmeter and van Sebille 2019). The mesh elements are the T-cells
+(corners = four F-points); the data are the face rasters (u on the east face, v on
+the north face), `VelocityField.u` has the length `ny*nx` (3-D: per layer).
+
+- **Flux form.** In the containing cell with face velocities `uW, uE, vS, vN`
+  the fluxes are `U0 = uW e2u(W)`, `U1 = uE e2u(E)`, `V0 = vS e1v(S)`,
+  `V1 = vN e1v(N)` (model face widths; plane lengths when the file has none; in
+  3-D times the face thickness `e3u`/`e3v`). The particle's position in the
+  cell is `(xi, eta)` from the closed-form bilinear inverse of the corner
+  quadrilateral; `dxi/dt = ((1-xi) U0 + xi U1) / |detJ|`,
+  `deta/dt = ((1-eta) V0 + eta V1) / |detJ|`.
+- **Local-plane Jacobian.** The corners are projected to a plane around the
+  particle with the integrators' metric (`METERS_PER_DEG_LAT`, `cos(lat_p)`,
+  wrapped longitude differences); `J` is the Jacobian of the bilinear map there,
+  and `(u, v) = J (dxi/dt, deta/dt)` in the frame of the mesh (a rotated mesh
+  returns rotated-frame velocities). `|detJ|`, not `detJ`, so either handedness of
+  the index space works.
+- **What is exact.** A closed (zero-velocity) face carries zero flux, so a
+  particle approaches land only asymptotically; and when the model's fluxes
+  balance in a cell the interpolated field is non-divergent, for any `detJ`
+  (the Piola identity). Uniform-flow reproduction is exact only up to the
+  metric difference between the model widths and the plane.
+- **Vertical (3-D).** u and v are constant per layer (face fluxes of layer
+  `k`). The vertical coordinate is the fractional level `s = k + zeta`; W
+  is given at the interfaces (from continuity) and is linear in `zeta` inside
+  the cell: `ds/dt = ((1-zeta) W[k] + zeta W[k+1]) * area / (|detJ| e3cell)`. The
+  factor `area/|detJ|` (cell area `e1t*e2t` over the Jacobian of the plane
+  map) keeps the 3-D field non-divergent; the discrete non-divergence holds up to
+  the float32 rounding of the stored rasters. Partial bottom cells scale the face
+  fluxes by `e3face/e3cell`.
+- **Containment.** One search per evaluation gives the cell, the layer and the
+  floor; a stage in a dry-ring cell or at or below a column's floor reads zero
+  velocity.
+
+Fused kernels compare `uv_interp` by name, so `nemo_cgrid` always takes the unfused
+registry path (`nemo_cgrid3d_step` in 3-D).

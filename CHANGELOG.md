@@ -7,6 +7,34 @@ the tracker was developed privately from 2026-06.
 
 ## [Unreleased]
 
+### Added — NEMO exact C-grid path (`mesh.nemo_grid: cgrid`)
+
+- NEMO output is tracked on the model's own Arakawa C-grid with the flux scheme
+  of Delandmeter and van Sebille (2019): nodes are the F-points, elements the
+  wet T-cells, u/v stay on the cell faces, so no flow crosses a closed face and
+  the model's discrete continuity is reproduced. `numerics.uv_interp` becomes
+  `nemo_cgrid` by itself; naming another interpolator is refused. 2-D and 3-D
+  (z-levels with partial bottom cells; the vertical position is a fractional
+  level coordinate; W is computed from continuity and equals the model's W on
+  ORCA05). Land is zero velocity inside one ring of dry cells; particles on land
+  are not handled in the code.
+- Layouts: regional boxes, and global ORCA with the east-west seam and a T- or
+  F-point-pivot north fold, with or without halos (ORCA05, ORCA1, ORCA2,
+  ORCA025, eORCA), read from the coordinates; crops get open absorbing edges.
+  `mesh.rotation` works with the C-grid path.
+- Inputs: `mesh_mask.nc` or `domain_cfg.nc`; a file, glob or list per grid
+  (`data.ncinput`, new `ncinput_u`, `ncinput_v`; `ncinput_w` is refused: W comes from continuity); XIOS calendar
+  spellings (`360d`, ...). New `mesh.nemo_partial_cells: shrunk | porous`.
+  `mode.sample_vars` return the T-cell value.
+- Refused at startup: s-coordinates, ice-shelf cavities, non-T `sample_vars`,
+  rk45, PCHIP, em/m1 diffusion, diffusion in 3-D, beaching, `elem_search: walk`
+  in 3-D. z*/vvl output warns and uses the fixed reference thicknesses.
+- Docs: `docs/nemo.md`, `docs/velocity_interpolation.md` section 8, the
+  `examples/config_nemo*.yaml` templates and the `kelp-nemo` skill.
+- `utils/fetch_nemo_test_data.py` builds the data directory of the data-gated
+  NEMO tests (`KELP_TEST_NEMO_DATA`) from public ORCA05, eORCA025 and ORCA2
+  sources.
+
 ### Added — record-time options for every reader
 
 - The keys `data.time_stamp`, `data.time_window` and `data.time_offset`,
@@ -101,6 +129,27 @@ the tracker was developed privately from 2026-06.
   so the rounding error never builds up beyond one interval between records,
   however long the run. Runs whose time step is a whole number of seconds, on
   records stamped at whole seconds, are unchanged.
+
+### Fixed
+
+- NEMO C-grid, 3-D: a particle at or below the floor of its column (below a
+  partial bottom cell's own thickness, or below the deepest interface) sampled
+  the bottom-water value of `mode.sample_vars`; it now samples NaN, like the zero
+  velocity it has there. The depth is converted to the fractional level of the
+  containing cell, as the step does.
+- NEMO C-grid, 3-D: a particle that crossed a side face without changing its
+  fractional level (no vertical velocity) kept its old depth in metres. With
+  `mesh.nemo_partial_cells: shrunk`, a crossing into a column with a thinner
+  partial bottom cell left that depth below the new column's floor, and the
+  particle stopped there at the next step while the same run with `porous` went
+  on. The depth is now measured again in the cell where the step ends, so both
+  settings give the same horizontal paths.
+- NEMO C-grid, 2-D: a 2-D run on a standard 3-D `mesh_mask` or `domain_cfg`
+  weighted its surface fluxes by the 3-D partial-cell thicknesses, which slowed
+  the flow next to a shallow one-level column (0.17 instead of 0.5 m/s in a
+  synthetic case). A 2-D run now uses the surface faces only and gives the same
+  trajectories with the 3-D mesh file as with its 2-D form; its output no longer
+  carries the 3-D attribute `nemo_partial_cells`.
 
 ## [1.1.0] - 2026-11-16
 

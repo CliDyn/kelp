@@ -106,6 +106,8 @@ def _cmd_info(args: argparse.Namespace) -> int:
     print(f"    elements: {mesh.n_elements}")
     print(f"    sigma:    {mesh.sigma.shape[0]} interfaces"
           f" ({mesh.vertical_coord})")
+    if getattr(mesh, "_nemo_cgrid_layout", None) is not None:
+        print(f"    NEMO C-grid layout: {mesh._nemo_cgrid_layout.label()}")
     # the grid-hash cell the run would use (explicit pin, or the rule under
     # the exact-nearest flag), with its window statistics
     try:

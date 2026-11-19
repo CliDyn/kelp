@@ -12,7 +12,8 @@ to a common grid such as the equal-area HEALPix grid.
 
 KELP is a particle tracker for such output, written in Python with compiled
 kernels. It reads triangular meshes, mixed meshes of triangles and
-quadrilaterals, among them those of the FESOM family, and HEALPix stores. One
+quadrilaterals, among them those of the FESOM family, HEALPix stores, and NEMO
+C-grid output (ORCA family and regional configurations). One
 set of compiled time-stepping kernels serves all of them, with fixed depth levels or
 terrain-following sigma layers in the vertical. Trajectories are integrated
 forward or backward in time, in two or three dimensions, with an optional random
@@ -54,6 +55,7 @@ traps we have already walked into.
 | `kelp-visualize` | figures, montages and videos from trajectory output |
 | `kelp-diagnose` | a run is slow, silent or scales oddly: what to check, in order, before touching code or config |
 | `kelp-bench` | one comparable benchmark row for the machine you are on |
+| `kelp-nemo` | adapt NEMO output (mesh_mask / domain_cfg, file names, halos, folds, crops, partial cells) to a config |
 
 The skills are written for [Claude Code](https://claude.com/claude-code), which
 picks them up from `.claude/skills/` by itself. They are ordinary Markdown, so
@@ -229,7 +231,7 @@ annotated template: [`config.yaml`](config.yaml).
 | `output_flush_every` | `0` | NetCDF only: buffer N records then flush so the file is readable mid-run (`0` = keep open). Zarr is always lock-free |
 | `temporal_interp` | `false` | linearly blend velocity between file snapshots (then `dt` may be < file step) |
 | `temporal_reconstruction` | `linear` | `linear` / `pchip` (4-snapshot monotone cubic; lets RK4 beat RK2 at coarse cadence) |
-| `uv_interp` | `leastsq` | u/v interpolation: `leastsq` (element-layout only) / `barycentric` (node-layout, e.g. FESOM2 `unod`/`vnod` or HEALPix) / `edge_leastsq` (FESOM-style: containing element + edge neighbors; element-layout only) |
+| `uv_interp` | `leastsq` | u/v interpolation: `leastsq` (element-layout only) / `barycentric` (node-layout, e.g. FESOM2 `unod`/`vnod` or HEALPix) / `edge_leastsq` (FESOM-style: containing element + edge neighbors; element-layout only) / `nemo_cgrid` (exact Arakawa C-grid, NEMO; set by `mesh.nemo_grid: cgrid`, no need to name it) |
 | `edge_leastsq_bc` | `freeslip` | `edge_leastsq` coastal ghosts: `freeslip` / `noslip` (inert for other methods) |
 | `elem_search` | `local` | containing-element search: `local` (per-step scan) / `walk` (search once at release, then cross edges; identical results; faster on unfused runs — element-layout `barycentric`, `edge_leastsq` — but it switches off the fused node-layout barycentric kernels) |
 | `w_interp` | `leastsq` | 3D W: `nearest` / `leastsq` / `barycentric` / `idw` |
@@ -287,7 +289,9 @@ annotated template: [`config.yaml`](config.yaml).
 | `type` | `fesomc` | **required**: `fesomc` / `fesom2` / `fesom14` / `nemo` / `healpix` |
 | `meshpath` | `""` | **required**: mesh-diag `.nc` / `.zarr` / ASCII dir (FESOM2); single NetCDF (FESOM-C); ASCII mesh dir, or level-wise data with cell polygons (FESOM 1.4 — the triangles are recovered from the polygons); `mesh_mask.nc`/`domain_cfg.nc` (NEMO); the u/v data store itself (HEALPix — the mesh is derived from the data) |
 | `r_earth` | `null` (family default) | Earth radius (m); set only to match a non-default model build |
-| `rotation` | `null` | FESOM2 + HEALPix + FESOM 1.4: pole-safe rotated frame — `null` / `fesom2` / `[α, β, γ]` (deg) |
+| `rotation` | `null` | FESOM2 + HEALPix + FESOM 1.4 + NEMO (`nemo_grid: cgrid`): pole-safe rotated frame — `null` / `fesom2` / `[α, β, γ]` (deg) |
+| `nemo_grid` | `tpoint` | NEMO only: `tpoint` (2-D, E/N-aligned grids) / `cgrid` (exact C-grid, 2-D and 3-D, global ORCA; `docs/nemo.md`) |
+| `nemo_partial_cells` | `shrunk` | NEMO C-grid 3-D (`nemo_grid: cgrid`): metres of a partial bottom cell, `shrunk` (NEMO <= 4.2) / `porous` (NEMO 5) |
 | `input_rotation` | `null` | FESOM 1.4 only: `[α, β, γ]` (deg) of the rotated frame an ASCII mesh is stored in (rotated back to geographic on load) |
 | `grid_hash_cell_size` | `null` (rule) | nearest-node hash cell (deg); `null` = chosen by `grid_hash_cell_rule` |
 | `grid_hash_cell_rule` | `occupancy` | `occupancy` (measured choice) / `legacy` (the reader's mean-spacing cell) |
@@ -301,9 +305,10 @@ annotated template: [`config.yaml`](config.yaml).
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `ncinput` | `""` | **required**: velocity file or directory (u-file if split) |
-| `ncinput_v` | `""` | separate v file |
-| `ncinput_w` | `""` | separate w file (3D) |
+| `ncinput` | `""` | **required**: velocity file or directory (u-file if split); NEMO: a file, glob or list of grid_T files |
+| `ncinput_u` | `""` | NEMO only: grid_U file(s) when their names lack the `grid_T` token |
+| `ncinput_v` | `""` | separate v file (NEMO: a file, glob or list) |
+| `ncinput_w` | `""` | separate w file (3D); refused for `nemo` (W from continuity) |
 | `ncinput_eta` | `""` | separate SSH store (HEALPix two-store recipes) |
 | `inicloud` | `""` | **required**: seeds, one `lon lat [depth] [release_sec]` per line |
 | `particle_offset` | `null` | global index of the file's first particle in a sharded release (default: the shard file's header, else 0) |
@@ -361,8 +366,8 @@ the validation campaign and the `-m slow` cross-checks against Parcels.
 ## Features
 
 - **2D and 3D tracking**, forward or backward, on FESOM2 meshes (fixed depth
-  levels), FESOM-C meshes (terrain-following sigma layers), FESOM 1.4 output and
-  HEALPix stores (next bullets).
+  levels), FESOM-C meshes (terrain-following sigma layers), FESOM 1.4 output,
+  HEALPix stores and NEMO C-grid output (next bullets).
 - **FESOM 1.4 reader** — level-wise files (such as the published CMIP6 output,
   whose mesh is recovered exactly from the cell polygons in the files) or the
   raw writer's output next to an ASCII mesh; u, v and w lie on the levels and are
@@ -379,6 +384,12 @@ the validation campaign and the `-m slow` cross-checks against Parcels.
   effect of the remapping: for a uniform global release the 30-day median
   separation was 4.4, 1.4 and 0.39 km at pixel spacings of 102, 51 and
   25.5 km.
+- **NEMO reader** — NEMO output on its own Arakawa C-grid
+  (`mesh.nemo_grid: cgrid`), with the face fluxes interpolated exactly; 2D and
+  3D (z-levels with partial cells), regional boxes and global ORCA layouts
+  (seam, north fold); validated on ORCA05 and eORCA025 output
+  ([`docs/nemo.md`](docs/nemo.md)). The default T-point path
+  (`nemo_grid: tpoint`) is early 2D work.
 - **Time integrators** Euler / RK2 / RK4, with time-aware stages and an optional
   4-snapshot PCHIP temporal reconstruction; plus an adaptive RK45
   (Dormand–Prince, per-particle substepping under a metre error tolerance —
@@ -414,14 +425,6 @@ the validation campaign and the `-m slow` cross-checks against Parcels.
   and times, and the same attributes in NetCDF and Zarr.
   Standalone numbered restart files (`write_restart_file`) support resumable-chain
   runs that span a wall-clock limit, bit-for-bit identical to one continuous run.
-
-There is also a **structured-grid foundation** (`readers/structured.py`,
-`readers/nemo.py`) that maps a logically rectangular C-grid onto a quad mesh.
-It is early work: two-dimensional only, restricted to grids whose axes line up
-with east and north, and not part of what we run day to day. It refuses rather
-than guesses whenever those limits are exceeded. See the `nemo.py` notes in
-[`docs/dev/readers.md`](docs/dev/readers.md) and "Remaining work" in
-[`CLAUDE.md`](CLAUDE.md) for its exact scope before relying on it.
 
 ## Licence and citation
 

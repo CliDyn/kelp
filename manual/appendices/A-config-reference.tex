@@ -63,7 +63,7 @@ shared\_fields\_dir & str & \code{null} & Directory of the node-shared snapshot 
 shared\_fields\_generation & str & \code{null} & Namespace generation of the cache; else \code{KELP\_SHARED\_FIELDS\_GENERATION}, else the batch job. \\
 checkpoint\_freq & int & \code{0} & Write a restart checkpoint every $N$ steps (\code{0} = off); needs an output path. \\
 output\_flush\_every & int & \code{0} & NetCDF only: flush every $N$ records so the file is readable mid-run. \\
-uv\_interp & str & \code{leastsq} & \code{leastsq} (element centres), \code{edge\_leastsq} (containing element and edge neighbours) or \code{barycentric} (vertex blend; required for node velocities) (\cref{ch:hvel}). \\
+uv\_interp & str & \code{leastsq} & \code{leastsq} (element centres), \code{edge\_leastsq} (containing element and edge neighbours) or \code{barycentric} (vertex blend; required for node velocities) (\cref{ch:hvel}); \code{nemo\_cgrid} follows from \conf{mesh.nemo\_grid: cgrid}. \\
 edge\_leastsq\_bc & str & \code{freeslip} & Wall ghost of \code{edge\_leastsq}: \code{freeslip} or \code{noslip}. \\
 elem\_search & str & \code{local} & Containing element: \code{local} (search each step) or \code{walk} (track across edges; \cref{sec:loc-walk}). \\
 w\_interp & str & \code{leastsq} & 3-D vertical-velocity horizontal combine: \code{nearest}/\code{leastsq}/\code{barycentric}/\code{idw}. \\
@@ -125,13 +125,15 @@ type & str & \code{fesomc} & \code{fesom2} / \code{fesom14} / \code{fesomc} / \c
 meshpath & str & required & Path to the mesh file or directory (\cref{ch:mesh}). \code{fesom14}: an ASCII mesh directory (it holds \code{nod3d.out}), or level-wise data with cell polygons --- a file, or a directory whose first \code{*.nc} file holding \conf{mode.var\_u} is used. \\
 input\_rotation & [3 floats] & \code{null} & \code{fesom14} only (refused at load for every other type): the Euler angles in degrees, from the run's namelist, of the rotated frame an ASCII mesh is stored in; rotated back to geographic on load. Refused for a mesh from cell polygons; independent of \conf{rotation}. \\
 r\_earth & float (m) & family & Earth radius for mesh-derived areas; defaults per model. \\
-rotation & varies & \code{null} & FESOM2, FESOM~1.4 and HEALPix: \code{null} (geographic), \code{fesom2}, or an explicit list of Euler angles (\cref{ch:frame}). \\
+rotation & varies & \code{null} & FESOM2, FESOM~1.4, HEALPix and NEMO with \conf{nemo\_grid: cgrid}: \code{null} (geographic), \code{fesom2}, or an explicit list of Euler angles (\cref{ch:frame}). \\
 exact\_nearest & bool & \code{true} & Prove every nearest-node anchor (\cref{sec:loc-exact}). \\
 grid\_hash\_cell\_rule & str & \code{occu-} \code{pancy} & Choose the hash cell by measurement (\code{occupancy}), or keep the reader's (\code{legacy}) (\cref{sec:loc-cell}). \\
 grid\_hash\_cell\_size & float (deg) & \code{null} & Explicit hash cell; overrides the rule. \\
 healpix\_zoom & int & \code{null} & HEALPix: zoom level when the store carries no grid attributes. \\
 healpix\_geometry & str & \code{dual} & HEALPix: \code{dual} (nodes at pixel centres) or \code{pixel} (elements are pixels; 2-D). \\
 crop\_bbox & [W, E, S, N] & \code{null} & HEALPix: crop to a box; $W>E$ crosses the dateline. \\
+nemo\_grid & str & \code{tpoint} & NEMO: \code{tpoint} (quadrilaterals of T-points, 2-D, grids aligned with east and north) or \code{cgrid} (exact C-grid, 2-D and 3-D; sets \conf{uv\_interp: nemo\_cgrid}). \\
+nemo\_partial\_cells & str & \code{shrunk} & NEMO C-grid, 3-D: depth in metres inside a partial bottom cell, \code{shrunk} (NEMO $\le$ 4.2) or \code{porous} (NEMO 5). \\
 levels & path or list & \code{null} & HEALPix: interface depths, a level-table path or an inline list; needed in 3-D, and in 2-D it sets the node depths when the store has no bathymetry variable. \\
 \bottomrule
 \end{longtable}

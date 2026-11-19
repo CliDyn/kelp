@@ -22,8 +22,10 @@ way: the FESOM2 reader recognises mid-layer and interface fields by their vertic
 the tracked level in a two-dimensional run; the FESOM-C reader reduces sigma-layered fields to two
 dimensions with a node-aware reduction in a two-dimensional run; the HEALPix reader compacts pixels to nodes and fills each
 column downward from its deepest valid value, so that the bottom clamp reads bottom water, never a
-missing value (pixel geometry does not support sampling); the NEMO reader samples surface T-point
-fields only. Values are recorded at the
+missing value (pixel geometry does not support sampling); the NEMO reader samples T-point fields
+only: on the T-point path at the surface, on the C-grid path as the value of the containing T-cell
+and layer, without interpolation between cells; a particle at or below its column's floor, where the
+velocity is zero, reads a missing value. Values are recorded at the
 trajectory output cadence (every \conf{output\_freq} steps, \cref{ch:output}), not at
 every integration step. A record is labelled with the time at the end of its step (\cref{eq:out-time}), and
 the scalar is taken at that instant as far as the forcing allows. When the velocity is reconstructed in time

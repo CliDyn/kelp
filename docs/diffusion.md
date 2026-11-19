@@ -293,6 +293,9 @@ The kicks never read `u`/`v`, so a horizontal velocity linear in depth
 uniform kick and the Az kick unchanged: the deterministic part of the step is
 the depth-linear step, the kicks follow as above; `em`/`m1` stay 2-D only.
 
+On the NEMO C-grid path (`mesh.nemo_grid: cgrid`) only the uniform-Kh kick in
+2-D is available; `em`/`m1` and any diffusion in 3-D are refused (`nemo.md` §6).
+
 
 ## 6. What is called when
 
