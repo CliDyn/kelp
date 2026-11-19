@@ -368,15 +368,16 @@ def _with_dry3d(n, value=None):
 
 
 def _as_extract(src_path, out_path, *, tool, cut=None, last_nan=False,
-                deptho=False):
+                deptho=False, with_table=True):
     """A regional extract of a ``_vstore`` file, written as Zarr: the cells
     with |lat| < 45 (sorted NEST ids, ``healpix_index`` on the cell dim),
-    the interface table embedded, ``attrs["tool"] = tool`` (None: no
-    attribute).  ``cut=M`` slices EVERY vertical axis and the table to M
-    entries (the cut of the old extractor); ``last_nan`` sets the last
-    level of the four layer variables to NaN (True), or of the variables a
-    dict ``{name: records}`` names at those records only; ``deptho`` adds
-    a per-cell ``deptho`` of 300.0 at sea."""
+    the interface table embedded (``with_table=False``: no table, as the old
+    extractor wrote without ``source.levels``), ``attrs["tool"] = tool``
+    (None: no attribute).  ``cut=M`` slices EVERY vertical axis and the
+    table to M entries (the cut of the old extractor); ``last_nan`` sets
+    the last level of the four layer variables to NaN (True), or of the
+    variables a dict ``{name: records}`` names at those records only;
+    ``deptho`` adds a per-cell ``deptho`` of 300.0 at sea."""
     with xr.open_dataset(src_path) as src:
         ds = src.load()
     _, lat, _ = _cells()
@@ -400,7 +401,8 @@ def _as_extract(src_path, out_path, *, tool, cut=None, last_nan=False,
             ds[nm] = (ds[nm].dims, a)
     if deptho:
         ds["deptho"] = (("value",), np.where(lat[keep] < 60.0, 300.0, np.nan))
-    ds["level_interfaces_m"] = (("level_interface",), table)
+    if with_table:
+        ds["level_interfaces_m"] = (("level_interface",), table)
     if tool is None:
         ds.attrs.pop("tool", None)
     else:
@@ -1139,6 +1141,142 @@ def test_old_extract_with_stamp_options(tmp_path):
     assert np.isfinite(out["lon"]).all()
     assert len(_old_named(rec, "avg_uoe", "avg_von")) == 1, \
         [str(w.message) for w in rec]
+
+
+# ---------------------------------------------------------------------------
+# an old extract cut WITHOUT an interface table (spec section 5: it runs as
+# before with mesh.levels and mode.max_levels; W-OLD without the bed clause)
+# ---------------------------------------------------------------------------
+
+#: the refusal when the run keeps more interfaces than such an extract holds
+FRAG_FEWER = "set mode.max_levels: 4 or less"
+#: SEEDS[2] sits at 200 m in the 5-layer column: below the bed of the
+#: table-less cut extract (150 m, mesh.levels at its u's 4 levels)
+DEEP_SEED = 2
+
+
+def _tableless_old(tmp_path, layout="padded"):
+    """The source (the padded store, or the twin layout) and its old
+    extract (tool v1.0) cut to M = 4 levels WITHOUT an interface table:
+    every vertical axis keeps 4 entries; u, v, T and S carry data in their
+    4th (the layer from 70 to 150 m).  Returns ``(source, extract)``."""
+    src = (_p_store(tmp_path / "P.nc") if layout == "padded"
+           else _b_store(tmp_path / "B.nc"))
+    e = _as_extract(src, tmp_path / "E.zarr", tool=OLD_TOOL, cut=M,
+                    with_table=False)
+    with xr.open_zarr(e) as d:
+        assert "level_interfaces_m" not in d.variables
+        assert {int(d.sizes[hx._vertical_dim(d[nm], nm)])
+                for nm in ("avg_uoe", "avg_von", "avg_wo", "avg_thetao",
+                           "avg_so")} == {M}
+        assert np.isfinite(d["avg_uoe"].isel(time=0).values[-1]).any()
+    return src, e
+
+
+def _equal_but_the_deep_seed(out_e, out_s):
+    """The run on the table-less cut extract equals the run on its source
+    with the same mode.max_levels except the depth of the seed below the
+    extract's bed: there it stays at that bed, 150 m (mesh.levels at the 4
+    levels of the extract's u, as earlier versions placed it), where the
+    source's bed is 300 m."""
+    out_e, out_s = dict(out_e), dict(out_s)
+    z_e, z_s = out_e.pop("z"), out_s.pop("z")
+    _same(out_e, out_s)
+    other = np.arange(len(SEEDS)) != DEEP_SEED
+    assert np.array_equal(z_e[other], z_s[other], equal_nan=True)
+    assert (z_e[DEEP_SEED] == 150.0).all(), z_e[DEEP_SEED]
+    assert (z_s[DEEP_SEED] > 200.0).all(), z_s[DEEP_SEED]
+
+
+@pytest.mark.parametrize("layout", ["padded", "twin"])
+def test_tableless_old_extract_runs_under_max_levels(tmp_path, layout):
+    """T1/T2: an old extract cut to M = 4 without a table, run with the
+    full mesh.levels (6) and mode.max_levels: 4, runs as on the earlier
+    version: the table the rule uses is the first 4 interfaces, u, v, T
+    and S are read as their first 3 layers, the same as the source with
+    mode.max_levels: 4 (bed aside).  W-OLD names u and v (prepare) and T
+    and S (the probe), with K = 4 and without the bed clause (the bed comes
+    from the full mesh.levels)."""
+    hx._WARNED.clear()
+    src, e = _tableless_old(tmp_path, layout)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        out_e = _run(tmp_path, e, "E", max_levels=M)
+    assert np.isfinite(out_e["lon"]).all()
+    _equal_but_the_deep_seed(out_e, _run(tmp_path, src, "S", max_levels=M))
+    uv = _old_named(rec, "avg_uoe", "avg_von")
+    ts = _old_named(rec, "avg_thetao", "avg_so")
+    assert len(uv) == 1 and len(ts) == 1, [str(w.message) for w in rec]
+    assert len(_old_extract_warnings(rec)) == 2
+    for w in uv + ts:
+        msg = str(w.message)
+        for frag in ("K = 4 interfaces (mesh.levels) can bound",
+                     "the K-1 = 3 layers the table bounds, as",
+                     "the layer below 70 m is not used. To use",
+                     "region.max_levels: 5 or more"):
+            assert frag in msg, (frag, msg)
+        assert "the bed is placed" not in msg, msg
+        assert "of which mode.max_levels keeps" not in msg, msg
+    rc, err = _info(tmp_path, e, "E_info", max_levels=M)
+    assert rc == 0, err
+
+
+def test_tableless_old_extract_under_a_smaller_max_levels(tmp_path):
+    """T3: the same extract with mode.max_levels: 3 runs as before (2
+    layers of the 3 the table bounds); W-OLD says so."""
+    hx._WARNED.clear()
+    src, e = _tableless_old(tmp_path)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        out_e = _run(tmp_path, e, "E", max_levels=3)
+    _equal_but_the_deep_seed(out_e, _run(tmp_path, src, "S", max_levels=3))
+    uv = _old_named(rec, "avg_uoe", "avg_von")
+    assert len(uv) == 1, [str(w.message) for w in rec]
+    msg = str(uv[0].message)
+    for frag in ("K = 4 interfaces (mesh.levels)",
+                 "the K-1 = 3 layers the table bounds, of which "
+                 "mode.max_levels keeps 2",
+                 "the layer below 70 m is not used. To use",
+                 "region.max_levels: 5 or more"):
+        assert frag in msg, (frag, msg)
+
+
+@pytest.mark.parametrize("max_levels", [None, 5])
+def test_tableless_old_extract_keeping_more_levels_is_refused(tmp_path,
+                                                             max_levels):
+    """T4: the run keeps more interfaces than the extract holds (no
+    mode.max_levels, or 5): refused before any output and in ``kelp info``,
+    naming the extract's 4 levels and mode.max_levels."""
+    _, e = _tableless_old(tmp_path)
+    with pytest.raises(ValueError, match=FRAG_FEWER) as ei:
+        _run(tmp_path, e, "E", max_levels=max_levels)
+    msg = str(ei.value)
+    assert "extract_healpix_region v1.0" in msg, msg
+    assert "without an interface table" in msg, msg
+    assert f"the run keeps {max_levels or K}" in msg, msg
+    assert not list(tmp_path.glob("traj_E*"))
+    rc, err = _info(tmp_path, e, "E_info", max_levels=max_levels)
+    assert rc == 1, err
+    assert FRAG_FEWER in err, err
+
+
+@pytest.mark.parametrize("layout", ["padded", "twin"])
+def test_tableless_old_extract_uncut_runs_as_any_store(tmp_path, layout):
+    """T5: an UNCUT old extract without a table keeps the source's lengths
+    (w on 6, the layers on 5, or on 6 with an empty last level): the full
+    mesh.levels, bit for bit the source's run, no W-OLD.  (Green on the
+    earlier source by design; red on a rule that takes M from the layer
+    variables.)"""
+    hx._WARNED.clear()
+    src = (_p_store(tmp_path / "P.nc") if layout == "padded"
+           else _b_store(tmp_path / "B.nc"))
+    u = _as_extract(src, tmp_path / "U.zarr", tool=OLD_TOOL,
+                    with_table=False)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        out_u = _run(tmp_path, u, "U")
+    assert not _old_extract_warnings(rec), [str(w.message) for w in rec]
+    _same(out_u, _run(tmp_path, src, "S"))
 
 
 def test_2d_run_ignores_the_3d_rule(tmp_path):

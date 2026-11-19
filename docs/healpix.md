@@ -468,7 +468,13 @@ a later record is read as before, without a warning. An old extract whose
 last level is empty at the tracked columns in those records reads as a
 padded store, and an uncut old extract as any store, both without the
 warning; every other rule (w on exactly K entries, the layer lengths, one
-vertical dim) applies to old extracts as to any store. To use the unused
+vertical dim) applies to old extracts as to any store. An old extract cut
+without a table runs as before with the whole `mesh.levels` of its source
+and a `mode.max_levels` of at most M, the length of its longest vertical
+axis: its table is then the first M interfaces of `mesh.levels`, and its
+bed is the one computed from the whole `mesh.levels`, which the warning
+therefore does not name; a run that keeps more than M interfaces is
+refused before any output, with a message that names M. To use the unused
 layer and the true bed, **extract the region again from the whole store**
 (the extractor refuses an extract as its input) with the current
 extractor and a `region.max_levels` of at least one more than the old
