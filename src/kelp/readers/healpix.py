@@ -592,8 +592,30 @@ _LEVELS_VAR = "level_interfaces_m"
 #: kerchunked GRIB stores are single-level-chunked — no read
 #: amplification either way.
 _LEVEL_BLOCK = 10
-#: vertical dim names seen on healpix products (GRIB level axis, CMIP depth)
+#: vertical dim names seen on healpix products (GRIB level axis, CMIP depth);
+#: besides these, any dim whose name starts with "level" (``_vertical_dim``)
 _LEVEL_DIMS = ("level", "lev", "depth", "deptht", "z", "height")
+
+
+def _vertical_dim(da, name=None):
+    """The vertical dim of a data variable, or None when it has none.
+
+    A dim is vertical when its lower-cased name is one of ``_LEVEL_DIMS``
+    or starts with ``level`` (e.g. w on its own ``level_w`` axis next to
+    the layer variables on ``level``).  Every reader place that needs the
+    vertical axis of a variable asks this helper, so each variable is
+    looked at on its own.  More than one vertical dim -> ``ValueError``
+    naming ``name`` (default ``da.name``).
+    """
+    dims = tuple(d for d in da.dims
+                 if str(d).lower() in _LEVEL_DIMS
+                 or str(d).lower().startswith("level"))
+    if len(dims) > 1:
+        raise ValueError(
+            f"healpix reader: {name or da.name!r} has more than one "
+            f"vertical dim ({dims}).")
+    return dims[0] if dims else None
+
 
 _KERCHUNK_SUFFIXES = {".parq", ".parquet", ".json"}
 
@@ -729,18 +751,18 @@ def _pick_level(da, mode_cfg):
     index 0.  Bounds-checked so a bad config fails with a clear message
     instead of an opaque IndexError deep in xarray.
     """
-    for d in da.dims:
-        if str(d).lower() in _LEVEL_DIMS:
-            layer = getattr(mode_cfg, "sigma_layer", None) if mode_cfg else None
-            k = int(layer) if layer is not None else 0
-            n = int(da.sizes[d])
-            if not (0 <= k < n):
-                raise ValueError(
-                    f"mode.sigma_layer={k} is out of range for the "
-                    f"{d!r} axis of {da.name!r} (size {n}); it is a "
-                    "0-based index, 0 = surface.")
-            return da.isel({d: k})
-    return da
+    d = _vertical_dim(da)
+    if d is None:
+        return da
+    layer = getattr(mode_cfg, "sigma_layer", None) if mode_cfg else None
+    k = int(layer) if layer is not None else 0
+    n = int(da.sizes[d])
+    if not (0 <= k < n):
+        raise ValueError(
+            f"mode.sigma_layer={k} is out of range for the "
+            f"{d!r} axis of {da.name!r} (size {n}); it is a "
+            "0-based index, 0 = surface.")
+    return da.isel({d: k})
 
 
 def _resolve_levels(levels: Union[None, str, List[float]]):
@@ -880,12 +902,12 @@ def _compact_3d(da, mesh, name: str, n_keep: int,
     column — an interior NaN stripe is store corruption, not bathymetry,
     and must not be silently zeroed into fake ground.
     """
-    lev_dim = next((d for d in da.dims if str(d).lower() in _LEVEL_DIMS),
-                   None)
+    lev_dim = _vertical_dim(da, name)
     if lev_dim is None:
         raise ValueError(
             f"healpix reader: 3-D variable {name!r} has no level dim "
-            f"(dims {da.dims}; known level names {sorted(_LEVEL_DIMS)}).")
+            f"(dims {da.dims}; known level names {sorted(_LEVEL_DIMS)}, "
+            "or any name starting with 'level').")
     if int(da.sizes[lev_dim]) < n_keep:
         raise ValueError(
             f"healpix reader: variable {name!r} has {da.sizes[lev_dim]} "
@@ -1158,8 +1180,7 @@ class HealpixReader:
             # mode_cfg, never pays this extra read of the first record, and
             # read_velocities refuses a depth-linear run on such a mesh).
             nfin_u = None
-            lev_dim_u = next((d for d in u0.dims
-                              if str(d).lower() in _LEVEL_DIMS), None)
+            lev_dim_u = _vertical_dim(u0, u_name)
             if (lev_dim_u is not None
                     and (getattr(mesh_cfg, "healpix_geometry", "dual")
                          or "dual") == "dual"
@@ -1219,8 +1240,7 @@ class HealpixReader:
                 # sentinel-filled land (non-NaN u) is still excluded
                 wet &= dep > 0.0
             elif levels is not None:
-                lev_dim = next((d for d in u0.dims
-                                if str(d).lower() in _LEVEL_DIMS), None)
+                lev_dim = _vertical_dim(u0, u_name)
                 if lev_dim is not None:
                     # finite-prefix column length, reduced over the NAMED
                     # level dim (axis order varies between products)
@@ -1794,7 +1814,7 @@ class HealpixReader:
                     f"healpix reader: sampled variable {nm!r} not in the "
                     f"store (present: {sorted(ds.data_vars)[:12]}…).")
             da = ds[nm].isel(time=timestep)
-            has_lev = any(str(d).lower() in _LEVEL_DIMS for d in da.dims)
+            has_lev = _vertical_dim(da, nm) is not None
             if is_3d and has_lev:
                 # mid-layer scalar (K-1, N), forward-filled down each
                 # column: the sampler's bottom clamp then reads bottom-
