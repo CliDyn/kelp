@@ -271,6 +271,13 @@ _REFUSALS = {
         dict(levels=LEV, max_levels=M), ValueError,
         (FRAG_XP, "'avg_uoe' has 6 entries on 'level_x'",
          "in source record 0 (time 2020-01-02")),
+    # max_levels: K keeps the whole table but still drops the K-th plane of
+    # a layer variable on K entries (test_cut_at_or_beyond_the_table)
+    "u_live_tail_at_k": (
+        "A", dict(edit=_put("avg_uoe", K, value=1.0)),
+        dict(levels=LEV, max_levels=K), ValueError,
+        (FRAG_XP, "'avg_uoe' has 6 entries on 'level_x'",
+         "in source record 0 (time 2020-01-02")),
     "max_levels_0_table": (
         "A", {}, dict(levels=LEV, max_levels=0), ValueError,
         ("region.max_levels: 0 is refused",)),

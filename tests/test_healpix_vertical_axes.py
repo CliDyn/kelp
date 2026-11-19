@@ -878,8 +878,31 @@ def _w_two_dims(ds):
     ds["avg_wo"] = w.transpose("time", "level_w", "depth", "value")
 
 
+def _one_interface(tmp_path):
+    """A store with ONE interface: an old extract of the padded store cut
+    to one entry (every vertical axis and the table).  The old tool, so
+    that the interface count is the only check of the hook that refuses
+    it: u and v on K = 1 entries with data give W-OLD there, not M-P.
+    Returns ``(store, _run keywords)``."""
+    p = _p_store(tmp_path / "P1.nc")
+    return _as_extract(p, tmp_path / "E1.zarr", tool=OLD_TOOL, cut=1), {}
+
+
+def _mesh_from_extract(tmp_path):
+    """``mesh.meshpath`` at an (uncut) extract of the padded store,
+    ``data.ncinput`` at the whole store it came from: the store's cell
+    count is not the mesh's.  Returns ``(store, _run keywords)``."""
+    p = _p_store(tmp_path / "P2.nc")
+    e = _as_extract(p, tmp_path / "E2.zarr", tool=NEW_TOOL)
+    return e, dict(ncinput=str(p))
+
+
+_FRAG_FEW = "3-D read needs >= 2 vertical interfaces"
+_FRAG_CELLS = "cells but the mesh was built"
+
 _PREPARE_LEGS = {
-    # leg: (_vstore keywords, _run keywords, exception, fragment); the layer
+    # leg: (_vstore keywords, or a builder tmp_path -> (store, _run
+    # keywords), _run keywords, exception, fragment); the layer
     # family on ``level``, w on ``level_w``, a defect variable on its own dim
     "w_k_plus_1": (dict(edit=_put("avg_wo", K + 1)), {}, ValueError, FRAG_W),
     "w_k_minus_1": (dict(edit=_put("avg_wo", K - 1)), {}, ValueError,
@@ -899,6 +922,12 @@ _PREPARE_LEGS = {
                        ValueError, "no level dim"),
     "w_two_dims": (dict(edit=_w_two_dims), {}, ValueError,
                    "more than one vertical dim"),
+    # M-S: no sampled scalar, so that only u, v and w are read; a later
+    # refusal at the first read comes after the output file exists
+    "one_interface": (_one_interface, dict(levels=None, sample=()),
+                      ValueError, _FRAG_FEW),
+    "cell_count": (_mesh_from_extract, dict(levels=None, sample=()),
+                   ValueError, _FRAG_CELLS),
 }
 
 
@@ -908,7 +937,11 @@ def test_refused_before_output_run_and_info(tmp_path, leg):
     run is refused before its output file exists, and ``kelp info`` on the
     same config exits 1 with the message (spec test 3)."""
     store_kw, run_kw, exc, frag = _PREPARE_LEGS[leg]
-    store = _vstore(tmp_path / f"{leg}.nc", **store_kw)
+    if callable(store_kw):
+        store, extra = store_kw(tmp_path)
+        run_kw = {**run_kw, **extra}
+    else:
+        store = _vstore(tmp_path / f"{leg}.nc", **store_kw)
     with pytest.raises(exc, match=frag):
         _run(tmp_path, store, leg, **run_kw)
     assert not list(tmp_path.glob(f"traj_{leg}*"))
@@ -954,7 +987,7 @@ def test_run_and_info_use_the_full_table_under_max_levels(tmp_path):
 
 
 _OLD_LEGS = ["v10_cut", "v11_cut", "no_tool_cut", "v10_last_empty",
-             "v10_uncut", "later_only"]
+             "v10_cut_v_empty", "v10_uncut", "later_only"]
 
 
 @pytest.mark.parametrize("leg", _OLD_LEGS)
@@ -966,8 +999,9 @@ def test_old_extract_runs_with_a_warning(tmp_path, leg):
     process; ``kelp info`` shows the u/v one and exits 0.  Another tool
     attribute, or none, is refused before output (M-P).  An old extract
     with an empty last level, an uncut one, and one whose scalar plane
-    carries data only at a later record run without W-OLD (spec test
-    8f)."""
+    carries data only at a later record run without W-OLD.  The W-OLD of
+    the hook names only the velocities with data in their K-th plane: u,
+    not v when v's is empty (spec test 8f)."""
     hx._WARNED.clear()
     p = _p_store(tmp_path / "P.nc")
     caught = warnings.catch_warnings(record=True)
@@ -1022,6 +1056,19 @@ def test_old_extract_runs_with_a_warning(tmp_path, leg):
             out = _run(tmp_path, en, "EN", levels=None)
         assert np.isfinite(out["lon"]).all()
         assert not _old_extract_warnings(rec), [str(w.message) for w in rec]
+    elif leg == "v10_cut_v_empty":
+        # the K-th plane of v empty everywhere, that of u as cut: kelp
+        # info (the hook alone, no probe) names u and not v
+        ev = _as_extract(p, tmp_path / "EV.zarr", tool=OLD_TOOL, cut=M,
+                         last_nan={"avg_von": slice(None)})
+        with caught as rec:
+            warnings.simplefilter("always")
+            rc, err = _info(tmp_path, ev, "EV_info", levels=None)
+        assert rc == 0, err
+        old = _old_extract_warnings(rec)
+        assert len(old) == 1, [str(w.message) for w in rec]
+        assert len(_old_named(rec, "avg_uoe")) == 1, str(old[0].message)
+        assert "'avg_von'" not in str(old[0].message), str(old[0].message)
     elif leg == "v10_uncut":
         b = _b_store(tmp_path / "B.nc")
         u = _as_extract(b, tmp_path / "U.zarr", tool=OLD_TOOL)
