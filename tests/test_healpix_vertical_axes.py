@@ -448,6 +448,13 @@ _DIRECT_LEGS = {
                     "(time index 0 of the dataset read (time 2020-01-02")),
     "u_last_zero": (_put("avg_uoe", K, value=0.0), "vel",
                     (FRAG_P, "'avg_uoe' has K = 6 entries")),
+    # any non-NaN value is data: inf too, of either sign
+    "u_last_pinf": (_put("avg_uoe", K, value=np.inf), "vel",
+                    (FRAG_P, "'avg_uoe' has K = 6 entries")),
+    "u_last_minf": (_put("avg_uoe", K, value=-np.inf), "vel",
+                    (FRAG_P, "'avg_uoe' has K = 6 entries")),
+    "v_last_one": (_put("avg_von", K, value=1.0), "vel",
+                   (FRAG_P, "'avg_von' has K = 6 entries on 'level_x'")),
     "thetao_last": (_put("avg_thetao", K, value=1.0), "scalar",
                     (FRAG_P, "'avg_thetao' has K = 6 entries")),
     "thetao_k_plus_1": (_put("avg_thetao", K + 1), "scalar",
@@ -460,7 +467,8 @@ _DIRECT_LEGS = {
 @pytest.mark.parametrize("cut", [False, True], ids=["uncut", "cut"])
 def test_direct_read_rules(tmp_path, cut, leg):
     """Direct read_velocities / read_scalar_fields: the size rule against
-    the FULL table and the empty K-th plane, on a mesh uncut and cut with
+    the FULL table and the empty K-th plane (any non-NaN value there is
+    data: 0.0 and inf too; u and v alike), on a mesh uncut and cut with
     ``_apply_max_levels`` (spec test 4)."""
     b = _b_store(tmp_path / "B.nc")
     mesh = _mesh(b, MODE_3D)
@@ -501,6 +509,38 @@ def test_direct_read_rules(tmp_path, cut, leg):
     assert "(mesh.levels)" in msg, msg
     cut_text = "(mode.max_levels keeps 4 of them; the check uses all 6)"
     assert (cut_text in msg) == cut, msg
+
+
+@pytest.mark.parametrize("cut", [False, True], ids=["uncut", "cut"])
+def test_last_plane_read_with_the_last_block(tmp_path, monkeypatch, cut):
+    """The K-th plane of a layer variable on K entries is read together
+    with the last level block (one ``isel`` over ``slice(k0, K)``) when no
+    max_levels cut is active; under a cut it is read by its own ``isel``.
+    Levels read two at a time (``_LEVEL_BLOCK = 2``), u of the padded
+    store; the values equal the read at the default block size."""
+    p = _p_store(tmp_path / "P.nc")
+    mesh = _mesh(p, MODE_3D)
+    if cut:
+        _cut(mesh, M)
+    ds = _open(p)
+    ref = HealpixReader.read_velocities(ds, 0, mesh, mode_cfg=MODE_3D).u
+    calls = []
+    isel = xr.DataArray.isel
+
+    def recording_isel(self, indexers=None, *args, **kwargs):
+        sel = dict(indexers or {}, **kwargs)
+        if self.name == "avg_uoe" and "level" in sel:
+            calls.append(sel["level"])
+        return isel(self, indexers, *args, **kwargs)
+
+    monkeypatch.setattr(hx, "_LEVEL_BLOCK", 2)
+    monkeypatch.setattr(xr.DataArray, "isel", recording_isel)
+    u = HealpixReader.read_velocities(ds, 0, mesh, mode_cfg=MODE_3D).u
+    if cut:
+        assert calls == [slice(0, 2), slice(2, 3), K - 1], calls
+    else:
+        assert calls == [slice(0, 2), slice(2, 4), slice(4, K)], calls
+    np.testing.assert_array_equal(u, ref)
 
 
 def test_table_one_short_reports_w(tmp_path):
@@ -608,17 +648,32 @@ def test_later_record_with_prefetch(tmp_path, var, leg):
 
 
 @pytest.mark.parametrize("leg", ["v10_cut", "v11_cut", "no_tool_cut",
-                                 "v10_uncut"])
+                                 "v10_uncut", "v10_cut_so_empty"])
 def test_old_extract_reads(tmp_path, leg):
     """An extract of the old tool (attribute ``tool`` exactly
     "extract_healpix_region v1.0") cut with region.max_levels keeps one
     layer too many; it is read as the K-1 layers the table bounds, the
-    scalar probe warns once (W-OLD).  The same extract with another tool
+    scalar probe warns once (W-OLD), naming only the variables of the call
+    with data in their K-th plane.  The same extract with another tool
     attribute, or none, is refused (M-P).  An UNCUT old extract (layer
     variables on K-1 entries) reads without a warning."""
     hx._WARNED.clear()
     p = _p_store(tmp_path / "P.nc")
     names = ["avg_thetao", "avg_so"]
+    if leg == "v10_cut_so_empty":
+        # the K-th plane of S empty everywhere, that of T as cut
+        es = _as_extract(p, tmp_path / "ES.zarr", tool=OLD_TOOL, cut=M,
+                         last_nan={"avg_so": slice(None)})
+        mesh = _mesh(es, MODE_3D, levels=None)
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            HealpixReader.read_scalar_fields(_open(es), 0, mesh, names,
+                                             MODE_3D)
+        old = _old_extract_warnings(rec)
+        assert len(old) == 1, [str(w.message) for w in rec]
+        assert len(_old_named(rec, "avg_thetao")) == 1, str(old[0].message)
+        assert "'avg_so'" not in str(old[0].message), str(old[0].message)
+        return
     if leg == "v10_uncut":
         b = _b_store(tmp_path / "B.nc")
         u_store = _as_extract(b, tmp_path / "U.zarr", tool=OLD_TOOL)
