@@ -87,7 +87,7 @@ if cfg.mesh.grid_hash_cell_size is not None: set_grid_hash_cell(mesh, cfg.mesh.g
 else: CELL_RULE = apply_grid_hash_cell_rule(mesh, cfg.mesh.grid_hash_cell_rule)["rule"]   # the automatic cell, as run_tracking chooses it
 d = cfg.numerics.diffusion
 ds = _open_run_dataset(reader, mesh, cfg)   # the level cut and every open_dataset keyword of run_tracking; data.time_stamp / time_window are applied here
-_prepare_dataset(reader, mesh, ds)   # the reader's dataset check, before the writer exists (run_single_realization repeats it)
+_prepare_dataset(reader, mesh, ds, cfg.mode)   # the reader's dataset check with the run's mode, before the writer exists (run_single_realization repeats it)
 user_sv = list(cfg.mode.sample_vars or []); b = cfg.numerics.beaching     # sampled variables + the internal dry mask
 read_sv = user_sv + ([b.dry_mask_var] if b.enabled and b.dry_mask_var and b.dry_mask_var not in user_sv else [])
 n_time_total = ds.sizes["time"]; ft, file_dt = extract_time_info(ds)

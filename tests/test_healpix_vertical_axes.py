@@ -149,6 +149,20 @@ def _run(tmp_path, store, tag, *, levels=LEV, sample=("avg_thetao", "avg_so"),
     from kelp.tracking import run_tracking
     from kelp.writers import load_trajectories
 
+    cfg = _cfg(tmp_path, store, tag, levels=levels, sample=sample,
+               seeds=seeds, **over)
+    out = tmp_path / f"traj_{tag}.nc"
+    run_tracking(cfg)
+    if cfg.time.num_runs > 1:
+        assert not out.exists()
+        out = out.with_stem(f"{out.stem}_r0")
+    return load_trajectories(str(out))
+
+
+def _cfg(tmp_path, store, tag, *, levels=LEV, sample=("avg_thetao", "avg_so"),
+         seeds=None, **over):
+    """The AppConfig `_run` runs (same arguments); writes the seed file
+    tmp_path/f"seeds_{tag}.txt"."""
     seeds_path = tmp_path / f"seeds_{tag}.txt"
     seeds_path.write_text("".join(
         " ".join(repr(float(c)) for c in s) + "\n"
@@ -172,18 +186,13 @@ def _run(tmp_path, store, tag, *, levels=LEV, sample=("avg_thetao", "avg_so"),
             raise TypeError(f"_run: {key!r} is not a key of exactly one of "
                             f"the mode/numerics/time/data sections")
         kw[owners[0]][key] = value
-    cfg = AppConfig(
+    return AppConfig(
         mode=ModeConfig(**kw["mode"]),
         numerics=NumericsConfig(**kw["numerics"]),
         mesh=MeshConfig(type="healpix", meshpath=str(store), levels=levels),
         data=DataConfig(**kw["data"]),
         time=TimeConfig(**kw["time"]),
     )
-    run_tracking(cfg)
-    if cfg.time.num_runs > 1:
-        assert not out.exists()
-        out = out.with_stem(f"{out.stem}_r0")
-    return load_trajectories(str(out))
 
 
 def _same(a, b):
@@ -365,8 +374,9 @@ def _as_extract(src_path, out_path, *, tool, cut=None, last_nan=False,
     the interface table embedded, ``attrs["tool"] = tool`` (None: no
     attribute).  ``cut=M`` slices EVERY vertical axis and the table to M
     entries (the cut of the old extractor); ``last_nan`` sets the last
-    level of the four layer variables to NaN; ``deptho`` adds a per-cell
-    ``deptho`` of 300.0 at sea."""
+    level of the four layer variables to NaN (True), or of the variables a
+    dict ``{name: records}`` names at those records only; ``deptho`` adds
+    a per-cell ``deptho`` of 300.0 at sea."""
     with xr.open_dataset(src_path) as src:
         ds = src.load()
     _, lat, _ = _cells()
@@ -381,9 +391,12 @@ def _as_extract(src_path, out_path, *, tool, cut=None, last_nan=False,
         ds = ds.isel({d: slice(0, cut) for d in vdims})
         table = table[:cut]
     if last_nan:
-        for nm in ("avg_uoe", "avg_von", "avg_thetao", "avg_so"):
+        if not isinstance(last_nan, dict):
+            last_nan = dict.fromkeys(
+                ("avg_uoe", "avg_von", "avg_thetao", "avg_so"), slice(None))
+        for nm, records in last_nan.items():
             a = ds[nm].values.copy()
-            a[:, -1, :] = np.nan
+            a[records, -1, :] = np.nan
             ds[nm] = (ds[nm].dims, a)
     if deptho:
         ds["deptho"] = (("value",), np.where(lat[keep] < 60.0, 300.0, np.nan))
@@ -677,3 +690,368 @@ def test_old_extract_reads(tmp_path, leg):
     old = _old_extract_warnings(rec)
     assert len(old) == 1, [str(w.message) for w in rec]
     assert "the bed is placed" not in str(old[0].message)
+
+
+# ---------------------------------------------------------------------------
+# the prepare hook: checked before any output exists and in `kelp info`
+# (spec tests 3, 5, 7, 8f)
+# ---------------------------------------------------------------------------
+
+def _plain(value):
+    """``value`` with tuples as lists, for a YAML file."""
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
+
+
+def _yaml(tmp_path, cfg):
+    """Writes the set keys of ``cfg`` (every key of its mode, numerics,
+    mesh, data and time sections that differs from the default) as the
+    YAML file tmp_path/<output stem>.yaml for ``kelp info``; returns its
+    path.  The file is checked to load back as ``cfg``."""
+    import dataclasses
+    from pathlib import Path
+
+    import yaml
+    from kelp.core.config import load_config
+
+    doc = {}
+    for sec in ("mode", "numerics", "mesh", "data", "time"):
+        obj, keys = getattr(cfg, sec), {}
+        for f in dataclasses.fields(obj):
+            if f.default is not dataclasses.MISSING:
+                default = f.default
+            elif f.default_factory is not dataclasses.MISSING:
+                default = f.default_factory()
+            else:
+                default = dataclasses.MISSING
+            value = getattr(obj, f.name)
+            if value == default:
+                continue
+            if dataclasses.is_dataclass(value):
+                value = dataclasses.asdict(value)
+            keys[f.name] = _plain(value)
+        doc[sec] = keys
+    path = tmp_path / f"{Path(cfg.data.output_path).stem}.yaml"
+    path.write_text(yaml.safe_dump(doc))
+    assert load_config(str(path)) == cfg
+    return path
+
+
+def _info(tmp_path, store, tag, **kw):
+    """``kelp info`` in process on the config of ``_cfg`` (same arguments):
+    ``(return code, stderr)``."""
+    import contextlib
+    import io
+
+    from kelp.cli.main import main
+
+    path = _yaml(tmp_path, _cfg(tmp_path, store, tag, **kw))
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err), \
+            contextlib.redirect_stdout(io.StringIO()):
+        rc = main(["info", str(path)])
+    return rc, err.getvalue()
+
+
+def _old_named(rec, *names):
+    """The W-OLD warnings of ``rec`` that name exactly ``names``."""
+    listed = ", ".join(repr(n) for n in names)
+    return [w for w in _old_extract_warnings(rec)
+            if f"its layer variables {listed} keep" in str(w.message)]
+
+
+def test_prepare_dispatch():
+    """The hook gets the run's mode by keyword when its signature names
+    ``mode_cfg``; every other hook is called with two arguments (spec
+    test 7)."""
+    import inspect
+
+    from kelp.readers import _prepare_dataset, get_reader
+
+    got = {}
+
+    class Two:
+        @staticmethod
+        def prepare(mesh, ds):
+            got["Two"] = (mesh, ds)
+
+    class Named:
+        @staticmethod
+        def prepare(mesh, ds, *, mode_cfg=None):
+            got["Named"] = (mesh, ds, mode_cfg)
+
+    class Other:
+        @staticmethod
+        def prepare(mesh, ds, extra=None):
+            got["Other"] = (mesh, ds, extra)
+
+    class NoHook:
+        pass
+
+    mesh, ds, mode = object(), object(), object()
+    for reader in (Two, Named, Other, NoHook):
+        _prepare_dataset(reader, mesh, ds, mode)
+    assert got == {"Two": (mesh, ds), "Named": (mesh, ds, mode),
+                   "Other": (mesh, ds, None)}
+    assert got["Named"][2] is mode
+    got.clear()
+    _prepare_dataset(Named, mesh, ds)
+    assert got == {"Named": (mesh, ds, None)}
+    assert "mode_cfg" in inspect.signature(HealpixReader.prepare).parameters
+    for name in ("fesom14", "nemo"):
+        params = inspect.signature(get_reader(name).prepare).parameters
+        assert "mode_cfg" not in params, name
+
+
+def _drop(name):
+    def edit(ds):
+        return ds.drop_vars(name)
+    return edit
+
+
+def _no_level(name, dim):
+    def edit(ds):
+        ds[name] = ds[name].isel({dim: 0})
+    return edit
+
+
+def _w_two_dims(ds):
+    w = ds["avg_wo"].expand_dims(depth=2, axis=2)
+    ds["avg_wo"] = w.transpose("time", "level_w", "depth", "value")
+
+
+_PREPARE_LEGS = {
+    # leg: (_vstore keywords, _run keywords, exception, fragment); the layer
+    # family on ``level``, w on ``level_w``, a defect variable on its own dim
+    "w_k_plus_1": (dict(edit=_put("avg_wo", K + 1)), {}, ValueError, FRAG_W),
+    "w_k_minus_1": (dict(edit=_put("avg_wo", K - 1)), {}, ValueError,
+                    FRAG_W),
+    "u_last": (dict(edit=_put("avg_uoe", K, value=1.0)), {}, ValueError,
+               FRAG_P),
+    "v_last": (dict(edit=_put("avg_von", K, value=1.0)), {}, ValueError,
+               FRAG_P),
+    "u_k_plus_1": (dict(edit=_put("avg_uoe", K + 1)), {}, ValueError,
+                   FRAG_L),
+    "u_k_minus_2": (dict(edit=_put("avg_uoe", K - 2)), {}, ValueError,
+                    FRAG_L),
+    "table_one_short": (dict(layer_dim="level", w_dim="level", pad=True),
+                        dict(levels=LEV[:5]), ValueError, FRAG_W),
+    "no_w": (dict(edit=_drop("avg_wo")), {}, KeyError, "vertical velocity"),
+    "u_no_level_dim": (dict(edit=_no_level("avg_uoe", "level")), {},
+                       ValueError, "no level dim"),
+    "w_two_dims": (dict(edit=_w_two_dims), {}, ValueError,
+                   "more than one vertical dim"),
+}
+
+
+@pytest.mark.parametrize("leg", list(_PREPARE_LEGS))
+def test_refused_before_output_run_and_info(tmp_path, leg):
+    """u, v and w are checked by the reader's prepare hook: a configured
+    run is refused before its output file exists, and ``kelp info`` on the
+    same config exits 1 with the message (spec test 3)."""
+    store_kw, run_kw, exc, frag = _PREPARE_LEGS[leg]
+    store = _vstore(tmp_path / f"{leg}.nc", **store_kw)
+    with pytest.raises(exc, match=frag):
+        _run(tmp_path, store, leg, **run_kw)
+    assert not list(tmp_path.glob(f"traj_{leg}*"))
+    rc, err = _info(tmp_path, store, f"{leg}_info", **run_kw)
+    assert rc == 1, err
+    assert frag in err, err
+
+
+def test_direct_entry_prepares_before_any_read(tmp_path):
+    """``track_particles`` (through ``run_single_realization``) runs the
+    hook with its mode before the first read."""
+    from kelp import tracking
+
+    store = _vstore(tmp_path / "W7.nc", edit=_put("avg_wo", K + 1))
+    reads = []
+
+    class Counting(HealpixReader):
+        @staticmethod
+        def read_velocities(*args, **kwargs):
+            reads.append(args[1])
+            return HealpixReader.read_velocities(*args, **kwargs)
+
+    mesh = _mesh(store, MODE_3D)
+    ds = _open(store)
+    lon0, lat0, z0 = (np.array(c, dtype=np.float64) for c in zip(*SEEDS))
+    with pytest.raises(ValueError, match=FRAG_W):
+        tracking.track_particles(
+            mesh, ds, Counting, lon0, lat0, z0, start_time_idx=0, n_steps=1,
+            dt=86400.0, integrator="rk2", mode=MODE_3D,
+            uv_interp="barycentric", w_interp="barycentric")
+    assert reads == []
+    ds.close()
+
+
+def test_run_and_info_use_the_full_table_under_max_levels(tmp_path):
+    """mode.max_levels below K: the hook checks against the full table, so
+    a valid padded store runs and ``kelp info`` exits 0 (spec test 5)."""
+    p = _p_store(tmp_path / "P.nc")
+    out = _run(tmp_path, p, "P", max_levels=M)
+    assert np.isfinite(out["lon"]).all()
+    rc, err = _info(tmp_path, p, "P_info", max_levels=M)
+    assert rc == 0, err
+
+
+_OLD_LEGS = ["v10_cut", "v11_cut", "no_tool_cut", "v10_last_empty",
+             "v10_uncut", "later_only"]
+
+
+@pytest.mark.parametrize("leg", _OLD_LEGS)
+def test_old_extract_runs_with_a_warning(tmp_path, leg):
+    """An old extract (tool "extract_healpix_region v1.0") cut with
+    region.max_levels runs as the K-1 layers its table bounds, bit for bit
+    as the same extract with an empty last level, with one W-OLD for u and
+    v (prepare) and one for the sampled scalars (the probe), once per
+    process; ``kelp info`` shows the u/v one and exits 0.  Another tool
+    attribute, or none, is refused before output (M-P).  An old extract
+    with an empty last level, an uncut one, and one whose scalar plane
+    carries data only at a later record run without W-OLD (spec test
+    8f)."""
+    hx._WARNED.clear()
+    p = _p_store(tmp_path / "P.nc")
+    caught = warnings.catch_warnings(record=True)
+    if leg == "v10_cut":
+        e = _as_extract(p, tmp_path / "E.zarr", tool=OLD_TOOL, cut=M)
+        ep = _as_extract(p, tmp_path / "EP.zarr", tool=NEW_TOOL, cut=M,
+                         last_nan=True)
+        with caught as rec:
+            warnings.simplefilter("always")
+            out_e = _run(tmp_path, e, "E", levels=None)
+        _same(out_e, _run(tmp_path, ep, "EP", levels=None))
+        assert np.isfinite(out_e["avg_thetao"]).any()
+        uv = _old_named(rec, "avg_uoe", "avg_von")
+        ts = _old_named(rec, "avg_thetao", "avg_so")
+        assert len(uv) == 1 and len(ts) == 1, [str(w.message) for w in rec]
+        assert len(_old_extract_warnings(rec)) == 2
+        msg = str(uv[0].message)
+        for frag in ("K = 4 interfaces", "the K-1 = 3 layers the table bounds",
+                     "the layer below 70 m is not used",
+                     ", and the bed is placed no deeper than 70 m",
+                     "region.max_levels: 5 or more"):
+            assert frag in msg, (frag, msg)
+        assert "of which mode.max_levels keeps" not in msg
+        # a second run in the same process, two realizations: no new W-OLD
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            _run(tmp_path, e, "E2", levels=None, num_runs=2)
+        assert not _old_extract_warnings(rec), [str(w.message) for w in rec]
+        # kelp info: the u/v warning, exit 0
+        hx._WARNED.clear()
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            rc, err = _info(tmp_path, e, "E_info", levels=None)
+        assert rc == 0, err
+        assert len(_old_extract_warnings(rec)) == 1
+        assert len(_old_named(rec, "avg_uoe", "avg_von")) == 1
+    elif leg in ("v11_cut", "no_tool_cut"):
+        tool = NEW_TOOL if leg == "v11_cut" else None
+        x = _as_extract(p, tmp_path / "X.zarr", tool=tool, cut=M)
+        with pytest.raises(ValueError, match=FRAG_P) as ei:
+            _run(tmp_path, x, "X", levels=None)
+        assert "'avg_uoe' has K = 4 entries" in str(ei.value)
+        assert not list(tmp_path.glob("traj_X*"))
+        rc, err = _info(tmp_path, x, "X_info", levels=None)
+        assert rc == 1, err
+        assert FRAG_P in err, err
+    elif leg == "v10_last_empty":
+        en = _as_extract(p, tmp_path / "EN.zarr", tool=OLD_TOOL, cut=M,
+                         last_nan=True)
+        with caught as rec:
+            warnings.simplefilter("always")
+            out = _run(tmp_path, en, "EN", levels=None)
+        assert np.isfinite(out["lon"]).all()
+        assert not _old_extract_warnings(rec), [str(w.message) for w in rec]
+    elif leg == "v10_uncut":
+        b = _b_store(tmp_path / "B.nc")
+        u = _as_extract(b, tmp_path / "U.zarr", tool=OLD_TOOL)
+        with caught as rec:
+            warnings.simplefilter("always")
+            out_u = _run(tmp_path, u, "U", levels=None)
+            rc, err = _info(tmp_path, u, "U_info", levels=None)
+        assert rc == 0, err
+        assert not _old_extract_warnings(rec), [str(w.message) for w in rec]
+        _same(out_u, _run(tmp_path, b, "B"))
+    else:
+        # the K-th plane of u, v and S empty at every record, that of T
+        # empty at records 0 and 1 and filled at record 2, which only the
+        # per-step reads see: no W-OLD, read as the extract with T empty
+        everywhere = slice(None)
+        el = _as_extract(p, tmp_path / "EL.zarr", tool=OLD_TOOL, cut=M,
+                         last_nan={"avg_uoe": everywhere,
+                                   "avg_von": everywhere,
+                                   "avg_so": everywhere,
+                                   "avg_thetao": [0, 1]})
+        el0 = _as_extract(p, tmp_path / "EL0.zarr", tool=OLD_TOOL, cut=M,
+                          last_nan=True)
+        with xr.open_zarr(el) as d:
+            last_t = d["avg_thetao"].isel(level=-1).values
+        assert np.isnan(last_t[:2]).all() and np.isfinite(last_t[2]).any()
+        with caught as rec:
+            warnings.simplefilter("always")
+            out = _run(tmp_path, el, "EL", levels=None,
+                       sample=("avg_thetao",), n_steps=2)
+        assert not _old_extract_warnings(rec), [str(w.message) for w in rec]
+        _same(out, _run(tmp_path, el0, "EL0", levels=None,
+                        sample=("avg_thetao",), n_steps=2))
+
+
+def test_old_extract_under_max_levels(tmp_path):
+    """An old extract run with mode.max_levels below its own table: K is
+    the extract's table, the run reads max_levels-1 layers as the padded
+    extract does, and W-OLD names the layers mode.max_levels keeps."""
+    hx._WARNED.clear()
+    p = _p_store(tmp_path / "P.nc")
+    e = _as_extract(p, tmp_path / "E.zarr", tool=OLD_TOOL, cut=M)
+    ep = _as_extract(p, tmp_path / "EP.zarr", tool=NEW_TOOL, cut=M,
+                     last_nan=True)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        out_e = _run(tmp_path, e, "E", levels=None, max_levels=3)
+    _same(out_e, _run(tmp_path, ep, "EP", levels=None, max_levels=3))
+    uv = _old_named(rec, "avg_uoe", "avg_von")
+    assert len(uv) == 1, [str(w.message) for w in rec]
+    msg = str(uv[0].message)
+    for frag in ("K = 4 interfaces",
+                 "the K-1 = 3 layers the table bounds, of which "
+                 "mode.max_levels keeps 2",
+                 "region.max_levels: 5 or more"):
+        assert frag in msg, (frag, msg)
+
+
+def test_old_extract_with_stamp_options(tmp_path):
+    """data.time_stamp / time_window rebuild the dataset: it is still an
+    old extract (W-OLD, no M-P)."""
+    hx._WARNED.clear()
+    p = _p_store(tmp_path / "P.nc")
+    e = _as_extract(p, tmp_path / "E.zarr", tool=OLD_TOOL, cut=M)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        out = _run(tmp_path, e, "E", levels=None, time_stamp="end",
+                   time_window="1 d")
+    assert np.isfinite(out["lon"]).all()
+    assert len(_old_named(rec, "avg_uoe", "avg_von")) == 1, \
+        [str(w.message) for w in rec]
+
+
+def test_2d_run_ignores_the_3d_rule(tmp_path):
+    """A 2-D run and ``kelp info`` of a 2-D config on a store that breaks
+    the 3-D rule (w on K+1, u on K with data in the last level): unchanged,
+    no refusal."""
+    def both(ds):
+        _put("avg_wo", K + 1)(ds)
+        _put("avg_uoe", K, value=1.0, dim="level_y")(ds)
+
+    store = _vstore(tmp_path / "X.nc", edit=both)
+    seeds = list(dict.fromkeys((lo, la) for lo, la, _ in SEEDS))
+    two_d = dict(seeds=seeds, sample=("avg_thetao",), Fdrift2D=True,
+                 Fdrift3D=False, sigma_layer=1)
+    out = _run(tmp_path, store, "X", **two_d)
+    assert np.isfinite(out["lon"]).all()
+    rc, err = _info(tmp_path, store, "X_info", **two_d)
+    assert rc == 0, err

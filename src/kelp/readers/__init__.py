@@ -13,9 +13,10 @@ for trajectory sampling; ``read_velocities`` attaches them to
 ``VelocityField.scalars`` when given a ``sample_vars`` list.
 
 A reader may also provide the optional hook
-    prepare(mesh, ds) -> None
+    prepare(mesh, ds[, *, mode_cfg=None]) -> None
 that checks a dataset against the mesh; every entry of a run (and ``kelp
-info``) calls it through :func:`_prepare_dataset`.  A reader that resolves
+info``) calls it through :func:`_prepare_dataset`, which passes the run's
+mode to a hook whose signature names ``mode_cfg``.  A reader that resolves
 what time each record represents (``_READER_RESOLVES_TIME``) takes the
 ``data.time_*`` stamp options as ``open_dataset`` keywords
 (:func:`_time_option_kwargs`); for every other reader
@@ -29,6 +30,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import functools
+import inspect
 import warnings
 
 import numpy as np
@@ -82,8 +84,15 @@ def get_reader(name: str):
     return _READERS[name]
 
 
-def _prepare_dataset(reader, mesh, ds) -> None:
-    """Run the reader's optional ``prepare(mesh, ds)`` hook.
+def _prepare_dataset(reader, mesh, ds, mode=None) -> None:
+    """Run the reader's optional ``prepare(mesh, ds[, *, mode_cfg])`` hook.
+
+    A hook whose signature has a parameter named ``mode_cfg`` (the
+    convention of ``load_mesh``) gets ``mode`` — the run's ``ModeConfig``
+    — by keyword; every other hook is called with ``(mesh, ds)``, so
+    two-argument hooks work as before.  A call without a mode passes
+    ``mode_cfg=None``, with which such a hook checks nothing that needs
+    the mode (the HEALPix hook checks u, v and w of a 3-D run).
 
     The hook runs at every call: the engine keeps no record of what a mesh
     was prepared for (no dataset token, no level table, bed or reader
@@ -102,7 +111,10 @@ def _prepare_dataset(reader, mesh, ds) -> None:
     prep = getattr(reader, "prepare", None)
     if prep is None:
         return
-    prep(mesh, ds)
+    if "mode_cfg" in inspect.signature(prep).parameters:
+        prep(mesh, ds, mode_cfg=mode)
+    else:
+        prep(mesh, ds)
 
 
 def _apply_max_levels(mesh, mode, verbose: bool = False) -> None:

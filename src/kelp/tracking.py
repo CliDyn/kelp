@@ -1943,8 +1943,9 @@ def run_single_realization(
     ``mode.max_levels`` to ``mesh.sigma`` itself, from the uncut table kept
     in ``mesh.metadata["sigma_full"]`` (None restores it); a mesh cut that
     way earlier is re-cut to this call's limit whatever the option.  A
-    reader's optional ``prepare(mesh, ds)`` hook runs at every call, after
-    that cut (``_prepare_dataset``).
+    reader's optional ``prepare(mesh, ds[, *, mode_cfg])`` hook runs at
+    every call, after that cut, with this call's ``mode`` when its
+    signature names ``mode_cfg`` (``_prepare_dataset``).
     """
     from .core.release import check_particle_offset
     # None (a restart written without an offset) means an unsharded run
@@ -2025,8 +2026,8 @@ def run_single_realization(
             or "sigma_full" in (getattr(mesh, "metadata", None) or {})):
         _apply_max_levels(mesh, mode)
     # the reader's mesh-relative dataset hook, at every entry (after the
-    # cut above: it sees the levels in use)
-    _prepare_dataset(reader, mesh, ds)
+    # cut above: it sees the levels in use), with this call's mode
+    _prepare_dataset(reader, mesh, ds, mode)
     probe_fn = getattr(reader, "probe_uv_layout", None)
     if uv_vertical_option == "linear" and probe_fn is not None:
         # the layout facts of run_tracking's pre-writer probe, for direct
@@ -3396,7 +3397,7 @@ def run_tracking(
     # below reads the dataset on the mesh (the sampling and dry-mask probes)
     # and before the writer exists, so its refusals leave no output file;
     # run_single_realization runs it again at each realization's entry
-    _prepare_dataset(reader, mesh, ds)
+    _prepare_dataset(reader, mesh, ds, config.mode)
 
     # Load initial particle seeds (delayed-release aware: an optional 4th
     # column is the release offset in seconds).  The release STATE is built

@@ -726,6 +726,43 @@ def _first_soft(ds, aliases: Sequence[str], cfg_name: Optional[str] = None):
     return None
 
 
+# The u/v, w and interface-count refusals of a 3-D read, shared by
+# ``read_velocities`` and the ``prepare`` hook so the two cannot drift.
+def _uv_names(ds, cfg):
+    """``(u_name, v_name)``: ``mode.var_u`` / ``var_v``, else the aliases;
+    ``KeyError`` when one is missing."""
+    u_name = _first(ds, _U_ALIASES,
+                    getattr(cfg, "var_u", None) if cfg else None)
+    v_name = _first(ds, _V_ALIASES,
+                    getattr(cfg, "var_v", None) if cfg else None)
+    if u_name is None or v_name is None:
+        raise KeyError(
+            f"healpix reader: no u/v variable in the dataset (looked "
+            f"for {_U_ALIASES} / {_V_ALIASES}).")
+    return u_name, v_name
+
+
+def _w_name(ds, cfg):
+    """The vertical velocity: ``mode.var_w``, else the aliases; ``KeyError``
+    when it is missing."""
+    w_name = _first(ds, _W_ALIASES,
+                    getattr(cfg, "var_w", None) if cfg else None)
+    if w_name is None:
+        raise KeyError(
+            f"healpix reader: 3-D mode needs a vertical velocity "
+            f"(looked for {_W_ALIASES}, or set mode.var_w); "
+            "point data.ncinput at the 3-D store.")
+    return w_name
+
+
+#: a 3-D read on a mesh with fewer than two interfaces
+_FEW_INTERFACES = (
+    "healpix reader: 3-D read needs >= 2 vertical "
+    "interfaces on the mesh — set mesh.levels AND load "
+    "the mesh with mode_cfg (run_tracking/the CLI do; a "
+    "direct load_mesh(mesh_cfg) call builds a 2-D mesh).")
+
+
 def _find_crs(ds):
     """Return ``(nside, order)`` from healpix ``crs`` attrs, or (None, None)."""
     for name in list(ds.variables) + ["crs"]:
@@ -1653,6 +1690,67 @@ class HealpixReader:
         return "node"
 
     @staticmethod
+    def prepare(mesh, ds, *, mode_cfg=None) -> None:
+        """Check u, v and w of a 3-D run against the interface table, at
+        the dataset's first record — the reader hook of
+        ``readers._prepare_dataset``, which ``run_tracking`` calls before
+        any output file exists, each realization at its entry and ``kelp
+        info`` once, with the run's mode.
+
+        Check only: changes neither ``mesh`` nor ``ds``.  Returns at once
+        without a mode (``mode_cfg`` None: a caller that passes none checks
+        nothing new), in a 2-D run and on the pixel geometry (2-D only).
+        Else, in this order: a mesh with fewer than 2 interfaces; u, v and
+        w resolved as ``read_velocities`` resolves them (the same
+        ``KeyError``); record 0 of each with one vertical dim and the
+        mesh's cell count (:func:`_level_structure`); the length of the
+        level axis of w, then u, then v against the FULL table
+        (:func:`_level_rule`, M-W / M-L); for u and v on K entries, the
+        K-th plane at the tracked node columns, which must be empty (M-P)
+        — on an old extract (:func:`_is_old_extract`) data there gives
+        the W-OLD warning instead (once per process, store and names): the
+        reads take such a variable as K-1 layers.  Cost: at most one plane
+        of u and one of v.
+        Scalars are checked where they are read (the probes of a run).
+        """
+        if mode_cfg is None or not getattr(mode_cfg, "Fdrift3D", False):
+            return
+        if (getattr(mesh, "metadata", None)
+                and mesh.metadata.get("healpix_geometry") == "pixel"):
+            return
+        if int(mesh.sigma.size) < 2:
+            raise ValueError(_FEW_INTERFACES)
+        u_name, v_name = _uv_names(ds, mode_cfg)
+        w_name = _w_name(ds, mode_cfg)
+        first = {}                            # name -> (record 0, level dim)
+        for nm in (u_name, v_name, w_name):
+            da = ds[nm]
+            if "time" in da.dims:
+                da = da.isel(time=0)
+            first[nm] = (da, _level_structure(da, mesh, nm)[0])
+        table = _table_label(ds)
+        # w first: a table one interface short is reported as M-W
+        _level_rule(*first[w_name], mesh, w_name, "interfaces", table=table)
+        on_k = [nm for nm in (u_name, v_name)
+                if _level_rule(*first[nm], mesh, nm, "layers", table=table)]
+        old = _is_old_extract(ds)
+        with_data = []
+        for nm in on_k:
+            da, lev_dim = first[nm]
+            plane = np.asarray(
+                da.isel({lev_dim: int(da.sizes[lev_dim]) - 1}).values,
+                dtype=np.float64).reshape(-1)
+            m = _last_plane_count(plane, mesh)
+            if not m:
+                continue
+            if not old:
+                _refuse_last_plane(nm, lev_dim, m, mesh, table=table,
+                                   record=_record_label(ds, 0))
+            with_data.append(nm)
+        if with_data:
+            _warn_old_extract(ds, mesh, with_data)
+
+    @staticmethod
     def _read_kh_pixels(ds, timestep, mesh, diffusion, cfg):
         """Pixel-space Kh fields for em/m1 → compacted NODE arrays.
 
@@ -1759,14 +1857,7 @@ class HealpixReader:
                     "Kh fields (em/m1 diffusion) — Kh compaction targets "
                     "pixel centres, which are elements here; use the "
                     "dual geometry or uniform Kh.")
-        u_name = _first(ds, _U_ALIASES,
-                        getattr(cfg, "var_u", None) if cfg else None)
-        v_name = _first(ds, _V_ALIASES,
-                        getattr(cfg, "var_v", None) if cfg else None)
-        if u_name is None or v_name is None:
-            raise KeyError(
-                f"healpix reader: no u/v variable in the dataset (looked "
-                f"for {_U_ALIASES} / {_V_ALIASES}).")
+        u_name, v_name = _uv_names(ds, cfg)
 
         w = None
         if is_3d:
@@ -1776,18 +1867,8 @@ class HealpixReader:
             # deepest is all-NaN padding and is dropped by the K-1 slice.
             k_ifc = int(mesh.sigma.size)
             if k_ifc < 2:
-                raise ValueError(
-                    "healpix reader: 3-D read needs >= 2 vertical "
-                    "interfaces on the mesh — set mesh.levels AND load "
-                    "the mesh with mode_cfg (run_tracking/the CLI do; a "
-                    "direct load_mesh(mesh_cfg) call builds a 2-D mesh).")
-            w_name = _first(ds, _W_ALIASES,
-                            getattr(cfg, "var_w", None) if cfg else None)
-            if w_name is None:
-                raise KeyError(
-                    f"healpix reader: 3-D mode needs a vertical velocity "
-                    f"(looked for {_W_ALIASES}, or set mode.var_w); "
-                    "point data.ncinput at the 3-D store.")
+                raise ValueError(_FEW_INTERFACES)
+            w_name = _w_name(ds, cfg)
             # every level axis is checked against the FULL interface table
             # (mesh.metadata["sigma_full"] under a max_levels cut); w
             # FIRST, so a table one interface short is reported as such
