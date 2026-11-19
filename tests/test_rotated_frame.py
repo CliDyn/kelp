@@ -1483,7 +1483,10 @@ class TestRk2LongitudeIsSecondOrder:
         rec = track_particles(
             mesh, ds, reader, np.array([0.0]), np.array([lat0]),
             start_time_idx=0, n_steps=1, dt=dt,
-            integrator="rk2", output_freq=1, mode=mode, temporal_interp=True)
+            integrator="rk2", output_freq=1, mode=mode, temporal_interp=True,
+            # the field is steady: records dt apart, so the one RK2 step
+            # lands on a record (tracking._check_step_grid)
+            file_times=np.arange(4) * dt)
         ds.close()
         lon_new = float(np.asarray(rec.to_arrays()["lon"]).ravel()[-1])
 

@@ -91,10 +91,14 @@ class TestReadVelocities3D:
             HealpixReader.read_velocities(ds, 0, mesh, mode_cfg=MODE_3D)
 
     def test_max_levels_trims_read(self, tmp_path):
+        from kelp.readers import _apply_max_levels
         p = _store_3d(tmp_path)
         mesh = HealpixReader.load_mesh(_mesh_cfg(p, levels=LEVELS_M),
                                        mode_cfg=MODE_3D)
-        mesh.sigma = mesh.sigma[:3]             # what run_tracking does
+        # what run_tracking does: the cut keeps the full table in
+        # mesh.metadata["sigma_full"], against which the reader checks
+        _apply_max_levels(mesh, ModeConfig(Fdrift2D=False, Fdrift3D=True,
+                                           max_levels=3))
         ds = HealpixReader.open_dataset(p, mode_cfg=MODE_3D)
         vf = HealpixReader.read_velocities(ds, 0, mesh, mode_cfg=MODE_3D)
         assert vf.u.shape[0] == 2

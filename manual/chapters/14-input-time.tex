@@ -58,7 +58,10 @@ without loading the field arrays, and a snapshot is materialized only when a ste
     the tracked level. Plain Zarr and NetCDF stores and
     reference stores (\code{.parq}, \code{.json}) are supported; the sea-surface height may come from a
     separate store with an identical time axis (\conf{data.ncinput\_eta}), and the vertical levels from
-    \conf{mesh.levels} (\cref{sec:vert-coord}).
+    \conf{mesh.levels} (\cref{sec:vert-coord}). The vertical axis of each variable is found on its own,
+    so the vertical velocity may lie on an axis of its own (for example \code{level\_w}) next to the
+    layer variables; in three dimensions every vertical axis is checked against the full interface
+    table, and a mismatch is refused (\cref{sec:vert-coord}).
   \item[NEMO] The grid-T file is the input; the grid-U and grid-V files are found by substituting the grid
     token in its name, or given by \conf{data.ncinput\_u} and \conf{data.ncinput\_v}, and must share its
     time axis exactly; several files per grid are joined along time. The mesh file is a \code{mesh\_mask.nc}
@@ -71,7 +74,11 @@ A reader may also provide a hook \fn{prepare}, which checks the opened data agai
 entry: right after the data are opened, before any output file exists, and again at the entry of each
 realization, after the \conf{max\_levels} cut, so it always sees the levels in use. The FESOM~1.4 hook only
 checks --- the horizontal sizes, the full level axis, the node coordinates and the wet mask of the first record
-of every variable --- and changes nothing. \code{kelp info} opens the data as a run does, the hook included.
+of every variable --- and changes nothing. A hook that declares the keyword \code{mode\_cfg} is given the
+run's mode settings as well. The HEALPix hook uses them in a three-dimensional run to check the vertical axes
+of $u$, $v$ and $\Wvel$ at the first record against the interface table, so that a mismatch is refused before
+any output file exists; it changes nothing either. \code{kelp info} opens the data as a run does, the hook
+included, and so refuses the same configurations.
 
 Every reader that reads a vertical velocity converts it to the engine's positive-down convention
 (\cref{sec:vert-wsign}; FESOM~1.4 writes \code{wo} positive up), and with \conf{velocity\_float32} stores the velocity fields in single precision to
@@ -208,9 +215,16 @@ arithmetic and the refusals of the FESOM~1.4 reader. Calendar windows are comput
 the axis, so monthly means stamped on the first of the month at midnight, declared \conf{start} and
 \conf{calendar\_month}, sit at 12:00 on 16 January and at 00:00 on 15 February of a common year; a stamp off
 its window boundary, a gap, an overlap or a broken snapshot cadence refuses the run. Here the offset needs the
-other two keys, since these readers have no time bounds or schedule for it to act on, and
-\conf{time.on\_exhausted: cycle} is refused with calendar-month or calendar-year windows, because the cycle
-period assumes equally spaced records. From then on the axis is treated like the FESOM~1.4 reader's: no midpoint
+other two keys, since these readers have no time bounds or schedule for it to act on. With
+\conf{time.on\_exhausted: cycle}, means over calendar months or years repeat after the sum of their averaging
+windows --- 365~days for the twelve monthly means of a common year, where the span of the records plus the last
+interval would give 364.5~days --- and the interval from the last record to the first record of the next pass
+is the period less the span of the records, 31~days from December to January; the FESOM~1.4 reader gives its
+means the same period from the windows it resolves. When the windows differ in length, such a cycle needs the interpolated mode and is
+refused in the discrete mode; windows of equal length, such as the months of a \code{360\_day} calendar, cycle in
+the discrete mode too. Snapshots (\conf{instant}) on a calendar-month or calendar-year cadence carry no window, so
+the period after which they repeat is not known, and \conf{cycle} is refused for them with every reader, the
+FESOM~1.4 reader included. From then on the axis is treated like the FESOM~1.4 reader's: no midpoint
 shift, a \conf{start\_date} matched against the resolved instants (a daily mean stamped at the start of its day
 sits at 12:00), the summary line in the run and in \code{kelp info}, and
 \code{time\_averaging = "resolved\_from\_options"} in the output, next to each of the three keys that is set.
@@ -244,7 +258,9 @@ loop that is bit-identical to the array expression; fields stored in single prec
 are in \srcfile{readers/fesom2.py}; the structured-grid builder is \srcfile{readers/structured.py}; the FESOM~1.4 reader is the package
 \srcfile{readers/fesom14/} (\fn{Fesom14Reader} in \srcfile{reader.py}, the two data forms and the validity
 predicate in \srcfile{\_layout.py}), and the \fn{prepare} hook is run by \fn{\_prepare\_dataset}
-(\srcfile{readers/\_\_init\_\_.py}); the
+(\srcfile{readers/\_\_init\_\_.py}), which passes the run's mode to a hook that takes \code{mode\_cfg}; the
+HEALPix hook and the rule for the vertical axes are \fn{HealpixReader.prepare}, \fn{\_vertical\_dim} and
+\fn{\_level\_rule} in \srcfile{readers/healpix.py}; the
 midpoint shift (\fn{\_shift\_to\_midpoints}), the start date (\fn{\_resolve\_start\_date}), the payload
 (\fn{\_build\_vel\_payload}) and the cache \fn{\_VelCache} are in \srcfile{tracking.py}; the lazy view
 \fn{LazyLerpField} and its blend are in \srcfile{core/io.py}.}

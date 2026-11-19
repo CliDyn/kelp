@@ -65,7 +65,10 @@ into its own small dataclass. (Every key is documented in
    called right after (`readers._prepare_dataset`), before anything reads the
    dataset on the mesh and before any output file exists; each realization
    calls it again at its entry (`run_single_realization`, after the
-   `max_levels` cut), so a run with R realizations prepares 1 + R times. The
+   `max_levels` cut), so a run with R realizations prepares 1 + R times. A
+   hook declared as `prepare(mesh, ds, *, mode_cfg=None)` also gets the run's
+   mode: the HEALPix hook uses it to check the vertical axes of u, v and w of a
+   3-D run against the interface table (`healpix.md` §2). The
    engine keeps no record of what a mesh was prepared for.
 
 4. **Load the seed particles.** `read_seeds_with_release(config.data.inicloud)`
@@ -154,8 +157,10 @@ distinction matters for everything downstream.
   plain `VelocityField` read straight from the reader.
 
 - *Temporal-interpolation mode* (`temporal_interp: true`) lets the tracking
-  `dt` be smaller than the file spacing. The simulation tracks its own clock in
-  seconds; each step resolves which two adjacent snapshots bracket the current
+  `dt` be smaller than the file spacing; with RK2/RK4/RK45 every record the run
+  reaches must lie on the step grid (`tracking._check_step_grid`, refused at
+  startup otherwise). The simulation tracks its own clock in seconds, set to
+  each record a step ends on; each step resolves which two adjacent snapshots bracket the current
   time (`_resolve_time_bracket`) and builds a blended payload from them
   (`_build_vel_payload`). When the time sits strictly between two snapshots the
   payload is a `LazyLerpField` — a view over the two snapshots that blends each

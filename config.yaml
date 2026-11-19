@@ -56,7 +56,9 @@ mode:
 numerics:
   # dt: integration step (s).  Omit → auto = file step.
   # temporal_interp false → dt must equal the file step (discrete mode);
-  # temporal_interp true  → dt may be smaller (sub-stepping).
+  # temporal_interp true  → dt may be smaller (sub-stepping); with rk2/rk4/rk45
+  #   every record must fall on a step boundary (3600 → 1800, 1200, 900, 720,
+  #   600), any other dt is refused at startup.
   # dt: 3600.0
   # file_dt: 3600.0           # set only when the file has no usable time axis
 

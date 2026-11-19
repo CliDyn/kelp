@@ -15,15 +15,25 @@ source:
   eta_path: null          # null -> auto 3D->2D sibling; set explicitly to pin
   # var_u: my_u           # velocity names outside the aliases (run needs the
   # var_v: my_v           # same mode.var_u/var_v on the extract)
+  # var_w: my_w           # w outside the aliases (run needs mode.var_w): added to
+                          # the default variables; with an explicit variables:
+                          # list it must be listed
   # healpix_zoom: 9       # only needed when the store has no healpix crs attrs
-  # vertical interface table (aux3d path or inline metres): written INTO the
-  # extract (level_interfaces_m) so 3-D runs need no mesh.levels — set it
-  # when extracting for 3-D:
+  # vertical interface table (aux3d path or inline metres): the K INTERFACE
+  # depths, not the K-1 layer mid-depths. A store that carries its own
+  # level_interfaces_m uses that one (a different levels: is refused). Every
+  # vertical axis is checked against the table before any cut (w exactly K
+  # entries; u, v, T, S K-1, or K with an empty last level), and the table is
+  # written INTO the extract (level_interfaces_m) so 3-D runs need no
+  # mesh.levels — set it when extracting for 3-D:
   levels: path/to/NG5/aux3d.out   # the mesh's aux3d.out (from the model's mesh directory)
 
 region:
   bbox: [-70.0, 20.0, -75.0, -50.0]   # [W, E, S, N]; W > E = across the dateline
-  # max_levels: 40         # keep only the first K level-axis entries (3-D stores)
+  # max_levels: 40         # keep the first 40 interfaces: w keeps 40 entries, every
+                           # layer variable (u, v, T, S) 39; a 3-D extract needs the
+                           # table (levels above, or the store's own) and at least 2;
+                           # 1 = a surface extract for 2-D runs (no table written)
   halo_layers: 1          # pixel rings added around the bbox so the dual
                           # mesh inside the working area matches the
                           # whole-store build (particles die at the edge)

@@ -46,7 +46,10 @@ against the mesh: `run_tracking` calls it right after the dataset is opened,
 before any output file exists, and each realization calls it again at its
 entry, after the `max_levels` cut (`kelp info` calls it once). The FESOM 1.4
 reader uses it to compare the sizes, the level axis, the node coordinates and
-the wet mask of the first record of every variable with the mesh.
+the wet mask of the first record of every variable with the mesh. A hook
+declared as `prepare(mesh, ds, *, mode_cfg=None)` is given the run's mode as
+well: the HEALPix reader uses it in 3-D runs to check the vertical axes of u,
+v and w at the first record against the interface table (`healpix.md` §2).
 
 Whether a given path is a NetCDF file or a Zarr store is decided by
 `_detect_engine`: a `.zarr` suffix, or a directory that contains a `.zattrs`
@@ -198,9 +201,11 @@ That blending — and the accuracy caveat that comes with linear interpolation
 between snapshots — is the subject of `time_integration.md`. In discrete mode a
 `dt` unlike the file step, or irregular record times, are refused at startup
 (`tracking._check_discrete_dt`);
-in temporal-interpolation mode no check makes `dt` divide the file step, and a
-step that straddles a snapshot runs on a steady velocity (one warning per
-realization).
+in temporal-interpolation mode RK2, RK4 and RK45 refuse a `dt` that does not
+put every record the run reaches on the step grid (`tracking._check_step_grid`;
+a step that straddled a snapshot ran on a steady velocity), and a step that
+reaches a snapshot to within `1e-5·dt`, the roundoff of the run clock, ends
+exactly on it and sets the clock to it (`time_integration.md`).
 
 ### Time-averaged output and the midpoint shift
 
@@ -305,13 +310,16 @@ before the mesh or any data is read: `time_stamp` and `time_window` come
 together; `data.time_averaging` next to any of the keys is refused, with a
 message saying to remove it; `time_offset` alone is refused, since these readers
 have no time bounds or output schedule for it to act on; and
-`time.on_exhausted: cycle` with a `calendar_month` or `calendar_year` window is
-refused, because the cycle period (the span from the first to the last record
-plus the last interval) assumes equally spaced records — for twelve monthly
-centres it would be 364.5 days instead of 365. Fixed-duration and
-`calendar_day` windows are of equal length and cycle exactly. A dataset without
-a `time` dimension, or whose axis carries no calendar dates, is refused when it
-is opened.
+`time.on_exhausted: cycle` with snapshots (`time_stamp: instant`) on a
+`calendar_month` or `calendar_year` cadence is refused — for every mesh type,
+`fesom14` included (`_time_option_kwargs` checks this rule for that reader too):
+a snapshot carries no averaging window, and calendar months and years differ in
+length, so the period after which such records repeat is not known. Means over
+calendar months or years do cycle, with the sum of their averaging windows as
+the period (365 days for twelve monthly means, not 364.5; see "The period of a
+cycled forcing" below), and fixed-duration and `calendar_day` windows are of
+equal length and cycle exactly. A dataset without a `time` dimension, or whose
+axis carries no calendar dates, is refused when it is opened.
 
 From there on the run treats the axis as it treats that of the FESOM 1.4
 reader: no `time_averaging` warning, no midpoint shift, the output's
@@ -366,6 +374,57 @@ so past the first forcing period its dates lie beyond the end of the forcing
 can also be repeated as several independent **realizations** (`num_runs`), each
 offset in time by `run_interval`; these are mainly relevant to stochastic
 diffusion and are described in `configuration.md` §6.
+
+**The period of a cycled forcing.** A cycled forcing repeats after one period,
+and the interval from the last record to the first record of the next pass —
+the seam — is one more bracket of the temporal interpolation. Two rules decide
+the period, by what is known about the records:
+
+- **Averaging windows known and of unequal length** — means over calendar months
+  or years, whose windows come from the stamp options (`data.time_stamp`
+  `start`, `centre` or `end` with `data.time_window: calendar_month` or
+  `calendar_year`) or from the FESOM 1.4 reader (the files' time bounds, the raw
+  output schedule, or the same options). The period is the sum of the windows,
+  and the seam is the period minus the span from the first to the last record.
+  Twelve monthly means of a common year repeat after 365 days (366 in a leap
+  year), and the seam from the December centre to the January centre of the
+  next pass is 31 days. The old rule below would give 364.5 days and a seam of
+  30.5 days, so the forcing would drift half a day earlier with every pass.
+- **Everything else** keeps the old rule, bit for bit: the period is the span
+  from the first to the last record plus the last interval, and the seam is
+  that last interval. This is exact for equally spaced records — means over
+  windows of equal length (daily, a fixed duration) and snapshots at a fixed
+  cadence. A single record repeats with period `dt`.
+
+The windows travel with the dataset as the coordinate `kelp_time_windows`
+(dimensions `time` and `kelp_time_window_edge`: the start and end of each
+record's window), which `readers.apply_time_options` and the FESOM 1.4 reader
+attach for means and leave out for snapshots. `readers.exact_cycle` reads it
+and selects the first rule only when the window lengths of the records the run
+uses differ by more than 1 ms. Records whose windows are not known — set with
+`data.time_averaging` — take the old rule; when they are irregularly spaced (for
+example monthly means under `time_averaging: mean`), the run warns once that the
+period is exact only for equally spaced records and that `data.time_stamp` with
+`data.time_window` gives the sum of the windows. Discrete mode
+(`temporal_interp: false`) reads one record per step of `dt` and cannot follow
+a seam unlike the record spacing: a cycle on windows of unequal length is
+refused there before any output exists, with a message naming
+`numerics.temporal_interp: true`. Snapshots on a calendar-month or
+calendar-year cadence carry no window and cannot be cycled at all (refused as
+described in the stamp-option rules above). With PCHIP in time
+(`numerics.temporal_reconstruction: pchip`) the seam bracket falls back to the
+linear blend, as the first and last brackets do. The output attribute
+`forcing_cycle_period` records the period used (§5.2). A caller who passes a
+dataset to `run_single_realization` or `track_particles` directly gets the sum
+of the windows only from a dataset resolved by `apply_time_options` or opened
+by the FESOM 1.4 reader; any other dataset, and an axis built from
+`numerics.file_dt` without record times, keeps the old rule.
+
+A cycled run on means starts within the record times: a `start_date` before
+the first record's centre (1 January 00:00 for monthly means, whose first
+record sits at 16 January 12:00) or after the last one (16 December 12:00) is
+refused as a date outside the record times. Start between the first and the
+last centre; the run then crosses the seam into the next pass on its own.
 
 ## §4 The velocity cache
 
@@ -556,9 +615,12 @@ run without an output file (`TrajectoryRecord.times`) carries the same seconds.
   the first record all the same.
 - **`on_exhausted: cycle`**: `time` is the run's own clock and does not wrap, so
   after the first forcing period the dates lie beyond the end of the forcing.
-  The attribute `forcing_cycle_period` gives the period in seconds (the span of
-  the forcing records the run uses plus one record interval; `n_time_total · dt` without an
-  axis or with fewer than two records), and a `comment` says that the forcing repeats with that period.
+  The attribute `forcing_cycle_period` gives the period in seconds: the sum of
+  the averaging windows of the records the run uses where those windows are
+  known and differ in length (monthly or yearly means, §3 "The period of a
+  cycled forcing"), otherwise the span of the forcing records the run uses plus
+  one record interval; `n_time_total · dt` without an axis or with fewer than
+  two records. A `comment` says that the forcing repeats with that period.
 
 A `TrajectoryWriter` used directly, without `set_time_units`, writes
 `units = "seconds"` and no `standard_name`.
@@ -823,7 +885,13 @@ Here `start0` is the original start index and `t0` the original start time in
 seconds since the first record (with temporal interpolation, as
 `tests/test_restart_record_schedule.py` does). The config stores `time_dir` as
 a float, hence `int(time_dir)`; `run_single_realization` accepts a whole-valued
-float index and refuses a fractional one. Three rules keep the output
+float index and refuses a fractional one. With a `dt` that is not a whole number
+of seconds a segment cut between two records starts from `t0 + n·dt` (one
+rounding) where the uninterrupted run's clock carries the roundoff of the steps
+since the last record (it is set to each record it reaches), so the two agree to
+roundoff (1e-13 degrees in a probe 30 years along the axis), not bit for bit; a
+segment cut on a record, or any segment with a whole-second `dt`, is bit for bit
+the uninterrupted run. Three rules keep the output
 `time` labels of the segments equal to those of the uninterrupted run (§5.2):
 
 - **Pass the same `file_times`** the first call used — under

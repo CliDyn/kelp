@@ -13,9 +13,10 @@ for trajectory sampling; ``read_velocities`` attaches them to
 ``VelocityField.scalars`` when given a ``sample_vars`` list.
 
 A reader may also provide the optional hook
-    prepare(mesh, ds) -> None
+    prepare(mesh, ds[, *, mode_cfg=None]) -> None
 that checks a dataset against the mesh; every entry of a run (and ``kelp
-info``) calls it through :func:`_prepare_dataset`.  A reader that resolves
+info``) calls it through :func:`_prepare_dataset`, which passes the run's
+mode to a hook whose signature names ``mode_cfg``.  A reader that resolves
 what time each record represents (``_READER_RESOLVES_TIME``) takes the
 ``data.time_*`` stamp options as ``open_dataset`` keywords
 (:func:`_time_option_kwargs`); for every other reader
@@ -28,6 +29,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
+import functools
+import inspect
 import warnings
 
 import numpy as np
@@ -81,8 +84,15 @@ def get_reader(name: str):
     return _READERS[name]
 
 
-def _prepare_dataset(reader, mesh, ds) -> None:
-    """Run the reader's optional ``prepare(mesh, ds)`` hook.
+def _prepare_dataset(reader, mesh, ds, mode=None) -> None:
+    """Run the reader's optional ``prepare(mesh, ds[, *, mode_cfg])`` hook.
+
+    A hook whose signature has a parameter named ``mode_cfg`` (the
+    convention of ``load_mesh``) gets ``mode`` — the run's ``ModeConfig``
+    — by keyword; every other hook is called with ``(mesh, ds)``, so
+    two-argument hooks work as before.  A call without a mode passes
+    ``mode_cfg=None``, with which such a hook checks nothing that needs
+    the mode (the HEALPix hook checks u, v and w of a 3-D run).
 
     The hook runs at every call: the engine keeps no record of what a mesh
     was prepared for (no dataset token, no level table, bed or reader
@@ -101,7 +111,10 @@ def _prepare_dataset(reader, mesh, ds) -> None:
     prep = getattr(reader, "prepare", None)
     if prep is None:
         return
-    prep(mesh, ds)
+    if "mode_cfg" in inspect.signature(prep).parameters:
+        prep(mesh, ds, mode_cfg=mode)
+    else:
+        prep(mesh, ds)
 
 
 def _apply_max_levels(mesh, mode, verbose: bool = False) -> None:
@@ -421,6 +434,17 @@ def time_axis_epoch(ds) -> Optional[Tuple[str, str]]:
 #: dataset's axis from them
 _TIME_OPTION_KEYS = ("time_stamp", "time_window", "time_offset")
 
+#: name of the dataset coordinate ``(time, TIME_WINDOW_EDGE)`` that holds each
+#: record's averaging window ``[start, end]``, attached where the record times
+#: are resolved (:func:`apply_time_options`, the FESOM 1.4 reader) and read by
+#: :func:`exact_cycle`; private to KELP, so that a store's own ``time_bnds``
+#: is never mistaken for it
+TIME_WINDOWS = "kelp_time_windows"
+
+#: the edge dimension of ``TIME_WINDOWS`` (length 2: start, end); private to
+#: KELP, so that a CF ``nv`` dimension of another size never collides with it
+TIME_WINDOW_EDGE = "kelp_time_window_edge"
+
 #: mesh types whose reader resolves what time each record represents (the
 #: centre of its averaging window for means, the stamp for snapshots): no
 #: midpoint shift, no ``data.time_averaging``, the stamp options above
@@ -433,7 +457,10 @@ RESOLVED_BY_READER = "resolved_by_reader"
 #: times were resolved from the stamp options (:func:`apply_time_options`)
 RESOLVED_FROM_OPTIONS = "resolved_from_options"
 
-#: windows of unequal length: the cycle period assumes equally spaced records
+#: windows of unequal length: means over them cycle with the sum of their
+#: windows (:func:`exact_cycle`); snapshots at that cadence carry no window,
+#: so the period after which they repeat is not known and ``cycle`` is
+#: refused for them (:func:`_check_cycle_window`)
 _UNEQUAL_WINDOWS = ("calendar_month", "calendar_year")
 
 #: what resolved the record times, by ``ds.attrs["fesom14_time_source"]``
@@ -451,9 +478,10 @@ def _time_option_kwargs(config) -> Dict[str, str]:
     Only a reader that resolves its record times takes them (``mesh.type:
     fesom14``); it also takes the place of ``data.time_averaging``.  For
     any other mesh type the options are validated here
-    (:func:`_check_time_options`, :func:`_check_cycle_window`) and no
-    keyword is returned: :func:`_open_run_dataset` applies them to the
-    opened dataset (:func:`apply_time_options`).
+    (:func:`_check_time_options`) and no keyword is returned:
+    :func:`_open_run_dataset` applies them to the opened dataset
+    (:func:`apply_time_options`).  The cycle rule of snapshots
+    (:func:`_check_cycle_window`) is checked for every mesh type.
 
     Parameters
     ----------
@@ -473,8 +501,9 @@ def _time_option_kwargs(config) -> Dict[str, str]:
         is set; the message points to the stamp options.  For any other: the
         rules of :func:`_check_time_options` (an invalid key,
         ``data.time_averaging`` next to a key, ``data.time_offset`` without
-        ``data.time_stamp`` and ``data.time_window``) and the refusal of
-        ``time.on_exhausted: cycle`` with a calendar month or year window
+        ``data.time_stamp`` and ``data.time_window``).  For every mesh type:
+        the refusal of ``time.on_exhausted: cycle`` for snapshots
+        (``data.time_stamp: instant``) with a calendar month or year window
         (:func:`_check_cycle_window`).
     """
     data = config.data
@@ -495,6 +524,7 @@ def _time_option_kwargs(config) -> Dict[str, str]:
             "centre | end | instant) and data.time_window (the averaging "
             "window or the snapshot cadence), and data.time_offset for "
             "stamps that sit early or late")
+    _check_cycle_window(config)
     return kw
 
 
@@ -632,13 +662,16 @@ def _check_time_options(data_cfg,
 
 
 def _check_cycle_window(config) -> None:
-    """Refuse ``time.on_exhausted: cycle`` with a calendar month or year
-    window for a reader that does not resolve its record times itself.
+    """Refuse ``time.on_exhausted: cycle`` for snapshots
+    (``data.time_stamp: instant``) with a calendar month or year window, for
+    every mesh type (the FESOM 1.4 reader included).
 
-    The cycle period (span between the first and last record plus the last
-    interval) is computed for equally spaced records; month and year windows
-    differ in length.  Fixed-duration and ``calendar_day`` windows cycle
-    exactly.
+    Means over calendar months or years cycle with the sum of their
+    averaging windows, which the places that resolve record times attach to
+    the dataset (:func:`exact_cycle`).  Snapshots carry no averaging window,
+    and calendar months and years differ in length, so the period after
+    which such records repeat is not known.  Fixed-duration and
+    ``calendar_day`` windows cycle exactly with the legacy rule.
 
     Parameters
     ----------
@@ -649,19 +682,21 @@ def _check_cycle_window(config) -> None:
     ValueError
         Naming ``time.on_exhausted: stop`` as the alternative.
     """
-    if config.mesh.type in _READER_RESOLVES_TIME:
-        return None
     if getattr(config.time, "on_exhausted", None) != "cycle":
         return None
     window = getattr(config.data, "time_window", None)
     if window is None or window.strip() not in _UNEQUAL_WINDOWS:
         return None
+    stamp = getattr(config.data, "time_stamp", None)
+    if stamp is None or stamp.strip() != "instant":
+        return None
     raise ValueError(
-        f"time.on_exhausted: cycle with data.time_window: {window.strip()} is "
-        "refused: calendar months and years differ in length, and the cycle "
-        "period is computed for equally spaced records. Set "
+        "time.on_exhausted: cycle with data.time_stamp: instant and "
+        f"data.time_window: {window.strip()} is refused: snapshots carry no "
+        "averaging window, and calendar months and years differ in length, "
+        "so the period after which such records repeat is not known. Set "
         "time.on_exhausted: stop, or use a fixed-duration or calendar_day "
-        "window")
+        "cadence")
 
 
 def _record_time_mode(config) -> Optional[str]:
@@ -741,6 +776,16 @@ def _time_axis_label(ds, data_cfg) -> str:
     return str(source) if source else "the dataset"
 
 
+@functools.lru_cache(maxsize=None)
+def _xarray_keeps_us() -> bool:
+    """Whether the xarray in use keeps a ``datetime64[us]`` coordinate at
+    ``us`` (older versions store every datetime64 at ``ns``, which cannot
+    hold a date beyond 2262-04-11)."""
+    import xarray as xr
+    t = np.array(["2000-01-01"], dtype="datetime64[us]")
+    return xr.Dataset(coords={"t": t})["t"].dtype == np.dtype("datetime64[us]")
+
+
 def apply_time_options(ds, data_cfg, mesh_type: str) -> xr.Dataset:
     """The dataset with its ``time`` coordinate resolved from the stamp
     options, for a reader that does not resolve its record times itself.
@@ -772,7 +817,15 @@ def apply_time_options(ds, data_cfg, mesh_type: str) -> xr.Dataset:
         instant fits that range, else at ``us`` (never coarser, so a
         half-window centre is exact), with the input's
         ``encoding["calendar"]`` and attributes; the data variables are
-        shared, the close hook is kept.
+        shared, the close hook is kept.  For means (every
+        ``data.time_stamp`` but ``instant``) the new dataset also carries
+        the coordinate ``TIME_WINDOWS`` with dimensions ``("time",
+        TIME_WINDOW_EDGE)``: each record's averaging window ``[start,
+        end]``, cftime of the axis's calendar on a cftime axis,
+        ``datetime64[us]`` on a datetime64 axis whatever the unit of
+        ``time``.  It is what :func:`exact_cycle` reads.  It is left out for
+        snapshots, and when a window edge lies outside the ``ns`` range and
+        the xarray in use stores datetime64 coordinates only at ``ns``.
 
     Raises
     ------
@@ -817,8 +870,12 @@ def apply_time_options(ds, data_cfg, mesh_type: str) -> xr.Dataset:
             "axis (datetime64 or cftime), i.e. time units of the form "
             "'<unit> since <date>' in the files. Remove the stamp options")
     ax = resolve_stamps(stamps, opts, label=label)
+    windows = (ax.windows if ax.windows is not None and len(ax.windows) > 0
+               else None)
+    win = None
     if vals.dtype == object:
         new = ax.instants
+        win = windows
     else:
         us = np.array([np.datetime64(datetime(t.year, t.month, t.day, t.hour,
                                               t.minute, t.second,
@@ -836,12 +893,95 @@ def apply_time_options(ds, data_cfg, mesh_type: str) -> xr.Dataset:
         unit = ("ns" if np.datetime_data(vals.dtype)[0] == "ns" and fits_ns
                 else "us")
         new = us.astype(f"datetime64[{unit}]")
+        if windows is not None:
+            # the windows always at us, whatever the unit of time: an edge
+            # can lie beyond the ns range where no instant does
+            win = np.array([[np.datetime64(datetime(t.year, t.month, t.day,
+                                                    t.hour, t.minute, t.second,
+                                                    t.microsecond), "us")
+                             for t in row] for row in windows],
+                           dtype="datetime64[us]")
+            if not _xarray_keeps_us():
+                # this xarray would store the edges at ns: leave them out
+                # when one does not fit (the run keeps the legacy period)
+                try:
+                    edges_fit = bool((win.astype("datetime64[ns]")
+                                      .astype("datetime64[us]") == win).all())
+                except OverflowError:
+                    edges_fit = False
+                if not edges_fit:
+                    win = None
     enc = {k: tv.encoding[k] for k in ("calendar",) if k in tv.encoding}
-    out = ds.assign_coords(time=xr.Variable(("time",), new, dict(tv.attrs),
-                                            enc))
-    # assign_coords drops the close hook
+    coords = {"time": xr.Variable(("time",), new, dict(tv.attrs), enc)}
+    if win is not None:
+        coords[TIME_WINDOWS] = xr.Variable(("time", TIME_WINDOW_EDGE), win)
+    # assign_coords drops the close hook: ONE call for both coordinates, then
+    # set_close (a second assign_coords after it would lose the hook again)
+    out = ds.assign_coords(coords)
     out.set_close(ds._close)
     return out
+
+
+def exact_cycle(ds, file_times,
+                n_time_total: int) -> Optional[Tuple[float, float]]:
+    """The exact period and seam of ``time.on_exhausted: cycle``, or None
+    for the legacy rule.
+
+    Records that are means over windows of unequal length (calendar months
+    or years) are not equally spaced, so the forcing repeats after the sum
+    of the windows, not after the span of the records plus the last
+    interval.  The windows come from the coordinate ``TIME_WINDOWS``, which
+    the places that resolve record times attach (:func:`apply_time_options`,
+    the FESOM 1.4 reader).
+
+    Parameters
+    ----------
+    ds : xr.Dataset or None
+        The run's dataset; anything without the ``TIME_WINDOWS`` coordinate
+        (or without ``coords``) gives None.
+    file_times : array_like of float or None
+        The record times of the run's axis, seconds since its first record
+        (:func:`extract_time_info`).
+    n_time_total : int
+        The number of records the run uses (the first ``n_time_total`` of
+        the axis).
+
+    Returns
+    -------
+    (period, seam) or None
+        ``period``: the sum of the window lengths of the first
+        ``n_time_total`` records, in seconds; ``seam``: ``period -
+        (file_times[n - 1] - file_times[0])``, the time from the last
+        record to the first record of the next pass, in seconds.  A tuple
+        only when (1) ``ds`` carries ``TIME_WINDOWS``; (2) ``n_time_total
+        >= 2``; (3) ``file_times`` is given with at least ``n_time_total``
+        entries and the coordinate has at least ``n_time_total`` rows; (4)
+        the window lengths of those records differ by more than 1 ms.
+        Otherwise None.  The selection is by window equality, never by
+        comparing the two periods: a caller keeps its legacy arithmetic
+        verbatim for ``None``.
+    """
+    coords = getattr(ds, "coords", None)
+    if coords is None or TIME_WINDOWS not in coords:
+        return None
+    n = int(n_time_total)
+    if n < 2 or file_times is None or len(file_times) < n:
+        return None
+    win = np.asarray(coords[TIME_WINDOWS].values)
+    if win.shape[0] < n:
+        return None
+    win = win[:n]
+    if win.dtype == object:                      # cftime: calendar-aware
+        lengths = np.array([(e - s).total_seconds() for s, e in win],
+                           dtype=np.float64)
+    else:                                        # datetime64, overflow-safe
+        lengths = ((win[:, 1].astype("datetime64[us]")
+                    - win[:, 0].astype("datetime64[us]"))
+                   / np.timedelta64(1, "s")).astype(np.float64)
+    if lengths.max() - lengths.min() <= 1e-3:    # equal windows: legacy rule
+        return None
+    period = float(lengths.sum())
+    return period, period - float(file_times[n - 1] - file_times[0])
 
 
 # ---------------------------------------------------------------------------
@@ -1422,6 +1562,7 @@ __all__ = [
     "register",
     "get_reader",
     "extract_time_info",
+    "exact_cycle",
     "resolve_w_sign",
     "_detect_engine",
     "_read_kh_fields",

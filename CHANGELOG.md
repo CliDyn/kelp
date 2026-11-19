@@ -64,9 +64,11 @@ the tracker was developed privately from 2026-06.
   boundary with `calendar_day`), when a record is missing, when
   `data.time_averaging` is set next to the keys, when `data.time_offset` is
   given without the other two, when the time axis carries no calendar dates,
-  and when `time.on_exhausted: cycle` is combined with a `calendar_month` or
-  `calendar_year` window, whose records are not equally spaced as the cycle
-  period assumes.
+  and, under `time.on_exhausted: cycle`, when snapshots (`time_stamp: instant`)
+  come on a `calendar_month` or `calendar_year` cadence, since a snapshot
+  carries no averaging window and the period after which such records repeat
+  is not known, or when a discrete-mode run (`numerics.temporal_interp: false`)
+  would cycle means whose averaging windows differ in length.
 - `kelp info` prints the resolved first and last instants, and the run summary
   prints the same line.
 - Output files of such a run carry `time_averaging = "resolved_from_options"`
@@ -77,6 +79,64 @@ the tracker was developed privately from 2026-06.
   callers that open a dataset with `reader.open_dataset` and pass it to
   `run_single_realization` or `track_particles` themselves. It is meant to be
   applied once: a second call shifts the axis again.
+
+### Changed — HEALPix vertical axes checked against the interface table
+
+- The HEALPix reader now finds the vertical axis of each variable separately,
+  and any dimension whose name starts with `level` counts as one, besides the
+  names it knew before. A store that keeps the vertical velocity on its own
+  `level_w` axis, next to u, v, temperature and salinity on `level`, is
+  therefore read in 3-D runs; before, such a run stopped at the first read of
+  w.
+- In a 3-D run every vertical axis is now checked against the full interface
+  table, which is the store's own `level_interfaces_m` or else `mesh.levels`,
+  taken before any `mode.max_levels` cut. With K interfaces, w must have
+  exactly K entries, and u, v and every scalar read in 3-D (sampled variables
+  and the beaching dry mask) must have K−1 entries, or K entries whose last
+  level holds no data at the tracked columns; velocities located on the
+  interfaces are not supported. Until now the reader only checked that an axis
+  was long enough and read its first entries, so a table one interface short,
+  such as the layer mid-depths given in place of the interface depths, paired
+  each w level with the depth of another interface and dropped the deepest
+  layer of u and v without any message. Such a run is now refused, and the
+  message gives the lengths found and the table they were checked against. The
+  checks of u, v and w are made at the first record, before any output file
+  exists, and `kelp info` refuses the same configurations; sampled scalars and
+  the dry mask are checked in the probes a run makes before it writes, and
+  every later record is checked when it is read. Runs on stores whose axes
+  already fit their table, including padded stores with u, v and w on one
+  `level` axis whose last level is empty for u and v, give the same
+  trajectories as before.
+- `utils/extract_healpix_region.py`, now version 1.1, applies the same rule.
+  It takes the source's own interface table when the store carries one and
+  `source.levels` otherwise, refuses a `source.levels` that differs from the
+  store's table, and writes the table into the extract in both cases. Before
+  anything is cut, every vertical axis is checked against the full table, and
+  the last level of a layer variable, which a cut drops, must be empty at the
+  exported cells in every exported record. With a table,
+  `region.max_levels: M` keeps M interfaces: w keeps M entries and the layer
+  variables M−1, and when w shared its axis with them, its axis is renamed to
+  `level_w` (or `level_w_1`, and so on, when that name is taken). When the cut
+  keeps fewer interfaces than the source has and the source has no bathymetry
+  variable, the extract carries `deptho`, the sea floor computed from the
+  uncut source, so that a run on the extract has the same bed as
+  `mode.max_levels: M` on the whole store. The new key `source.var_w` names a
+  vertical velocity whose name the extractor does not know.
+  `region.max_levels: 1` stays a surface extract for 2-D runs and no longer
+  writes a one-level table; a 3-D extract needs at least two interfaces. A 2-D
+  run that picks `mode.sigma_layer: M−1` on a region extracted again with a
+  table finds that index out of range, because the layer variables now have
+  M−1 entries.
+- A 3-D extract that the earlier extractor cut with `region.max_levels`
+  carries the attribute `tool = "extract_healpix_region v1.0"` and kept M
+  entries on every vertical axis, so its layer variables hold one layer below
+  the deepest interface of its table. Such an extract still runs exactly as
+  before, without that layer, and a warning names the variables and the unused
+  layer, and says when the sea floor is placed no deeper than the deepest
+  interface. To use that layer and the true bed, extract the region again from
+  the whole store with the current extractor and a `region.max_levels` at
+  least one larger than the size of the old extract's table. The same layout
+  in a store without this attribute is refused.
 
 ### Changed
 
@@ -100,8 +160,48 @@ the tracker was developed privately from 2026-06.
 - `README.md` and `CITATION.cff` ask users to cite the article that describes
   KELP (arXiv:2611.18528, https://doi.org/10.48550/arXiv.2611.18528);
   `CITATION.cff` gives it as `preferred-citation`.
+- A run with `temporal_interp: true` and the RK2, RK4 or RK45 integrator is
+  refused when it starts unless every record it reaches is a whole number of
+  time steps from its start. A time-interpolated
+  RK step takes the velocity at its start and at the record ahead, so a step
+  that crossed a record without ending on it ran on the steady velocity of its
+  start, with a single warning per run. With hourly records and a step of
+  698.66 s, a 64th of the M2 period, every fifth step did so, and a particle in
+  a tidal current of 0.5 m/s drifted up to 49 m off its interpolated path. The
+  message names time steps that fit: for hourly records 1800, 1200, 900, 720 or
+  600 s; for monthly means stamped at the centres of their windows, which lie
+  29.5 to 31 days apart, any divisor of half a day, so a daily step is refused
+  there. The Euler integrator, which has a single stage, and the discrete mode
+  are not affected.
+- Under `time.on_exhausted: cycle`, means whose averaging windows are known now
+  repeat after the sum of their windows. The windows are known when
+  `data.time_stamp` is set with `data.time_window: calendar_month` or
+  `calendar_year`, and for FESOM 1.4 output from the files' time bounds or
+  output schedule. Twelve monthly means of a common year therefore repeat after
+  365 days, and the interval from the last December to the first January of the
+  next pass is 31 days; the earlier rule, the span from the first to the last
+  record plus the last interval, gave 364.5 days. A cycled FESOM 1.4 run on
+  monthly means changes accordingly. When the windows differ in length, the
+  cycle needs `numerics.temporal_interp: true` and is refused in discrete mode
+  when the run starts. Snapshots on a monthly or yearly cadence under `cycle`
+  are now refused for FESOM 1.4 as well. Records whose windows are not known
+  keep the earlier rule, which is exact for equally spaced records; when they
+  are irregularly spaced, the run warns once. The output attribute
+  `forcing_cycle_period` records the period used.
 
 ### Fixed
+
+- With a time step that is not a whole number of seconds, the run clock carries
+  rounding errors, and an RK2 or RK4 step that should end exactly on a record
+  ended slightly before or after it. If it ended after the record, the step ran
+  on the steady velocity of its start instead of the velocity interpolated in
+  time; if it ended before, the next step did. Each such step moved a particle
+  several metres off its interpolated path (17 m for a step of 2.4 days at a
+  few millimetres per second). A step that reaches a record to within 10⁻⁵ of
+  the time step now ends exactly on it, and the run clock is set to the record,
+  so the rounding error never builds up beyond one interval between records,
+  however long the run. Runs whose time step is a whole number of seconds, on
+  records stamped at whole seconds, are unchanged.
 
 - NEMO C-grid, 3-D: a particle at or below the floor of its column (below a
   partial bottom cell's own thickness, or below the deepest interface) sampled

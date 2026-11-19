@@ -77,7 +77,7 @@ import xarray as xr
 from ...core.io import VelocityField
 from ...core.mesh import Mesh, build_node_to_elems, build_search
 from ...core.rotation import euler_matrix, unrotate_lonlat
-from .. import register, resolve_w_sign
+from .. import TIME_WINDOW_EDGE, TIME_WINDOWS, register, resolve_w_sign
 from ..fesom2 import (
     _apply_mesh_rotation,
     _compute_elem_centres,
@@ -345,7 +345,12 @@ class Fesom14Reader:
             values (NaN after decoding, or a raw fill) are left as they are.
             Coordinates: ``time``, the resolved instants (cftime in the
             calendar of the u files; the window centre of a mean, the stamp
-            of a snapshot); the level coordinate of the level-wise form; the
+            of a snapshot); for means, ``kelp_time_windows``
+            (:data:`kelp.readers.TIME_WINDOWS`, dimensions ``(time,
+            kelp_time_window_edge)``): each record's averaging window
+            ``[start, end]`` as cftime of the same calendar, which
+            :func:`kelp.readers.exact_cycle` reads (absent for snapshots);
+            the level coordinate of the level-wise form; the
             node coordinates: the ``lon``/``lat`` of every file of a
             consumed variable that has them (each one-dimensional along one
             of the file's horizontal dimensions, :data:`HORIZONTAL_DIMS`,
@@ -1929,6 +1934,10 @@ def _open_consumed(roles: List[_Role], holders: Dict[str, List[_Head]],
             parts, dim=TIME_DIM, coords="minimal", compat="override",
             join="override", combine_attrs="override"))
     coords = {TIME_DIM: (TIME_DIM, axes[u].instants)}
+    # the averaging windows of means (exact_cycle reads them); snapshots
+    # have none
+    if axes[u].windows is not None and len(axes[u].windows) > 0:
+        coords[TIME_WINDOWS] = ((TIME_DIM, TIME_WINDOW_EDGE), axes[u].windows)
     if levels is not None:
         zdim, z, zattrs = levels
         coords[zdim] = (zdim, z, zattrs)

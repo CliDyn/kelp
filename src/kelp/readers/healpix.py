@@ -592,8 +592,30 @@ _LEVELS_VAR = "level_interfaces_m"
 #: kerchunked GRIB stores are single-level-chunked — no read
 #: amplification either way.
 _LEVEL_BLOCK = 10
-#: vertical dim names seen on healpix products (GRIB level axis, CMIP depth)
+#: vertical dim names seen on healpix products (GRIB level axis, CMIP depth);
+#: besides these, any dim whose name starts with "level" (``_vertical_dim``)
 _LEVEL_DIMS = ("level", "lev", "depth", "deptht", "z", "height")
+
+
+def _vertical_dim(da, name=None):
+    """The vertical dim of a data variable, or None when it has none.
+
+    A dim is vertical when its lower-cased name is one of ``_LEVEL_DIMS``
+    or starts with ``level`` (e.g. w on its own ``level_w`` axis next to
+    the layer variables on ``level``).  Every reader place that needs the
+    vertical axis of a variable asks this helper, so each variable is
+    looked at on its own.  More than one vertical dim -> ``ValueError``
+    naming ``name`` (default ``da.name``).
+    """
+    dims = tuple(d for d in da.dims
+                 if str(d).lower() in _LEVEL_DIMS
+                 or str(d).lower().startswith("level"))
+    if len(dims) > 1:
+        raise ValueError(
+            f"healpix reader: {name or da.name!r} has more than one "
+            f"vertical dim ({dims}).")
+    return dims[0] if dims else None
+
 
 _KERCHUNK_SUFFIXES = {".parq", ".parquet", ".json"}
 
@@ -704,6 +726,43 @@ def _first_soft(ds, aliases: Sequence[str], cfg_name: Optional[str] = None):
     return None
 
 
+# The u/v, w and interface-count refusals of a 3-D read, shared by
+# ``read_velocities`` and the ``prepare`` hook so the two cannot drift.
+def _uv_names(ds, cfg):
+    """``(u_name, v_name)``: ``mode.var_u`` / ``var_v``, else the aliases;
+    ``KeyError`` when one is missing."""
+    u_name = _first(ds, _U_ALIASES,
+                    getattr(cfg, "var_u", None) if cfg else None)
+    v_name = _first(ds, _V_ALIASES,
+                    getattr(cfg, "var_v", None) if cfg else None)
+    if u_name is None or v_name is None:
+        raise KeyError(
+            f"healpix reader: no u/v variable in the dataset (looked "
+            f"for {_U_ALIASES} / {_V_ALIASES}).")
+    return u_name, v_name
+
+
+def _w_name(ds, cfg):
+    """The vertical velocity: ``mode.var_w``, else the aliases; ``KeyError``
+    when it is missing."""
+    w_name = _first(ds, _W_ALIASES,
+                    getattr(cfg, "var_w", None) if cfg else None)
+    if w_name is None:
+        raise KeyError(
+            f"healpix reader: 3-D mode needs a vertical velocity "
+            f"(looked for {_W_ALIASES}, or set mode.var_w); "
+            "point data.ncinput at the 3-D store.")
+    return w_name
+
+
+#: a 3-D read on a mesh with fewer than two interfaces
+_FEW_INTERFACES = (
+    "healpix reader: 3-D read needs >= 2 vertical "
+    "interfaces on the mesh — set mesh.levels AND load "
+    "the mesh with mode_cfg (run_tracking/the CLI do; a "
+    "direct load_mesh(mesh_cfg) call builds a 2-D mesh).")
+
+
 def _find_crs(ds):
     """Return ``(nside, order)`` from healpix ``crs`` attrs, or (None, None)."""
     for name in list(ds.variables) + ["crs"]:
@@ -729,18 +788,18 @@ def _pick_level(da, mode_cfg):
     index 0.  Bounds-checked so a bad config fails with a clear message
     instead of an opaque IndexError deep in xarray.
     """
-    for d in da.dims:
-        if str(d).lower() in _LEVEL_DIMS:
-            layer = getattr(mode_cfg, "sigma_layer", None) if mode_cfg else None
-            k = int(layer) if layer is not None else 0
-            n = int(da.sizes[d])
-            if not (0 <= k < n):
-                raise ValueError(
-                    f"mode.sigma_layer={k} is out of range for the "
-                    f"{d!r} axis of {da.name!r} (size {n}); it is a "
-                    "0-based index, 0 = surface.")
-            return da.isel({d: k})
-    return da
+    d = _vertical_dim(da)
+    if d is None:
+        return da
+    layer = getattr(mode_cfg, "sigma_layer", None) if mode_cfg else None
+    k = int(layer) if layer is not None else 0
+    n = int(da.sizes[d])
+    if not (0 <= k < n):
+        raise ValueError(
+            f"mode.sigma_layer={k} is out of range for the "
+            f"{d!r} axis of {da.name!r} (size {n}); it is a "
+            "0-based index, 0 = surface.")
+    return da.isel({d: k})
 
 
 def _resolve_levels(levels: Union[None, str, List[float]]):
@@ -870,37 +929,36 @@ def _compact_to_nodes(da, mesh, name: str, mode_cfg=None) -> np.ndarray:
 
 
 def _compact_3d(da, mesh, name: str, n_keep: int,
-                check_prefix: bool = False) -> np.ndarray:
+                check_prefix: bool = False, *, family: str, table: str,
+                record: str, last: str = "refuse", ds=None) -> np.ndarray:
     """One (level, cell) DataArray at one timestep -> (n_keep, N) values.
 
-    Slices the first ``n_keep`` entries of the level axis (found by name),
-    orients the level axis FIRST (the kernels' contract), and compacts the
-    cell axis to nodes.  ``check_prefix=True`` validates (once per
-    variable name per process) that finite values form a PREFIX down every
-    column — an interior NaN stripe is store corruption, not bathymetry,
-    and must not be silently zeroed into fake ground.
+    Checks the variable's level axis against the FULL interface table
+    (:func:`_level_rule`: ``family`` ``"interfaces"`` for w, ``"layers"``
+    for u, v and the scalars; ``table`` and ``record`` name the table's
+    source and the record in a refusal; ``ds`` is the dataset ``da`` comes
+    from, :func:`_full_table`), slices the first ``n_keep``
+    entries of the level axis, orients the level axis FIRST (the kernels'
+    contract), and compacts the cell axis to nodes.  A layer variable on
+    K entries must leave its K-th plane empty at the tracked node columns:
+    ``last="refuse"`` reads that plane and refuses data in it (M-P);
+    ``last="skip"`` does not read it (old extracts, :func:`_is_old_extract`).
+    ``check_prefix=True`` validates (once per variable name per process)
+    that finite values form a PREFIX down every column — an interior NaN
+    stripe is store corruption, not bathymetry, and must not be silently
+    zeroed into fake ground.
     """
-    lev_dim = next((d for d in da.dims if str(d).lower() in _LEVEL_DIMS),
-                   None)
-    if lev_dim is None:
-        raise ValueError(
-            f"healpix reader: 3-D variable {name!r} has no level dim "
-            f"(dims {da.dims}; known level names {sorted(_LEVEL_DIMS)}).")
-    if int(da.sizes[lev_dim]) < n_keep:
-        raise ValueError(
-            f"healpix reader: variable {name!r} has {da.sizes[lev_dim]} "
-            f"levels but the mesh interfaces need {n_keep} — mesh.levels "
-            "and the store's level axis disagree.")
-    da = da.isel({lev_dim: slice(0, n_keep)})
-    cell_dim = next(d for d in da.dims if d != lev_dim)
+    if last not in ("refuse", "skip"):
+        raise ValueError(f"_compact_3d: last must be 'refuse' or 'skip', "
+                         f"got {last!r}")
+    lev_dim, cell_dim = _level_structure(da, mesh, name)
+    has_last = _level_rule(da, lev_dim, mesh, name, family, table=table,
+                           ds=ds)
+    check_last = has_last and last == "refuse"
+    k_last = int(da.sizes[lev_dim]) - 1      # index of the K-th plane
     da = da.transpose(lev_dim, cell_dim)
     ncells = getattr(mesh, "_healpix_data_ncells",
                      mesh.metadata["healpix_npix"])
-    if int(da.sizes[cell_dim]) != ncells:
-        raise ValueError(
-            f"healpix reader: variable {name!r} has "
-            f"{int(da.sizes[cell_dim])} cells but the mesh was built "
-            f"for a {ncells}-cell store.")
     # np.take gathers directly in C order — the fancy form ``arr[:, idx]``
     # returns a FORTRAN-ordered array (the parallel whole-field time blends
     # gate on C-contiguity, so it silently cost ~10x the step at nside 256),
@@ -928,12 +986,29 @@ def _compact_3d(da, mesh, name: str, n_keep: int,
             f"healpix reader: node->cell index map is invalid for "
             f"variable {name!r} (ncells={ncells}) — mesh/store mismatch.")
     out = np.empty((n_keep, int(idx.size)), dtype=np.float64)
+    n_last = None                    # data count of the K-th plane
     for k0 in range(0, n_keep, _LEVEL_BLOCK):
         k1 = min(k0 + _LEVEL_BLOCK, n_keep)
+        # the K-th plane right below the last block is read WITH it (one
+        # read; a Zarr chunk access less); its row is counted, the
+        # block's own rows go through the take as before
+        k_end = k1 + 1 if (check_last and k1 == n_keep == k_last) else k1
         blk = np.asarray(
-            da.isel({lev_dim: slice(k0, k1)}).values, dtype=np.float64)
+            da.isel({lev_dim: slice(k0, k_end)}).values, dtype=np.float64)
+        if k_end > k1:
+            n_last = _last_plane_count(blk[k1 - k0], mesh)
+            blk = blk[:k1 - k0]
         np.take(blk, idx, axis=1, out=out[k0:k1], mode="clip")
         del blk
+    if check_last:
+        if n_last is None:
+            # a mode.max_levels cut keeps fewer layers: the plane alone
+            n_last = _last_plane_count(np.asarray(
+                da.isel({lev_dim: k_last}).values,
+                dtype=np.float64).reshape(-1), mesh)
+        if n_last:
+            _refuse_last_plane(name, lev_dim, n_last, mesh, table=table,
+                               record=record)
     if check_prefix and ("prefix", name) not in _WARNED:
         # FIRST-READ structural gate (once per variable per process,
         # like the drift warning): scoped to the TRACKED node columns —
@@ -986,6 +1061,181 @@ def _record_label(ds, timestep) -> str:
     except Exception:
         return label
     return f"{label} (time {str(t)[:19]})"
+
+
+#: the ``tool`` attribute of the extracts written before the extractor
+#: checked the vertical axes: its ``region.max_levels`` cut every level
+#: axis to M entries, so a layer variable keeps one level more than the M
+#: interfaces of the table bound (read as K-1 layers, with a warning)
+OLD_EXTRACT_TOOL = "extract_healpix_region v1.0"
+
+
+def _is_old_extract(ds) -> bool:
+    """True for an extract written by ``extract_healpix_region v1.0``."""
+    return ("healpix_index" in ds.variables
+            and ds.attrs.get("tool") == OLD_EXTRACT_TOOL)
+
+
+def _table_label(ds) -> str:
+    """Names the source of the interface table in a message."""
+    return ("the store's level_interfaces_m" if _LEVELS_VAR in ds.variables
+            else "mesh.levels")
+
+
+def _full_table(mesh, ds=None) -> np.ndarray:
+    """The FULL interface table: the one before ``mode.max_levels``
+    (``mesh.metadata["sigma_full"]``, kept by ``readers._apply_max_levels``
+    at its first cut), else ``mesh.sigma``.
+
+    With ``ds`` an old extract (:func:`_is_old_extract`) WITHOUT
+    ``level_interfaces_m``: the v1.0 cut kept the same M entries on every
+    vertical axis (an uncut extract keeps its source lengths), so M is the
+    longest vertical axis of its data variables (metadata only), and the
+    table the rule checks against is the first M interfaces of the full
+    table when M is smaller than it.  A run that keeps more than M
+    interfaces is then refused (``ValueError``).  Computed at each call.
+    """
+    full = (getattr(mesh, "metadata", None) or {}).get("sigma_full")
+    full = np.asarray(mesh.sigma if full is None else full)
+    if ds is None or _LEVELS_VAR in ds.variables or not _is_old_extract(ds):
+        return full
+    m = 0
+    for nm, da in ds.data_vars.items():
+        lev_dim = _vertical_dim(da, nm)
+        if lev_dim is not None:
+            m = max(m, int(da.sizes[lev_dim]))
+    if m >= full.size:
+        return full
+    k = int(mesh.sigma.size)
+    if k > m:
+        path = str(ds.encoding.get("source") or "the store")
+        raise ValueError(
+            f"healpix reader: {path} was cut by extract_healpix_region v1.0 "
+            f"to {m} levels without an interface table: its vertical axes "
+            f"hold the first {m} of the {full.size} interfaces of "
+            f"mesh.levels, but the run keeps {k} of them; set "
+            f"mode.max_levels: {m} or less (a 3-D run needs at least 2), or "
+            "extract the region again from the whole store with the current "
+            "extract_healpix_region, which writes the table.")
+    return full[:m]
+
+
+def _cut_text(mesh, ds=None) -> str:
+    """`` (mode.max_levels keeps k of them; the check uses all K)`` when the
+    interfaces in use are fewer than the full table (of ``ds``:
+    :func:`_full_table`), else empty."""
+    big_k, k = int(_full_table(mesh, ds).size), int(mesh.sigma.size)
+    if k < big_k:
+        return (f" (mode.max_levels keeps {k} of them; the check uses all "
+                f"{big_k})")
+    return ""
+
+
+def _level_structure(da, mesh, name) -> tuple:
+    """``(lev_dim, cell_dim)`` of one record of a 3-D variable; refuses a
+    variable without a vertical dim, with two (M-2), or with a cell count
+    other than the mesh's store.  Metadata only."""
+    lev_dim = _vertical_dim(da, name)
+    if lev_dim is None:
+        raise ValueError(
+            f"healpix reader: 3-D variable {name!r} has no level dim "
+            f"(dims {da.dims}; known level names {sorted(_LEVEL_DIMS)}, "
+            "or any name starting with 'level').")
+    cell_dim = next(d for d in da.dims if d != lev_dim)
+    ncells = getattr(mesh, "_healpix_data_ncells",
+                     mesh.metadata["healpix_npix"])
+    if int(da.sizes[cell_dim]) != ncells:
+        raise ValueError(
+            f"healpix reader: variable {name!r} has "
+            f"{int(da.sizes[cell_dim])} cells but the mesh was built "
+            f"for a {ncells}-cell store.")
+    return lev_dim, cell_dim
+
+
+def _level_rule(da, lev_dim, mesh, name, family, *, table,
+                ds=None) -> bool:
+    """The length of the level axis against K, the size of the FULL
+    interface table (:func:`_full_table`; of the dataset ``ds`` the
+    variable comes from).  ``family="interfaces"`` (w):
+    exactly K entries, else M-W.  ``family="layers"`` (u, v, scalars): K-1
+    entries (False), or K (True: the K-th plane must then be empty, which
+    the caller checks), else M-L.  Metadata only."""
+    big_k = int(_full_table(mesh, ds).size)
+    n = int(da.sizes[lev_dim])
+    if family == "interfaces":
+        if n != big_k:
+            raise ValueError(
+                f"healpix reader: the vertical velocity {name!r} has {n} "
+                f"entries on its level axis {lev_dim!r}, but the interface "
+                f"table ({table}) has K = {big_k} interfaces"
+                f"{_cut_text(mesh, ds)}; w must sit on exactly the K "
+                "interfaces. Check that the table lists the INTERFACE "
+                "depths of this store (for FESOM-NG5: 70 interfaces, not "
+                "the 69 layer mid-depths).")
+        return False
+    if family == "layers":
+        if n == big_k - 1:
+            return False
+        if n == big_k:
+            return True
+        raise ValueError(
+            f"healpix reader: {name!r} has {n} entries on its level axis "
+            f"{lev_dim!r}; with K = {big_k} interfaces ({table})"
+            f"{_cut_text(mesh, ds)} a layer variable needs K-1 = {big_k - 1} "
+            f"entries (layer mids), or K = {big_k} with an empty last "
+            "level.")
+    raise ValueError(f"_level_rule: unknown family {family!r}")
+
+
+def _last_plane_count(plane, mesh) -> int:
+    """The data values (any non-NaN, 0.0 and inf too) of a ``(ncells,)``
+    plane at the tracked node columns."""
+    return int((~np.isnan(plane[mesh._healpix_data_idx])).sum())
+
+
+def _refuse_last_plane(name, dim, m, mesh, *, table, record):
+    """Raises M-P: a layer variable on K entries with data in the K-th."""
+    big_k = int(_full_table(mesh).size)
+    n_col = int(mesh._healpix_data_idx.size)
+    raise ValueError(
+        f"healpix reader: {name!r} has K = {big_k} entries on {dim!r} and "
+        f"its last level carries data at {m} of the {n_col} tracked node "
+        f"columns ({record}); a layer variable on K entries must leave the "
+        f"last one empty. The table ({table}){_cut_text(mesh)} may be one "
+        f"interface short, or {name!r} sits on the interfaces (not "
+        "supported). An extract cut with region.max_levels without the "
+        "interface table keeps one layer too many: extract it again from "
+        "the whole store with the interface table (source.levels, or the "
+        "store's own).")
+
+
+def _warn_old_extract(ds, mesh, names) -> None:
+    """W-OLD, once per process per store and set of names: an old extract
+    (:func:`_is_old_extract`) whose layer variables ``names`` carry data in
+    their K-th plane, which is read as K-1 layers.  K is the table of
+    :func:`_full_table` for ``ds``; on an extract cut without a table that
+    is the first M interfaces of mesh.levels, and the bed, which load_mesh
+    computed with the whole mesh.levels, is not named."""
+    path = str(ds.encoding.get("source") or "the store")
+    full = _full_table(mesh, ds)
+    big_k, k = int(full.size), int(mesh.sigma.size)
+    kept = f", of which mode.max_levels keeps {k - 1}" if k < big_k else ""
+    z_last = float(full[-1])
+    bed = ("" if (any(nm in ds.variables for nm in _DEPTH_ALIASES)
+                  or big_k < _full_table(mesh).size)
+           else f", and the bed is placed no deeper than {z_last:g} m")
+    listed = ", ".join(repr(str(nm)) for nm in names)
+    _warn_once(
+        ("old-extract", path, tuple(names)),
+        f"healpix reader: {path} was written by extract_healpix_region "
+        f"v1.0 with region.max_levels: its layer variables {listed} keep "
+        f"one level more than the K = {big_k} interfaces "
+        f"({_table_label(ds)}) can bound. KELP reads them as the K-1 = "
+        f"{big_k - 1} layers the table bounds{kept}, as earlier versions "
+        f"did: the layer below {z_last:g} m is not used{bed}. To use that "
+        "layer and the true bed, extract the region again from the whole "
+        "store with the current extract_healpix_region (region.max_levels: "
+        f"{big_k + 1} or more keeps that layer).")
 
 
 def _ffill_columns(arr: np.ndarray) -> np.ndarray:
@@ -1158,8 +1408,7 @@ class HealpixReader:
             # mode_cfg, never pays this extra read of the first record, and
             # read_velocities refuses a depth-linear run on such a mesh).
             nfin_u = None
-            lev_dim_u = next((d for d in u0.dims
-                              if str(d).lower() in _LEVEL_DIMS), None)
+            lev_dim_u = _vertical_dim(u0, u_name)
             if (lev_dim_u is not None
                     and (getattr(mesh_cfg, "healpix_geometry", "dual")
                          or "dual") == "dual"
@@ -1219,8 +1468,7 @@ class HealpixReader:
                 # sentinel-filled land (non-NaN u) is still excluded
                 wet &= dep > 0.0
             elif levels is not None:
-                lev_dim = next((d for d in u0.dims
-                                if str(d).lower() in _LEVEL_DIMS), None)
+                lev_dim = _vertical_dim(u0, u_name)
                 if lev_dim is not None:
                     # finite-prefix column length, reduced over the NAMED
                     # level dim (axis order varies between products)
@@ -1481,6 +1729,71 @@ class HealpixReader:
         return "node"
 
     @staticmethod
+    def prepare(mesh, ds, *, mode_cfg=None) -> None:
+        """Check u, v and w of a 3-D run against the interface table, at
+        the dataset's first record — the reader hook of
+        ``readers._prepare_dataset``, which ``run_tracking`` calls before
+        any output file exists, each realization at its entry and ``kelp
+        info`` once, with the run's mode.
+
+        Check only: changes neither ``mesh`` nor ``ds``.  Returns at once
+        without a mode (``mode_cfg`` None: a caller that passes none checks
+        nothing new), in a 2-D run and on the pixel geometry (2-D only).
+        Else, in this order: a mesh with fewer than 2 interfaces; u, v and
+        w resolved as ``read_velocities`` resolves them (the same
+        ``KeyError``); record 0 of each with one vertical dim and the
+        mesh's cell count (:func:`_level_structure`); the length of the
+        level axis of w, then u, then v against the FULL table
+        (:func:`_level_rule`, M-W / M-L; on an old extract cut without a
+        table its first M interfaces, :func:`_full_table`, which refuses a
+        run that keeps more); for u and v on K entries, the
+        K-th plane at the tracked node columns, which must be empty (M-P)
+        — on an old extract (:func:`_is_old_extract`) data there gives
+        the W-OLD warning instead (once per process, store and names): the
+        reads take such a variable as K-1 layers.  Cost: at most one plane
+        of u and one of v.
+        Scalars are checked where they are read (the probes of a run).
+        """
+        if mode_cfg is None or not getattr(mode_cfg, "Fdrift3D", False):
+            return
+        if (getattr(mesh, "metadata", None)
+                and mesh.metadata.get("healpix_geometry") == "pixel"):
+            return
+        if int(mesh.sigma.size) < 2:
+            raise ValueError(_FEW_INTERFACES)
+        u_name, v_name = _uv_names(ds, mode_cfg)
+        w_name = _w_name(ds, mode_cfg)
+        first = {}                            # name -> (record 0, level dim)
+        for nm in (u_name, v_name, w_name):
+            da = ds[nm]
+            if "time" in da.dims:
+                da = da.isel(time=0)
+            first[nm] = (da, _level_structure(da, mesh, nm)[0])
+        table = _table_label(ds)
+        # w first: a table one interface short is reported as M-W
+        _level_rule(*first[w_name], mesh, w_name, "interfaces", table=table,
+                    ds=ds)
+        on_k = [nm for nm in (u_name, v_name)
+                if _level_rule(*first[nm], mesh, nm, "layers", table=table,
+                               ds=ds)]
+        old = _is_old_extract(ds)
+        with_data = []
+        for nm in on_k:
+            da, lev_dim = first[nm]
+            plane = np.asarray(
+                da.isel({lev_dim: int(da.sizes[lev_dim]) - 1}).values,
+                dtype=np.float64).reshape(-1)
+            m = _last_plane_count(plane, mesh)
+            if not m:
+                continue
+            if not old:
+                _refuse_last_plane(nm, lev_dim, m, mesh, table=table,
+                                   record=_record_label(ds, 0))
+            with_data.append(nm)
+        if with_data:
+            _warn_old_extract(ds, mesh, with_data)
+
+    @staticmethod
     def _read_kh_pixels(ds, timestep, mesh, diffusion, cfg):
         """Pixel-space Kh fields for em/m1 → compacted NODE arrays.
 
@@ -1587,14 +1900,7 @@ class HealpixReader:
                     "Kh fields (em/m1 diffusion) — Kh compaction targets "
                     "pixel centres, which are elements here; use the "
                     "dual geometry or uniform Kh.")
-        u_name = _first(ds, _U_ALIASES,
-                        getattr(cfg, "var_u", None) if cfg else None)
-        v_name = _first(ds, _V_ALIASES,
-                        getattr(cfg, "var_v", None) if cfg else None)
-        if u_name is None or v_name is None:
-            raise KeyError(
-                f"healpix reader: no u/v variable in the dataset (looked "
-                f"for {_U_ALIASES} / {_V_ALIASES}).")
+        u_name, v_name = _uv_names(ds, cfg)
 
         w = None
         if is_3d:
@@ -1604,22 +1910,14 @@ class HealpixReader:
             # deepest is all-NaN padding and is dropped by the K-1 slice.
             k_ifc = int(mesh.sigma.size)
             if k_ifc < 2:
-                raise ValueError(
-                    "healpix reader: 3-D read needs >= 2 vertical "
-                    "interfaces on the mesh — set mesh.levels AND load "
-                    "the mesh with mode_cfg (run_tracking/the CLI do; a "
-                    "direct load_mesh(mesh_cfg) call builds a 2-D mesh).")
-            u = _compact_3d(ds[u_name].isel(time=timestep), mesh, u_name,
-                            k_ifc - 1, check_prefix=True)
-            v = _compact_3d(ds[v_name].isel(time=timestep), mesh, v_name,
-                            k_ifc - 1, check_prefix=True)
-            w_name = _first(ds, _W_ALIASES,
-                            getattr(cfg, "var_w", None) if cfg else None)
-            if w_name is None:
-                raise KeyError(
-                    f"healpix reader: 3-D mode needs a vertical velocity "
-                    f"(looked for {_W_ALIASES}, or set mode.var_w); "
-                    "point data.ncinput at the 3-D store.")
+                raise ValueError(_FEW_INTERFACES)
+            w_name = _w_name(ds, cfg)
+            # every level axis is checked against the FULL interface table
+            # (mesh.metadata["sigma_full"] under a max_levels cut); w
+            # FIRST, so a table one interface short is reported as such
+            # and not as a layer variable with one entry too many
+            table = _table_label(ds)
+            record = _record_label(ds, timestep)
             # wo sits ON the K interfaces (verified on ng5: 70 data
             # levels vs u's 69, surface interface ~ 0).  Positive UP like
             # the FESOM2 w it comes from (ng5 avg_wo = "Time-mean upward
@@ -1627,9 +1925,20 @@ class HealpixReader:
             # Pacific; the CORE2 twins are remapped FESOM2 w) -> negated
             # into the tracker's positive-down depth rate.
             w = _compact_3d(ds[w_name].isel(time=timestep), mesh, w_name,
-                            k_ifc, check_prefix=True)
+                            k_ifc, check_prefix=True, family="interfaces",
+                            table=table, record=record, ds=ds)
             if resolve_w_sign(ds[w_name], cfg, "up") < 0.0:
                 np.negative(w, out=w)
+            # an old extract's K-th layer plane holds the real layer below
+            # its deepest interface: not read (the W-OLD warning comes
+            # from prepare); on every other store it must be empty
+            last = "skip" if _is_old_extract(ds) else "refuse"
+            u = _compact_3d(ds[u_name].isel(time=timestep), mesh, u_name,
+                            k_ifc - 1, check_prefix=True, family="layers",
+                            table=table, record=record, last=last, ds=ds)
+            v = _compact_3d(ds[v_name].isel(time=timestep), mesh, v_name,
+                            k_ifc - 1, check_prefix=True, family="layers",
+                            table=table, record=record, last=last, ds=ds)
             surf_bad = ~(np.isfinite(u[0]) & np.isfinite(v[0]))
         else:
             u = _compact_to_nodes(ds[u_name].isel(time=timestep), mesh,
@@ -1743,8 +2052,8 @@ class HealpixReader:
 
         scalars = None
         if sample_vars:
-            scalars = HealpixReader.read_scalar_fields(
-                ds, timestep, mesh, sample_vars, mode_cfg)
+            scalars = HealpixReader._read_scalars(
+                ds, timestep, mesh, sample_vars, mode_cfg, per_step=True)
 
         # Pixel geometry never reads spatial Kh: em/m1 already failed
         # fast above (variable-independent), and a uniform run must not
@@ -1767,6 +2076,24 @@ class HealpixReader:
 
     @staticmethod
     def read_scalar_fields(ds, timestep, mesh, varnames, mode_cfg=None):
+        """Node values of the scalars ``varnames`` at record ``timestep``.
+
+        The probe-grade read (the engine's sampling and dry-mask probes call
+        it before the writer exists): on an old extract
+        (:func:`_is_old_extract`) a layer scalar on K entries has its K-th
+        plane read and counted, and data there gives the W-OLD warning;
+        the per-step reads of ``read_velocities`` skip that plane.  On
+        every other store both refuse data in it (M-P).
+        """
+        return HealpixReader._read_scalars(ds, timestep, mesh, varnames,
+                                           mode_cfg, per_step=False)
+
+    @staticmethod
+    def _read_scalars(ds, timestep, mesh, varnames, mode_cfg=None, *,
+                      per_step):
+        """The scalar read of both paths: ``per_step=False`` for the probe
+        (``read_scalar_fields``), ``per_step=True`` for the reads of
+        ``read_velocities`` (an old extract's K-th plane is not read)."""
         if (getattr(mesh, "metadata", None)
                 and mesh.metadata.get("healpix_geometry") == "pixel"):
             # scalars compact at pixel CENTRES = elements here, which
@@ -1779,6 +2106,7 @@ class HealpixReader:
         is_3d = mode_cfg is not None and getattr(mode_cfg, "Fdrift3D",
                                                  False)
         out = {}
+        old_with_data = []      # old extract: scalars with data in the K-th
         for nm in varnames:
             if nm in _W_ALIASES or (cfg_w := getattr(mode_cfg, "var_w", None)) == nm:
                 # the generic scalar path treats a level field as K-1 layer
@@ -1794,18 +2122,41 @@ class HealpixReader:
                     f"healpix reader: sampled variable {nm!r} not in the "
                     f"store (present: {sorted(ds.data_vars)[:12]}…).")
             da = ds[nm].isel(time=timestep)
-            has_lev = any(str(d).lower() in _LEVEL_DIMS for d in da.dims)
+            has_lev = _vertical_dim(da, nm) is not None
             if is_3d and has_lev:
                 # mid-layer scalar (K-1, N), forward-filled down each
                 # column: the sampler's bottom clamp then reads bottom-
                 # water properties instead of NaN where the scalar's own
                 # bottom is shallower than the u-derived bathymetry.
-                # (Interface-located sampled scalars — K levels — are not
-                # supported; every known healpix T/S product is mid-layer.)
-                arr = _compact_3d(da, mesh, nm, int(mesh.sigma.size) - 1)
+                # (Interface-located sampled scalars — K levels with data
+                # in the last — are refused: the layer rule of
+                # _level_rule; every known healpix T/S product is
+                # mid-layer.)
+                table = _table_label(ds)
+                lev_dim, _ = _level_structure(da, mesh, nm)
+                has_last = _level_rule(da, lev_dim, mesh, nm, "layers",
+                                       table=table, ds=ds)
+                last = "refuse"
+                if _is_old_extract(ds):
+                    last = "skip"
+                    if not per_step and has_last:
+                        # the probe looks at the K-th plane the per-step
+                        # reads skip, for the warning only
+                        k_last = int(_full_table(mesh, ds).size) - 1
+                        plane = np.asarray(
+                            da.isel({lev_dim: k_last}).values,
+                            dtype=np.float64).reshape(-1)
+                        if _last_plane_count(plane, mesh):
+                            old_with_data.append(nm)
+                arr = _compact_3d(da, mesh, nm, int(mesh.sigma.size) - 1,
+                                  family="layers", table=table,
+                                  record=_record_label(ds, timestep),
+                                  last=last, ds=ds)
                 out[nm] = _ffill_columns(arr)
             else:
                 out[nm] = _compact_to_nodes(da, mesh, nm, mode_cfg)
+        if old_with_data:
+            _warn_old_extract(ds, mesh, old_with_data)
         return out
 
 

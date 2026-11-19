@@ -50,11 +50,11 @@ Agent skills & .claude/skills/ & \cref{ch:skills} \\
 \bottomrule
 \end{longtable}
 
-\noindent The depth-linear rule and the FESOM~1.4 reader span several files; \cref{tab:codemap-dl} lists
-their principal symbols.
+\noindent The depth-linear rule, the FESOM~1.4 reader and the reader hooks span several files;
+\cref{tab:codemap-dl} lists their principal symbols.
 
 \begin{longtable}{@{}>{\ttfamily\footnotesize\raggedright\arraybackslash}p{0.42\linewidth} >{\ttfamily\footnotesize\raggedright\arraybackslash}p{0.33\linewidth} >{\footnotesize}l@{}}
-\caption{Principal symbols of the depth-linear horizontal velocity and of the FESOM~1.4 reader.}\label{tab:codemap-dl}\\
+\caption{Principal symbols of the depth-linear horizontal velocity, of the FESOM~1.4 reader and of the reader hooks.}\label{tab:codemap-dl}\\
 \toprule
 \normalfont Symbol & \normalfont File & \normalfont Manual \\
 \midrule \endfirsthead
@@ -79,6 +79,7 @@ recover\_triangles & readers/fesom14/\_polygons.py & \cref{sec:mesh-fesom14} \\
 is\_data, detect\_form, gather\_nodes3d, wet\_mask\_levelwise, check\_record & readers/fesom14/\_layout.py & \cref{sec:mesh-fesom14,sec:input-reader} \\
 resolve\_axis, resolve\_stamps, TimeOptions & readers/fesom14/\_timeaxis.py & \cref{sec:input-timeavg} \\
 \_prepare\_dataset, \_time\_option\_kwargs, \_describe\_record\_times & readers/\_\_init\_\_.py & \cref{sec:input-reader,sec:input-timeavg} \\
+HealpixReader.prepare, \_vertical\_dim, \_level\_rule, \_is\_old\_extract & readers/healpix.py & \cref{sec:vert-coord,sec:input-reader} \\
 apply\_time\_options, \_time\_metadata & readers/\_\_init\_\_.py & \cref{sec:input-timeavg} \\
 \bottomrule
 \end{longtable}

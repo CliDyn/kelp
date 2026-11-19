@@ -87,7 +87,7 @@ if cfg.mesh.grid_hash_cell_size is not None: set_grid_hash_cell(mesh, cfg.mesh.g
 else: CELL_RULE = apply_grid_hash_cell_rule(mesh, cfg.mesh.grid_hash_cell_rule)["rule"]   # the automatic cell, as run_tracking chooses it
 d = cfg.numerics.diffusion
 ds = _open_run_dataset(reader, mesh, cfg)   # the level cut and every open_dataset keyword of run_tracking; data.time_stamp / time_window are applied here
-_prepare_dataset(reader, mesh, ds)   # the reader's dataset check, before the writer exists (run_single_realization repeats it)
+_prepare_dataset(reader, mesh, ds, cfg.mode)   # the reader's dataset check with the run's mode, before the writer exists (run_single_realization repeats it)
 user_sv = list(cfg.mode.sample_vars or []); b = cfg.numerics.beaching     # sampled variables + the internal dry mask
 read_sv = user_sv + ([b.dry_mask_var] if b.enabled and b.dry_mask_var and b.dry_mask_var not in user_sv else [])
 n_time_total = ds.sizes["time"]; ft, file_dt = extract_time_info(ds)
@@ -242,7 +242,15 @@ if IS_HEALPIX_3D:                            # raw/kerchunk store: the vertical 
     assert c.mesh.levels is not None, "generator must write mesh.levels (aux3d path or inline list); extracts embed it"
 ```
 The generator's YAML template therefore carries the line `levels: <aux3d path or [0.0, 5.0, …]>`
-under `mesh:` for HEALPix 3-D — as a written key, not as a comment.
+under `mesh:` for HEALPix 3-D — as a written key, not as a comment. The table lists the K
+INTERFACE depths, not the K−1 layer mid-depths: the reader checks every vertical axis against
+it (w exactly K entries; u, v and the sampled T/S K−1, or K with an empty last level) and
+refuses a mismatch before any output exists — `kelp info` on one shard config shows the verdict
+before the chain is submitted. A regional extract cut with `region.max_levels` by the extractor
+before version 1.1 (attribute `tool = "extract_healpix_region v1.0"`) runs as before, with one
+warning naming the bottom layer it does not use: extract the region again from the whole store
+(with the table, `region.max_levels` at least one more than the old extract's table) before a
+campaign is built on it.
 
 **Generator — the config dict every shard config is written from (copy; the keys
 that decide the campaign live HERE, not in a comment of the config check):**

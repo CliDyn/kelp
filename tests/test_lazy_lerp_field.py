@@ -142,7 +142,8 @@ class TestPayloadIsLazy:
 
         cache = tr._VelCache()
         file_times = np.array([0.0, 100.0, 200.0])
-        bracket = tr._resolve_time_bracket(50.0, file_times, 3, "stop")
+        bracket = tr._resolve_time_bracket(50.0, file_times, 3, "stop",
+                                           cycle=None)
         vel, vel_next, dt_to_next, fi = tr._build_vel_payload(
             bracket, cache, _StubReader, None, None, None)
         assert isinstance(vel, LazyLerpField)
@@ -151,7 +152,8 @@ class TestPayloadIsLazy:
         assert np.array_equal(vel.u, np.full(8, 1.5))
         assert dt_to_next == pytest.approx(50.0)
         # exact-snapshot queries still return the raw cached field
-        bracket0 = tr._resolve_time_bracket(0.0, file_times, 3, "stop")
+        bracket0 = tr._resolve_time_bracket(0.0, file_times, 3, "stop",
+                                            cycle=None)
         vel0, *_ = tr._build_vel_payload(bracket0, cache, _StubReader,
                                          None, None, None)
         assert isinstance(vel0, VelocityField)

@@ -135,10 +135,10 @@ def _cmd_info(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        # the reader's mesh-relative checks, as a run makes them (a reader
-        # without the hook: nothing happens)
+        # the reader's mesh-relative checks, as a run makes them, with the
+        # run's mode (a reader without the hook: nothing happens)
         try:
-            _prepare_dataset(reader, mesh, ds)
+            _prepare_dataset(reader, mesh, ds, config.mode)
         except Exception as exc:
             print(f"error: the dataset {config.data.ncinput!r} does not "
                   f"fit the mesh: {exc}", file=sys.stderr)

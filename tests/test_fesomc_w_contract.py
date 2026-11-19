@@ -28,6 +28,17 @@ import numpy as np
 import pytest
 import xarray as xr
 
+
+@pytest.fixture
+def no_step_grid(monkeypatch):
+    """Switch off the startup refusal of a dt whose steps cross records
+    (``tracking._check_step_grid``, RK2/RK4/RK45 with time interpolation).
+    A step that crosses a record still falls back to steady velocity as a
+    guard; the tests that use this fixture pin what such a step does to the
+    sigma column, which no configured RK run reaches since 2026-11-18."""
+    monkeypatch.setattr("kelp.tracking._check_step_grid",
+                        lambda **kw: None)
+
 from kelp.core.geometry import METERS_PER_DEG_LAT
 from kelp.readers import get_reader
 
@@ -295,6 +306,7 @@ class TestSigmaIntegration:
         s_exact = s0 - c * (t - times[k0])       # time runs backward too
         np.testing.assert_allclose(z / H, s_exact, rtol=1e-9)
 
+    @pytest.mark.usefixtures("no_step_grid")
     @pytest.mark.parametrize("integrator", ["euler", "rk2", "rk4"])
     @pytest.mark.parametrize("dt", [400.0, 900.0])
     def test_steady_fallback_steps_keep_sigma(self, tmp_path, integrator, dt):
@@ -399,7 +411,9 @@ class TestSigmaKicks:
     @pytest.mark.parametrize("dt", [150.0, 400.0])
     @pytest.mark.parametrize("recon", ["linear", "pchip"])
     def test_horizontal_kick_keeps_sigma(self, tmp_path, integrator, dt,
-                                         recon):
+                                         recon, request):
+        if dt == 400.0:                      # steps across the 600 s records
+            request.getfixturevalue("no_step_grid")
         import warnings as _w
         from kelp.core.config import DiffusionConfig
         g, d0 = 5e-5, 20.0
@@ -425,6 +439,7 @@ class TestSigmaKicks:
         assert np.ptp(lat_rec) > 0.0                   # the kicks did move it
         np.testing.assert_allclose(z / H, 0.55, rtol=1e-10)
 
+    @pytest.mark.usefixtures("no_step_grid")
     @pytest.mark.parametrize("integrator", ["euler", "rk2", "rk4"])
     def test_az_kick_in_the_end_column_on_fallback_steps(self, tmp_path,
                                                          integrator):
@@ -474,6 +489,7 @@ class TestDiscreteMode:
         np.testing.assert_allclose(z / H, 0.37, rtol=1e-12)
 
 
+@pytest.mark.usefixtures("no_step_grid")
 class TestPchipWithFallbackSteps:
     @pytest.mark.parametrize("integrator", ["rk2", "rk4"])
     def test_sigma_continuous_across_fallback_steps(self, tmp_path,
@@ -506,7 +522,10 @@ class TestSigmaRestartIdentity:
     @pytest.mark.parametrize("integrator", ["rk2", "rk4"])
     @pytest.mark.parametrize("recon", ["linear", "pchip"])
     @pytest.mark.parametrize("dt", [150.0, 400.0])
-    def test_resume_equals_continuous(self, tmp_path, integrator, recon, dt):
+    def test_resume_equals_continuous(self, tmp_path, integrator, recon, dt,
+                                      request):
+        if dt == 400.0:                      # steps across the 600 s records
+            request.getfixturevalue("no_step_grid")
         import warnings as _w
         from kelp.core.config import NumericsConfig
         from kelp.core.mesh import find_nearest_nodes

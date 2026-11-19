@@ -171,7 +171,8 @@ Paths are below `src/kelp/`.
 
 - **`readers/__init__.py`** — the registry (`get_reader("fesomc" | "fesom2" | "fesom14" |
   "nemo" | "healpix")`) and shared helpers: engine detection, the time axis and its
-  epoch, the sign rule for W in the file; the reader hook `prepare` (`_prepare_dataset`)
+  epoch, the sign rule for W in the file; the reader hook `prepare` (`_prepare_dataset`,
+  which passes the run's mode to a hook that takes `mode_cfg`)
   and the stamp options with their rules (`_time_option_kwargs`; passed to a reader
   that resolves its record times, applied to the opened dataset of every other one by
   `apply_time_options`, with `_time_metadata` for the output attributes) and the
@@ -214,7 +215,12 @@ Paths are below `src/kelp/`.
 - **`readers/healpix.py`** — HEALPix stores (Zarr, NetCDF, kerchunk): the mesh is
   built from the data (dual or pixel geometry; the dual geometry has node-layout
   u/v and needs `uv_interp: barycentric`), regional extracts, rotation, 2-D and
-  3-D. Notes: [readers.md](readers.md); the pixel geometry, `crop_bbox`, `levels`,
+  3-D; a check-only `prepare` hook (u, v and w of a 3-D run against the interface
+  table, with the run's mode). Trap: every vertical axis is checked against the FULL
+  interface table, before any `mode.max_levels` cut — a direct caller cuts a mesh
+  with `readers._apply_max_levels`, never by slicing `mesh.sigma` by hand; extracts
+  of the extractor before version 1.1 are recognised by their `tool` attribute.
+  Notes: [readers.md](readers.md); the pixel geometry, `crop_bbox`, `levels`,
   `healpix_zoom`, `ncinput_eta` and the rotation in [config.md](config.md)
   (`MeshConfig.rotation` and the healpix-only keys bullet); topic doc
   [../healpix.md](../healpix.md).
@@ -240,7 +246,7 @@ Paths are below `src/kelp/`.
   (every field the velocity cache stores is marked and checked,
   `_mark_depth_linear`), the `max_levels` cut (`_apply_max_levels`, defined in
   `readers/__init__.py` with `_open_run_dataset`, the one open path shared with
-  `kelp info`) and the reader hook `prepare(mesh, ds)`. Notes:
+  `kelp info`) and the reader hook `prepare` (with the run's mode). Notes:
   [tracking.md](tracking.md); also: periodic windows (`NumericsConfig.periodic_lon`),
   the `start_date` resolution (`TimeConfig`), the shared-fields tag
   (`NumericsConfig.shared_fields_dir`) and the grid-hash / exact-guard calls of
@@ -259,7 +265,8 @@ Paths are below `src/kelp/`.
   `--checkpoint-freq` default to None so the YAML values pass through; `info` opens the
   dataset as a run does (`readers._open_run_dataset`: the `max_levels` cut,
   `ncinput_v` / `ncinput_w` / `ncinput_eta`, the `var_az` diffusion block, the stamp
-  options; then the reader's `prepare`) without importing `tracking.py`. Notes:
+  options; then the reader's `prepare`, with the run's mode) without importing
+  `tracking.py`. Notes:
   [tracking.md](tracking.md); what `kelp info` applies and prints (the grid-hash
   cell) in [config.md](config.md) and [mesh.md](mesh.md).
 

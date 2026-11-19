@@ -39,7 +39,7 @@ from .readers import (get_reader, extract_time_info, time_axis_epoch,
                       NO_EPOCH_NOTE, _apply_max_levels,
                       _describe_record_times, _open_run_dataset,
                       _prepare_dataset, _record_time_mode,
-                      _time_metadata, _time_option_kwargs)
+                      _time_metadata, _time_option_kwargs, exact_cycle)
 
 
 # ---------------------------------------------------------------------------
@@ -1221,8 +1221,10 @@ def _record_clock_origin(*, use_tinterp, sim_time, start_time_idx, axis,
             # one record repeated with period dt (the advertised
             # forcing_cycle_period): record idx0 of the unwrapped axis
             return float(axis[0]) + float(idx0) * float(dt), True
+        # discrete mode only, which an exact cycle never reaches (refused
+        # by _refuse_discrete_exact_cycle): the legacy rule
         return _index_to_sim_time(idx0, axis, n_time_total,
-                                  on_exhausted), True
+                                  on_exhausted, cycle=None), True
     return float(idx0) * float(dt), False
 
 
@@ -1662,6 +1664,144 @@ def _check_discrete_dt(dt, temporal_interp, file_dt, file_times, n_records=None)
         "file step, or set temporal_interp: true to sub-step between records")
 
 
+def _snapshot_band(dt) -> float:
+    """Seconds within which a step of ``dt`` that reaches a record is ON it.
+
+    The run clock (``sim_time += dt``) carries roundoff when ``dt`` is not a
+    whole number of seconds, and decoded stamps carry up to a microsecond.
+    A step that ends within this band of a record ends exactly on it (its
+    length is the distance to the record, the clock is set to the record),
+    and a query this close below a record starts on it
+    (``_resolve_time_bracket``).  On the step grid that
+    :func:`_check_step_grid` enforces, nothing but roundoff ends this close
+    to a record.
+    """
+    return 1e-5 * max(abs(float(dt)), 1.0)
+
+
+def _check_step_grid(*, integrator, temporal_interp, file_times, n_time_total,
+                     on_exhausted, cycle, dt, sim_time, n_steps, direction):
+    """Refuse a time-interpolated RK run whose steps do not land on the records.
+
+    A time-interpolated RK step (RK2, RK4, RK45) takes the field at its start
+    and the record ahead; a step that crosses a record without ending on it
+    would need the next pair for its later stages and runs on the steady
+    velocity of its start instead.  So every record the run reaches must lie
+    on the step grid: a whole number of steps from the start (``sim_time``)
+    and from the previous record, to within :func:`_snapshot_band` (under
+    ``cycle`` the records of every pass, so the seam too).  From the start so
+    that the output's record times (start + n dt) stay on the records however
+    long the run; from the previous record because the loop sets the clock to
+    each record it reaches.  Euler (one stage) and discrete mode are
+    not checked.  ``n_steps`` None checks to the end of the records (one
+    period under ``cycle``).
+    """
+    if (not temporal_interp or integrator not in ("rk2", "rk4", "rk45")
+            or file_times is None or dt is None or sim_time is None):
+        return
+    n = int(n_time_total if n_time_total is not None else len(file_times))
+    if n < 2:
+        return
+    ft = np.asarray(file_times, dtype=np.float64)[:n]
+    dt = abs(float(dt))
+    band = _snapshot_band(dt)
+    d = 1.0 if direction >= 0 else -1.0
+    t0 = float(sim_time)
+    if on_exhausted == "cycle":
+        period = float(_cycle_period(ft, n, cycle))
+        span = period if n_steps is None else float(n_steps) * dt
+    else:
+        period = None
+        span = (float(ft[-1] - t0) if d > 0 else float(t0 - ft[0])) \
+            if n_steps is None else float(n_steps) * dt
+    t1 = t0 + d * span
+    lo, hi = min(t0, t1), max(t0, t1)
+    if period is not None:
+        m0 = int(np.floor((lo - ft[0]) / period)) - 1
+        m1 = int(np.floor((hi - ft[0]) / period)) + 1
+        rec = (ft[None, :] + period * np.arange(m0, m1 + 1)[:, None]).ravel()
+    else:
+        rec = ft
+    rec = np.unique(rec[(rec >= lo - band) & (rec <= hi + band)])
+    if rec.size == 0:
+        return
+    if d < 0:
+        rec = rec[::-1]
+    # from the start (the output's record times, start + n dt, stay on the
+    # records) and from the previous record (the loop sets the clock to each
+    # record it reaches, so the misses of two records must not add up)
+    offs = np.abs(rec - t0)
+    gaps = np.abs(np.diff(np.r_[t0, rec]))
+    miss_o = np.abs(offs - np.rint(offs / dt) * dt)
+    miss_g = np.abs(gaps - np.rint(gaps / dt) * dt)
+    bad = np.flatnonzero((miss_o > band) | (miss_g > band))
+    if bad.size == 0:
+        return
+    i = int(bad[0])
+    if i == 0:
+        where = (f"the run starts {offs[0]:.10g} s from the record at "
+                 f"{rec[0]:.10g} s, which is {offs[0] / dt:.9g} steps")
+    elif miss_o[i] > band:
+        where = (f"the record at {rec[i]:.10g} s lies {offs[i]:.10g} s from "
+                 f"the start at {t0:.10g} s, which is {offs[i] / dt:.9g} "
+                 "steps")
+    else:
+        where = (f"the records at {rec[i - 1]:.10g} s and {rec[i]:.10g} s "
+                 f"are {gaps[i]:.10g} s apart, which is {gaps[i] / dt:.9g} "
+                 "steps")
+    if period is not None and not (ft[0] <= rec[i] <= ft[-1]):
+        where += (" (a record of another pass of on_exhausted: cycle, times "
+                  "counted from the first record of the axis)")
+    # suggest whole-second steps that fit every record, when the distances
+    # are whole seconds
+    hint = ""
+    g = offs[offs > band]
+    if g.size and np.all(np.abs(g - np.rint(g)) <= 1e-6):
+        gcd = int(np.gcd.reduce(np.rint(g).astype(np.int64)))
+        small = [q for q in range(1, int(np.sqrt(gcd)) + 1) if gcd % q == 0]
+        divs = sorted(set(small + [gcd // q for q in small]))
+        above = [q for q in divs if q > dt][:2]
+        below = [q for q in divs if q < dt][-2:]
+        fits = sorted(above + below, reverse=True)
+        if fits:
+            hint = (f" Steps that fit a run of the same duration (divisors "
+                    f"of {gcd} s near dt): "
+                    + ", ".join(f"{q} s" for q in fits) + ".")
+    raise ValueError(
+        f"numerics.dt = {dt:.10g} s does not land on the records: {where}. "
+        f"With temporal_interp: true, {integrator} takes the velocity at the "
+        "start of each step and at the record ahead, so a step that crosses "
+        "a record would run on the steady velocity of its start; every "
+        "record the run reaches must be a whole number of steps away from "
+        f"the start.{hint} Move time.start_date "
+        "onto the step grid when the start is the problem, or use integrator: "
+        "euler.")
+
+
+def _refuse_discrete_exact_cycle(cycle) -> None:
+    """Refuse discrete mode on a cycle whose records have unequal windows.
+
+    ``cycle`` is the run's value of :func:`~kelp.readers.exact_cycle`
+    (None under ``stop`` or for the legacy rule: nothing to refuse).  A
+    ``(period, seam)`` tuple means the forcing repeats after the sum of the
+    averaging windows, with a seam unlike the record spacing; discrete mode
+    reads one record per step of ``dt`` and cannot follow it.  Called by
+    ``run_tracking`` before any output exists and by
+    ``run_single_realization`` for direct callers, both before
+    :func:`_check_discrete_dt`.
+    """
+    if cycle is None:
+        return
+    period, seam = cycle
+    raise ValueError(
+        "time.on_exhausted: cycle with numerics.temporal_interp: false is "
+        "refused: the records' averaging windows differ in length, so the "
+        f"forcing repeats after {period / 86400.0:g} d with a seam of "
+        f"{seam / 86400.0:g} d between the last and the first record, which "
+        "a discrete run (one record per step of dt) cannot follow. Set "
+        "numerics.temporal_interp: true")
+
+
 def run_single_realization(
     mesh: Mesh,
     ds,
@@ -1703,7 +1843,14 @@ def run_single_realization(
         not resolve its record times, call
         ``readers.apply_time_options(ds, config.data, config.mesh.type)``
         once before (a second call shifts again); ``run_tracking`` and
-        ``readers._open_run_dataset`` do it.
+        ``readers._open_run_dataset`` do it.  A dataset resolved by
+        ``apply_time_options`` or by the FESOM 1.4 reader carries the
+        averaging windows (the coordinate ``readers.TIME_WINDOWS``); with
+        ``on_exhausted="cycle"`` the forcing period is read from it (the
+        sum of the windows when they differ in length, and discrete mode is
+        then refused); a dataset without it keeps the legacy period, the
+        span of the records plus the last interval, and so does the axis
+        synthesised from ``file_dt`` when ``file_times`` is not given.
     reader : reader class
         Must have ``read_velocities(ds, timestep, mesh, mode)``.
     init_state : ParticleState
@@ -1796,8 +1943,9 @@ def run_single_realization(
     ``mode.max_levels`` to ``mesh.sigma`` itself, from the uncut table kept
     in ``mesh.metadata["sigma_full"]`` (None restores it); a mesh cut that
     way earlier is re-cut to this call's limit whatever the option.  A
-    reader's optional ``prepare(mesh, ds)`` hook runs at every call, after
-    that cut (``_prepare_dataset``).
+    reader's optional ``prepare(mesh, ds[, *, mode_cfg])`` hook runs at
+    every call, after that cut, with this call's ``mode`` when its
+    signature names ``mode_cfg`` (``_prepare_dataset``).
     """
     from .core.release import check_particle_offset
     # None (a restart written without an offset) means an unsharded run
@@ -1878,8 +2026,8 @@ def run_single_realization(
             or "sigma_full" in (getattr(mesh, "metadata", None) or {})):
         _apply_max_levels(mesh, mode)
     # the reader's mesh-relative dataset hook, at every entry (after the
-    # cut above: it sees the levels in use)
-    _prepare_dataset(reader, mesh, ds)
+    # cut above: it sees the levels in use), with this call's mode
+    _prepare_dataset(reader, mesh, ds, mode)
     probe_fn = getattr(reader, "probe_uv_layout", None)
     if uv_vertical_option == "linear" and probe_fn is not None:
         # the layout facts of run_tracking's pre-writer probe, for direct
@@ -1966,10 +2114,12 @@ def run_single_realization(
         # a direct caller passed no record times: read them from the dataset
         # (run_tracking always passes them, midpoint-shifted when averaged)
         file_times, file_dt = extract_time_info(ds)
+    declared_axis = False
     if temporal_interp and file_times is None and file_dt:
         # the caller declared the snapshot interval (as run_tracking does
         # with numerics.file_dt): synthesise the axis (review 2026-09-23)
         file_times = np.arange(n_time_total, dtype=np.float64) * float(file_dt)
+        declared_axis = True
     if temporal_interp and file_times is None:
         raise ValueError(
             "temporal_interp is on but the dataset has no usable time axis "
@@ -1991,6 +2141,15 @@ def run_single_realization(
         _ax_times, _ax_dt = extract_time_info(ds)
         if _ax_times is not None:
             _chk_times, _chk_dt = _ax_times, (_ax_dt if file_dt is None else file_dt)
+    # the cycle rule of this call, once: the exact period and seam when the
+    # dataset carries averaging windows of unequal length, else None (the
+    # legacy rule; always None under stop).  An axis synthesised from the
+    # caller's file_dt declares equally spaced records: the windows belong
+    # to the decoded axis, not to it, so it keeps the legacy rule.
+    cyc = (exact_cycle(ds, _chk_times, n_time_total)
+           if on_exhausted == "cycle" and not declared_axis else None)
+    if not temporal_interp:
+        _refuse_discrete_exact_cycle(cyc)        # the backstop for direct callers
     _check_discrete_dt(numerics.dt, temporal_interp, _chk_dt, _chk_times,
                        n_records=n_time_total)
     use_tinterp = temporal_interp and file_times is not None
@@ -2014,7 +2173,8 @@ def run_single_realization(
             # a later realization's start (start + k·run_interval) wraps by
             # whole forcing periods, as the discrete reads do
             sim_time = _index_to_sim_time(start_time_idx, file_times,
-                                          n_time_total, on_exhausted, dt=dt)
+                                          n_time_total, on_exhausted, dt=dt,
+                                          cycle=cyc)
         else:
             # past the end was an IndexError; a negative index silently
             # read the end of the axis
@@ -2022,6 +2182,14 @@ def run_single_realization(
                 f"start_time_idx {start_time_idx} is outside the records "
                 f"[0, {n_time_total}) of the forcing (on_exhausted: stop); "
                 f"start on a record, or set on_exhausted: cycle")
+        # every record this run reaches lies on its step grid (RK2/RK4/RK45;
+        # run_tracking checks it before any output exists, this is the
+        # backstop for direct callers and later realizations)
+        _check_step_grid(integrator=numerics.integrator, temporal_interp=True,
+                         file_times=file_times, n_time_total=n_time_total,
+                         on_exhausted=on_exhausted, cycle=cyc, dt=dt,
+                         sim_time=sim_time, n_steps=n_steps,
+                         direction=direction)
 
     # Copy initial state
     state = init_state.replace(
@@ -2161,7 +2329,7 @@ def run_single_realization(
         epoch = time_axis_epoch(ds) if on_axis else None
         cycle_period = None
         if on_exhausted == "cycle":
-            cycle_period = (
+            cycle_period = cyc[0] if cyc is not None else (
                 float(_axis[-1] - _axis[0] + (_axis[-1] - _axis[-2]))
                 if on_axis and _axis is not None and len(_axis) > 1
                 else float(n_time_total) * float(dt))
@@ -2195,6 +2363,19 @@ def run_single_realization(
         if np.issubdtype(_ds_times.dtype, np.datetime64):
             _t0_epoch = _ds_times[0]
 
+    # Snapshot band.  Time-interpolated RK (``_snapshot_band``): a step that
+    # reaches a snapshot to within it ends exactly ON it (its length is the
+    # distance to the snapshot and the clock is set to the snapshot, below),
+    # and a query that close below a snapshot starts on it
+    # (``_resolve_time_bracket``), so the clock's roundoff never accumulates
+    # past a snapshot (_check_step_grid puts every snapshot on the step
+    # grid).  Euler and discrete mode keep the 5e-10 dt band of before: a
+    # step that passes the snapshot by no more takes vel_next, with its own
+    # length and clock.
+    _rk_snap = use_tinterp and _is_multistage
+    _snap = (_snapshot_band(dt) if _rk_snap
+             else 5e-10 * max(float(dt), 1.0))
+
     # Last fully-executed (global step, file_idx) for the final checkpoint;
     # stays None if the loop breaks before any step runs (see end of loop).
     last_global_step_i = None
@@ -2226,7 +2407,7 @@ def run_single_realization(
             # on-snapshot backward query bracket downward.
             bracket = _resolve_time_bracket(
                 sim_time, file_times, n_time_total, on_exhausted,
-                direction=direction,
+                direction=direction, cycle=cyc, snap=_snap,
             )
             if bracket is None:
                 if verbose:
@@ -2340,10 +2521,30 @@ def run_single_realization(
                                 uv_vertical_option=uv_vertical_option,
                                 mesh=mesh)
 
+        # A time-interpolated step that reaches the snapshot ahead to within
+        # ``_snap`` (the clock's roundoff, or decoded stamps) ends exactly ON
+        # it: its length is the distance to the snapshot, so the last stage
+        # takes vel_next (and PCHIP's last stage time is the snapshot), and
+        # the clock is set to the snapshot after the step.  Before 2026-11-18
+        # the tolerance was an absolute 1 ns, below the clock's resolution,
+        # and such a step fell back about half the time; then a relative band
+        # without the clock reset, which the clock's roundoff outgrew on long
+        # runs with a dt that is not a whole number of seconds.
+        step_len = dt
+        sim_time_end = None
+        if (_rk_snap and dt_to_next is not None
+                and abs(dt - dt_to_next) <= _snap):
+            step_len = dt_to_next
+            sim_time_end = _step_end_on_record(
+                sim_time, bracket[4], dt_to_next, direction, file_times,
+                n_time_total, on_exhausted, cyc)
+        elif dt_to_next is not None and dt_to_next < dt <= dt_to_next + _snap:
+            dt_to_next = dt
         # Downgrade to steady if tracking dt exceeds the bracket
-        # (start-between-snapshots, end-of-range, irregular spacing).
+        # (start-between-snapshots, end-of-range, irregular spacing; refused
+        # for RK2/RK4/RK45 by _check_step_grid wherever records are reached).
         # RK stages lose their intra-step time order here — warn once.
-        if dt_to_next is not None and dt > dt_to_next + 1e-9:
+        if dt_to_next is not None and step_len > dt_to_next:
             if _downgrade_count == 0 and _is_multistage:
                 warnings.warn(
                     f"step {step_i}: dt={dt:.3g}s exceeds dt_to_next="
@@ -2373,10 +2574,13 @@ def run_single_realization(
                 _ea = (on_exhausted, direction, vel_cache, reader, ds, mesh,
                        mode, diff_cfg, sample_vars)
                 sigma_eta_start = _eta_at_time(
-                    sim_time, file_times, n_time_total, *_ea, pchip=_pch)
+                    sim_time, file_times, n_time_total, *_ea, pchip=_pch,
+                    cycle=cyc, snap=_snap)
                 sigma_eta_end = _eta_at_time(
-                    sim_time + dt * direction, file_times, n_time_total, *_ea,
-                    pchip=_pch)
+                    (sim_time_end if sim_time_end is not None
+                     else sim_time + dt * direction),
+                    file_times, n_time_total, *_ea,
+                    pchip=_pch, cycle=cyc, snap=_snap)
             else:
                 # discrete mode: the step starts at this record and ends at
                 # the next one
@@ -2437,7 +2641,7 @@ def run_single_realization(
         if sigma_eta_end is not None:
             _sig_kw["sigma_eta_end"] = sigma_eta_end
         state = step_fn(
-            state, vel, mesh, dt, time_dir, layer=0, **_sig_kw,
+            state, vel, mesh, step_len, time_dir, layer=0, **_sig_kw,
             Dmin=numerics.Dmin, z0b_min=numerics.z0b_min,
             w_interp=numerics.w_interp,
             uv_interp=uv_interp_resolved,
@@ -2470,7 +2674,10 @@ def run_single_realization(
 
         # Advance simulation time (temporal interp path)
         if use_tinterp:
-            sim_time += dt * direction
+            if sim_time_end is not None:
+                sim_time = sim_time_end
+            else:
+                sim_time += dt * direction
 
         # Output check — on the GLOBAL step count, so a run resumed in
         # chunks (start_step_i > 0) records exactly the steps the
@@ -2496,7 +2703,7 @@ def run_single_realization(
                     # re-lerped field value at sim_time is direction-free.
                     rec_bracket = _resolve_time_bracket(
                         sim_time, file_times, n_time_total, on_exhausted,
-                        direction=direction,
+                        direction=direction, cycle=cyc, snap=_snap,
                     )
                     if rec_bracket is not None:
                         # keep the PCHIP stencil of this bracket — the next
@@ -2664,17 +2871,22 @@ def _index_to_sim_time(
     n_time_total: int,
     on_exhausted: str,
     dt: Optional[float] = None,
+    *,
+    cycle: Optional[Tuple[float, float]],
 ) -> float:
     """Return the sim-time corresponding to file index ``idx``.
 
     For ``on_exhausted == "cycle"`` indices outside ``[0, n_time_total)``
     wrap with full-period offset, where the period equals
-    ``file_times[-1] - file_times[0] + trailing_interval``; a single record
-    repeats with the period ``dt`` (the run's step, the output's
-    ``forcing_cycle_period``) when given, else 1 s.  For ``"stop"``
-    out-of-range indices are clamped to the valid range (``run_tracking``
-    refuses such a start before it gets here; direct discrete calls still
-    reach the clamp through ``_record_clock_origin``).
+    ``file_times[-1] - file_times[0] + trailing_interval`` (``cycle`` None)
+    or ``cycle[0]`` (a ``(period, seam)`` tuple of
+    :func:`~kelp.readers.exact_cycle`: the sum of the averaging windows); a
+    single record repeats with the period ``dt`` (the run's step, the
+    output's ``forcing_cycle_period``) when given, else 1 s, whatever
+    ``cycle`` says.  For ``"stop"`` out-of-range indices are clamped to the
+    valid range and ``cycle`` is not read (``run_tracking`` refuses such a
+    start before it gets here; direct discrete calls still reach the clamp
+    through ``_record_clock_origin``).
     """
     if n_time_total <= 0:
         return 0.0
@@ -2683,6 +2895,8 @@ def _index_to_sim_time(
         # _resolve_time_bracket's treatment of the same degenerate case.
         if n_time_total == 1:
             period = float(dt) if dt is not None else 1.0
+        elif cycle is not None:
+            period = cycle[0]
         else:
             period = (file_times[-1] - file_times[0]
                       + (file_times[-1] - file_times[-2]))
@@ -2693,17 +2907,66 @@ def _index_to_sim_time(
     return float(file_times[clipped])
 
 
+def _cycle_period(file_times, n_time_total, cycle):
+    """The period of ``on_exhausted: cycle``: the exact period ``cycle[0]``,
+    else the span of the records plus the last interval."""
+    if cycle is not None:
+        return cycle[0]
+    last_dt = file_times[-1] - file_times[-2] if n_time_total > 1 else 1.0
+    return file_times[-1] - file_times[0] + last_dt
+
+
+def _wrap_sim_time(sim_time, file_times, n_time_total, on_exhausted, cycle):
+    """``sim_time`` on the record axis: under ``cycle`` folded into one pass
+    (:func:`_cycle_period`), else unchanged.  The fold
+    :func:`_resolve_time_bracket` uses."""
+    if on_exhausted != "cycle":
+        return sim_time
+    t_start = file_times[0]
+    return t_start + ((sim_time - t_start)
+                      % _cycle_period(file_times, n_time_total, cycle))
+
+
+def _step_end_on_record(sim_time, pos, dt_to_next, direction, file_times,
+                        n_time_total, on_exhausted, cycle):
+    """The clock after a step that ends ON the record ahead: ``pos`` is the
+    step's start in the bracket's frame (a query just below a record was
+    moved onto it), ``pos + direction * dt_to_next`` the record.  Under
+    ``cycle`` the bracket can sit a period away from the folded clock (the
+    seam interval at the top of the pass when a backward step starts on
+    record 0; record 0 of the next pass for a clock just below the period
+    end), so the start offset is taken modulo the period."""
+    delta = pos - _wrap_sim_time(sim_time, file_times, n_time_total,
+                                 on_exhausted, cycle)
+    if on_exhausted == "cycle":
+        period = _cycle_period(file_times, n_time_total, cycle)
+        delta -= period * np.round(delta / period)
+    return sim_time + delta + dt_to_next * direction
+
+
 def _resolve_time_bracket(
     sim_time: float,
     file_times: np.ndarray,
     n_time_total: int,
     on_exhausted: str,
     direction: int = 1,
+    *,
+    cycle: Optional[Tuple[float, float]],
+    snap: float = 0.0,
 ):
     """Resolve (idx_a, idx_b, ta, tb, wrapped_time) for sim_time.
 
     Returns None if sim_time is out of range in stop mode.
     Pure index math — no I/O, no caching, no field allocation.
+
+    ``cycle`` (keyword, required) is read only for ``on_exhausted ==
+    "cycle"``: None keeps the legacy rule — the forcing repeats after the
+    span of the records plus the trailing interval, and the bracket from
+    the last record to the first record of the next pass is the trailing
+    interval long; a ``(period, seam)`` tuple of
+    :func:`~kelp.readers.exact_cycle` (records that are means over windows
+    of unequal length) wraps with ``period`` (the sum of the windows) and
+    makes that bracket ``seam`` long.
 
     ``direction`` only matters when ``sim_time`` sits exactly ON a snapshot:
     a forward step moves into ``[t_k, t_{k+1}]`` (today's behaviour, the
@@ -2716,16 +2979,21 @@ def _resolve_time_bracket(
     Strictly inside a bracket the tuple is direction-independent (the
     direction-dependent ``vel_next``/``dt_to_next`` live in
     ``_build_vel_payload``).
+
+    ``snap`` (seconds, default 0) widens "exactly on a snapshot" to the
+    roundoff of the run clock: a query at most ``snap`` before the next
+    snapshot along the motion counts as on it — forward it starts the
+    interval above that snapshot, backward the band of the downward shift
+    is ``max(1e-6, snap)``.  The run loop passes ``_snapshot_band(dt)``: a
+    dt that is not a whole number of seconds, or a decoded stamp, leaves a
+    step's start off the snapshot by roundoff.
     """
     t_start = file_times[0]
     t_end = file_times[-1]
 
-    if on_exhausted == "cycle":
-        last_dt = file_times[-1] - file_times[-2] if n_time_total > 1 else 1.0
-        total_span = t_end - t_start + last_dt
-        sim_time_wrapped = t_start + ((sim_time - t_start) % total_span)
-    else:
-        sim_time_wrapped = sim_time
+    sim_time_wrapped = _wrap_sim_time(sim_time, file_times, n_time_total,
+                                      on_exhausted, cycle)
+    if on_exhausted != "cycle":
         if sim_time_wrapped < t_start - 1e-6 or sim_time_wrapped > t_end + 1e-6:
             return None
 
@@ -2742,14 +3010,41 @@ def _resolve_time_bracket(
     ta = file_times[idx_a_mod]
     tb = file_times[idx_b_mod]
     if on_exhausted == "cycle" and tb <= ta:
-        last_dt = file_times[-1] - file_times[-2] if n_time_total > 1 else 1.0
-        tb = ta + last_dt
+        if cycle is not None:
+            # the seam: from the last record to the first of the next pass
+            tb = ta + cycle[1]
+        else:
+            last_dt = (file_times[-1] - file_times[-2]
+                       if n_time_total > 1 else 1.0)
+            tb = ta + last_dt
 
-    # Backward on-snapshot shift (tolerance matches the range check above).
+    # Forward on-snapshot shift: a query within ``snap`` below the next
+    # snapshot resolves as the query exactly on it does — the interval that
+    # starts there, the position at its bottom (alpha = 0).
+    if (direction > 0 and snap > 0.0 and idx_a_mod != idx_b_mod
+            and tb - sim_time_wrapped <= snap):
+        s = idx_b_mod
+        if on_exhausted == "cycle":
+            s_next = (s + 1) % n_time_total
+        else:
+            s_next = min(s + 1, n_time_total - 1)
+        ta_new = file_times[s]
+        tb_new = file_times[s_next]
+        if on_exhausted == "cycle" and tb_new <= ta_new:
+            if cycle is not None:
+                tb_new = ta_new + cycle[1]
+            else:
+                last_dt = (file_times[-1] - file_times[-2]
+                           if n_time_total > 1 else 1.0)
+                tb_new = ta_new + last_dt
+        return s, s_next, ta_new, tb_new, ta_new
+
+    # Backward on-snapshot shift (tolerance matches the range check above,
+    # or ``snap`` when wider).
     # Covers both shapes the forward resolution produces at a snapshot:
     # ta == sim_time (mid-range / clamped top in stop mode, alpha = 0) and
     # the fully collapsed stop-mode top (idx_a == idx_b == n-1).
-    if direction < 0 and sim_time_wrapped <= ta + 1e-6:
+    if direction < 0 and sim_time_wrapped <= ta + max(1e-6, snap):
         idx_b_new = idx_a_mod
         if on_exhausted == "cycle":
             idx_a_new = (idx_a_mod - 1) % n_time_total
@@ -2763,11 +3058,15 @@ def _resolve_time_bracket(
         tb_new = file_times[idx_b_new]
         if tb_new <= ta_new:
             # Cycle wrap (standing on file_times[0]): the bracket is the
-            # trailing interval, the position its top end — express the
-            # wrapped time in that bracket's coordinate so alpha = 1.
-            last_dt = (file_times[-1] - file_times[-2]
-                       if n_time_total > 1 else 1.0)
-            tb_new = ta_new + last_dt
+            # trailing interval (the seam for an exact cycle), the position
+            # its top end — express the wrapped time in that bracket's
+            # coordinate so alpha = 1.
+            if on_exhausted == "cycle" and cycle is not None:
+                tb_new = ta_new + cycle[1]
+            else:
+                last_dt = (file_times[-1] - file_times[-2]
+                           if n_time_total > 1 else 1.0)
+                tb_new = ta_new + last_dt
         return idx_a_new, idx_b_new, ta_new, tb_new, tb_new
 
     return idx_a_mod, idx_b_mod, ta, tb, sim_time_wrapped
@@ -2797,13 +3096,16 @@ def _resolve_recon_stencil(bracket, n_time_total: int):
 
 def _eta_at_time(t, file_times, n_time_total, on_exhausted, direction,
                  vel_cache, reader, ds, mesh, mode, diffusion, sample_vars,
-                 pchip=False):
+                 pchip=False, *, cycle, snap=0.0):
     """Surface elevation at time ``t`` as a step starting there would see it
     — the PCHIP stage at c = 0 where ``pchip`` and a 4-snapshot stencil
     exist (bit-identical to ``reconstruct_pchip``), else the linear payload
-    blend (``_build_vel_payload``) — or None outside the data."""
+    blend (``_build_vel_payload``) — or None outside the data.  ``cycle``
+    and ``snap`` are the run's cycle rule and snapshot band, as for
+    :func:`_resolve_time_bracket`."""
     bracket = _resolve_time_bracket(t, file_times, n_time_total, on_exhausted,
-                                    direction=direction)
+                                    direction=direction, cycle=cycle,
+                                    snap=snap)
     if bracket is None:
         return None
     idx_a, idx_b, ta, tb, tw = bracket
@@ -2919,9 +3221,15 @@ def _interp_velocity_at_time(
     vel_next and dt_to_next as well.  ``direction`` is forwarded so an
     on-snapshot backward query brackets downward like the main loop
     (review follow-up: the accepted-but-ignored parameter was an API trap).
+    Under ``on_exhausted == "cycle"`` the cycle rule is read from ``ds``
+    (:func:`~kelp.readers.exact_cycle`; ``ds`` may be None: the legacy
+    rule).
     """
-    bracket = _resolve_time_bracket(sim_time, file_times, n_time_total,
-                                    on_exhausted, direction=direction)
+    bracket = _resolve_time_bracket(
+        sim_time, file_times, n_time_total, on_exhausted,
+        direction=direction,
+        cycle=(exact_cycle(ds, file_times, n_time_total)
+               if on_exhausted == "cycle" else None))
     if bracket is None:
         return None, -1
     vel_step, _vel_next, _dt_to_next, file_idx = _build_vel_payload(
@@ -3028,7 +3336,8 @@ def run_tracking(
 
     reader = get_reader(config.mesh.type)
     # the stamp options and their rules (data.time_averaging next to them,
-    # the cycle refusal of calendar month and year windows), refused before
+    # the cycle refusal of snapshots on calendar month and year windows,
+    # for every reader), refused before
     # anything is read; _open_run_dataset passes them to a reader that
     # resolves its record times and applies them to the opened dataset of
     # any other
@@ -3088,7 +3397,7 @@ def run_tracking(
     # below reads the dataset on the mesh (the sampling and dry-mask probes)
     # and before the writer exists, so its refusals leave no output file;
     # run_single_realization runs it again at each realization's entry
-    _prepare_dataset(reader, mesh, ds)
+    _prepare_dataset(reader, mesh, ds, config.mode)
 
     # Load initial particle seeds (delayed-release aware: an optional 4th
     # column is the release offset in seconds).  The release STATE is built
@@ -3204,11 +3513,46 @@ def run_tracking(
     # -- Summary --
     dt = config.numerics.dt
 
+    # The cycle rule of the run, once: the exact period and seam when the
+    # dataset carries averaging windows of unequal length (the stamp
+    # options, the FESOM 1.4 reader), else None (the legacy rule; always
+    # None under stop).  Discrete mode cannot follow such a seam: refused
+    # before any output exists (run_single_realization repeats it).
+    cyc = (exact_cycle(ds, file_times, n_time_total)
+           if config.time.on_exhausted == "cycle" else None)
+    if not temporal_interp:
+        _refuse_discrete_exact_cycle(cyc)
+
     # Discrete mode reads one record per step while the particles move by
     # dt: refuse a dt unlike the record spacing before any output exists
     # (run_single_realization repeats the check for direct callers).
     _check_discrete_dt(dt, temporal_interp, file_dt, file_times,
                        n_records=n_time_total)
+
+    # A cycle on irregularly spaced records without known averaging windows
+    # keeps the legacy period (the span of the records plus the last
+    # interval), which is exact only for equally spaced records: warn once.
+    if (config.time.on_exhausted == "cycle" and temporal_interp
+            and cyc is None and file_times is not None
+            and n_time_total >= 3):
+        ft = np.asarray(file_times, dtype=np.float64)
+        d = np.diff(ft[:n_time_total])
+        if not np.allclose(d, d[0], rtol=1e-3, atol=0.0):
+            dmin, dmax = d.min(), d.max()
+            period = ft[n_time_total - 1] - ft[0] + d[-1]
+            warnings.warn(
+                "time.on_exhausted: cycle on irregularly spaced records "
+                f"({dmin / 86400.0:g}..{dmax / 86400.0:g} d between "
+                "records): the forcing period is taken as the span of the "
+                f"records plus the last interval ({period / 86400.0:g} d), "
+                "which is exact only for equally spaced records. For means "
+                "over calendar months or years set data.time_stamp and "
+                "data.time_window, so that the period is the sum of the "
+                "averaging windows (the FESOM 1.4 reader resolves its "
+                "windows from the files)",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def _fmt_dt(s):
         if s >= 86400 and s % 86400 == 0:
@@ -3315,9 +3659,9 @@ def run_tracking(
                     t_run += (
                         _index_to_sim_time(idx + config.time.run_interval,
                                            file_times, n_time_total,
-                                           on_exhausted, dt=dt)
+                                           on_exhausted, dt=dt, cycle=cyc)
                         - _index_to_sim_time(idx, file_times, n_time_total,
-                                             on_exhausted, dt=dt))
+                                             on_exhausted, dt=dt, cycle=cyc))
                     idx += config.time.run_interval
                 if not (file_times[0] - 1e-6 <= t_run
                         <= file_times[-1] + 1e-6):
@@ -3332,6 +3676,29 @@ def run_tracking(
                         f"forcing (on_exhausted: stop); lower num_runs or "
                         f"run_interval, move time.start_date, or set "
                         f"on_exhausted: cycle")
+
+    # A time-interpolated RK run takes steps that land on every record they
+    # reach (_check_step_grid): refused here, before any output exists, for
+    # every realization's start (run_single_realization repeats the check).
+    if temporal_interp and file_times is not None and n_time_total > 0:
+        _dir = 1 if config.mode.time_dir >= 0 else -1
+
+        def _start_time(idx):
+            if 0 <= idx < n_time_total:
+                return float(file_times[idx])
+            return _index_to_sim_time(idx, file_times, n_time_total,
+                                      on_exhausted, dt=dt, cycle=cyc)
+
+        for ire in range(config.time.num_runs):
+            idx = start_idx + ire * config.time.run_interval
+            t_run = (_start_time(idx) if sim_time_start is None
+                     else sim_time_start + _start_time(idx)
+                     - _start_time(start_idx))
+            _check_step_grid(integrator=config.numerics.integrator,
+                             temporal_interp=True, file_times=file_times,
+                             n_time_total=n_time_total,
+                             on_exhausted=on_exhausted, cycle=cyc, dt=dt,
+                             sim_time=t_run, n_steps=n_steps, direction=_dir)
 
     direction_str = "forward" if config.mode.time_dir >= 0 else "backward"
     print(f"  Tracking steps:    {n_steps} ({direction_str}), start_idx={start_idx}")
@@ -3845,9 +4212,9 @@ def run_tracking(
         ):
             sim_time_start += (
                 _index_to_sim_time(start_idx, file_times, n_time_total,
-                                   on_exhausted, dt=dt)
+                                   on_exhausted, dt=dt, cycle=cyc)
                 - _index_to_sim_time(prev_idx, file_times, n_time_total,
-                                     on_exhausted, dt=dt)
+                                     on_exhausted, dt=dt, cycle=cyc)
             )
 
     ds.close()
@@ -3921,7 +4288,14 @@ def track_particles(
         (``data.time_stamp`` / ``data.time_window``) of a reader that does
         not resolve its record times, call
         ``readers.apply_time_options(ds, config.data, config.mesh.type)``
-        once before (a second call shifts again).
+        once before (a second call shifts again).  A dataset resolved by
+        ``apply_time_options`` or by the FESOM 1.4 reader carries the
+        averaging windows (the coordinate ``readers.TIME_WINDOWS``); with
+        ``on_exhausted="cycle"`` the forcing period is read from it (the
+        sum of the windows when they differ in length, and discrete mode is
+        then refused); a dataset without it keeps the legacy period, the
+        span of the records plus the last interval, and so does the axis
+        synthesised from ``file_dt`` when ``file_times`` is not given.
     reader : reader class
     lon0, lat0 : np.ndarray
         Initial particle positions.

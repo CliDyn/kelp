@@ -8,7 +8,7 @@ arguments (`--help`).
 | Tool | Driven by | What it does |
 |------|-----------|--------------|
 | `extract_fesom_region.py` | YAML (`--config`) | Cut a region out of a large FESOM2 mesh + variable files → a smaller NetCDF/Zarr subset that the FESOM2 reader loads directly. |
-| `extract_healpix_region.py` | YAML (positional) | Cut a pixel subset out of a HEALPix store → one self-describing Zarr the HEALPix reader consumes transparently (docs/healpix.md §4). |
+| `extract_healpix_region.py` | YAML (positional) | Cut a pixel subset out of a HEALPix store → one self-describing Zarr the HEALPix reader consumes transparently (docs/healpix.md §4). With an interface table (the store's own, else `source.levels`) every vertical axis is checked against it before any cut; `region.max_levels: M` then keeps M interfaces for w and M−1 entries for the layer variables, and the extract carries the table and the source's bed. `max_levels: 1` = a surface extract for 2-D runs (no table). |
 | `reconstruct_w.py` | YAML (`--config`) | Reconstruct Cartesian vertical velocity W from u, v, ssh when the model output has no W. |
 | `check_grid_hash_cell.py` | a run config | Report nodes per grid-hash window and widened anchors for candidate cells, at the seeds and the element centres. |
 | `sort_seeds.py` | arguments | Sort a seed file by (HEALPix NEST cell, depth) for memory locality — sort first, then shard. |

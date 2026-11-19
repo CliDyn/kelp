@@ -155,8 +155,9 @@ them with the stamp the store shows for the same record. The settings:
   `time.start_date` names 12:00;
 - stamps at the window start, monthly means: `data.time_stamp: start` with
   `data.time_window: calendar_month` and `numerics.temporal_interp: true`
-  (months differ in length; `time.on_exhausted: cycle` is refused with this
-  window).
+  (months differ in length); with `time.on_exhausted: cycle` such records
+  repeat after the sum of the months, 365 d for a common year
+  (`io_and_time.md` §3).
 
 A wrong choice does not fail: under `mean`, daily means stamped at the window
 start are placed 24 h early and monthly means a month early (a January mean in
@@ -173,8 +174,10 @@ interfaces** (K data levels, surface interface w ≈ 0, finite-prefix
 columns), positive **up** like the FESOM2 `w` it derives from (ng5
 `avg_wo` is "Time-mean upward sea water velocity"), negated by the reader
 into the tracker's positive-down depth rate (`docs/vertical.md` §3). GRIB level axes carry only indices ⇒ 3-D **requires
-`mesh.levels`** (aux3d path or inline metres) unless the store is an
-extract carrying its own `level_interfaces_m` table. `mode.max_levels`
+`mesh.levels`** (aux3d path or inline metres) unless the store carries
+its own `level_interfaces_m` table (an extract written with a table
+does); a store's own table wins, and a `mesh.levels` that differs from it
+is refused at load. `mode.max_levels`
 trims both the mesh interfaces and the per-step read. Below-bottom (and
 family-mask-mismatch) NaNs in u/v/w are **zeroed** (no flow in the
 ground — the ng5 u- and w-family bottoms disagree per cell, separate
@@ -192,6 +195,36 @@ never NaN.
 T/S sampling: `mode.sample_vars: [avg_thetao, avg_so]` — **thetao is in
 Kelvin** (ng5 GRIB convention), written through unchanged.
 
+**The vertical axis of each variable** (2026-11). The reader finds the
+vertical dim of every variable on its own: a dim whose lower-cased name is
+`level`, `lev`, `depth`, `deptht`, `z` or `height`, or starts with
+`level`; a variable with two such dims is refused. w may therefore sit on
+its own axis — w on its own `level_w` axis next to the layer variables on
+`level` — as well as on the axis of u and v. In a 3-D run every vertical
+axis is checked **strictly against the FULL interface table** (K entries:
+the store's `level_interfaces_m`, else `mesh.levels`, taken before any
+`mode.max_levels` cut, which keeps cutting the interfaces and the
+per-step read as before):
+
+| variables | accepted entries on the vertical axis |
+|---|---|
+| w (`mode.var_w`, else the w aliases) | exactly K (the interfaces) |
+| u, v and every scalar read in 3-D (`mode.sample_vars`, `beaching.dry_mask_var`) | K−1 (the layer mids), or K with the K-th level empty at every tracked node column |
+
+Any non-NaN value counts as data, `0.0` and `inf` included; the tracked
+node columns are the store cells the mesh carries, so stray values on
+untracked land cells never refuse a run. Layouts that pass: layer
+variables on `lev` (K−1) with w on `level` (K); w on its own `level_w`
+axis (K) next to the layer variables on `level` (K−1); a padded store
+with u, v and w on one `level` axis of K entries whose last level is
+empty for u and v. Anything else is refused with the numbers. Before
+2026-11 the reader only checked that an axis was long enough and read
+its first entries, so a table one interface short (the layer mid-depths
+given instead of the interface depths) paired each w level with the
+depth of another interface and dropped the deepest layer of u and v
+without a message. Velocities on the interfaces (u and v with data in
+their K-th level) are not supported: the rule refuses them.
+
 **Fail-fasts:** the pixel geometry (§1b) refuses 3-D, `sample_vars` and
 `em`/`m1` spatial Kh (`NotImplementedError`; the dual mesh supports all
 three), `ncinput_v`/`ncinput_w` → `ValueError` (u/v/w always live in ONE
@@ -200,6 +233,35 @@ healpix store), zoom mismatch between mesh and data store → `ValueError`,
 more than 5 % of the wet nodes with non-finite u/v at a record →
 `ValueError` (the wrong store, variable or level, not mask drift).
 `mesh.rotation` is supported (§3).
+The vertical axes of a 3-D run (2026-11): w not on exactly K entries
+(checked first, so a table one interface short is reported for w), a
+layer variable on neither K−1 nor K entries, a layer variable on K
+entries with data in its last level, a variable with two vertical dims,
+and — for u, v and w — a missing variable (`KeyError`), no vertical dim
+or a cell count other than the mesh's store → `ValueError`; the messages
+name the variable, its axis, the lengths and the table's source. Where
+they are refused:
+
+- u, v and w at the dataset's first record, **before any output file
+  exists and in `kelp info`**: the reader's check-only `prepare` hook,
+  which the engine calls with the run's mode (`run_tracking` right after
+  the open, each realization at its entry, `kelp info` once), so `kelp
+  info` refuses the same u/v/w configurations as `kelp run`, with the same
+  messages (before 2026-11 a missing w or an axis without a vertical dim
+  stopped the run at step 0, after the output file was created);
+- sampled scalars and the beaching dry mask in the run's sampling and
+  dry-mask probes, at the start record, also before any output exists
+  (`kelp info` reads no scalars);
+- every later record at its read: a K-entry layer variable whose last
+  level fills only in a later record stops the run at that record, after
+  the output exists (with masks static by product convention, a store
+  defect). A prefetch look-ahead record that fails is not cached and is
+  refused only if the run reaches it; the message names it by its time
+  stamp (the index counts from the window's start).
+
+Extracts cut by the extractor before version 1.1 are the one exception to
+the empty-last-level rule (§4, "Extracts written by the earlier
+extractor").
 
 **NaN handling:** masks are static by product convention; a NaN at a wet
 node in a later timestep (mask drift vs the t=0 mask) is zeroed with a
@@ -327,6 +389,97 @@ The reader consumes extracts transparently: `healpix_index` present →
 wet mask/depth scatter onto the full pixel space, node→cell compaction
 via `searchsorted`, `mesh.crop_bbox` composes as a further crop.
 Extracts are the memory lever for zoom ≥ 10 3-D and PCHIP (4 snapshots).
+
+**Vertical axes** (extractor version 1.1, 2026-11). The extractor follows
+the reader's convention (§2) and its precedence for the table:
+
+- *The table* is the source's own `level_interfaces_m` when it carries
+  one, else `source.levels`; a `source.levels` that differs from the
+  store's table is refused. The extract carries the table (cut with the
+  levels), so a 3-D run on it needs no `mesh.levels`. (Before 1.1 a
+  store's own table was dropped unless `source.levels` repeated it.)
+- *w* is `source.var_w` when set, else the first w alias among the
+  extracted variables; every other extracted variable with a vertical dim
+  is a layer variable. A `source.var_w` the store does not hold is
+  refused; with an explicit `variables:` list it must be listed there,
+  without one it joins the default list (u, v and the ssh found).
+- *Checked before anything is cut*, whenever there is a table: w on
+  exactly K entries (K = the size of the full source table), every layer
+  variable on K−1 or K; a selected w without a vertical dim is refused
+  too. A wrong table, or a layer variable on the interfaces, is refused
+  here, before a cut could hide it.
+- *`region.max_levels: M` with a table* keeps `min(M, K)` interfaces: w
+  keeps that many entries, every layer variable one fewer, the table that
+  many. A layer variable on K entries always loses its K-th level in the
+  cut, so that level must be empty at the exported cells (halo included)
+  in every exported record; otherwise the extraction is refused, naming
+  the variable and the source record.
+- *The renamed w axis.* When w shares its vertical dim with a layer
+  variable (a padded store with u, v and w on one `level` axis), the cut
+  gives them different lengths, which one dim cannot hold: w's dim is
+  renamed to the first unused name of `level_w`, `level_w_1`, …, together
+  with its dim coordinate; any other coordinate of w on that dim becomes
+  an unused `<name>_w`, ….
+- *The bed.* When the cut keeps fewer interfaces than the source has and
+  the source has no depth variable, the extract carries `deptho`: the bed
+  the reader computes on the whole store, from the finite levels of the
+  uncut u at the first exported record and the full table. A run on the
+  extract then has the source's bed, as `mode.max_levels: M` on the whole
+  store does, instead of a bed stopped at the deepest kept interface. A
+  source depth variable travels with the extract as before.
+- *`region.max_levels: 1`* is a surface extract for 2-D runs: every
+  vertical axis keeps one entry, and no table is resolved, checked or
+  written, whatever table the source has (a printed note says so; a 3-D
+  extract needs `max_levels` ≥ 2). No bed is computed; a source depth
+  variable is carried as before. `max_levels` below 1 is refused.
+- *Without a table*, `max_levels: M` keeps the first M entries of every
+  vertical axis, as before. Such a depth-cut extract serves 2-D runs; in
+  3-D it runs only where u's M-th level is empty at every tracked column
+  (a padded store with K = M), since otherwise no table satisfies both
+  the w rule and the empty last level: **a depth-cut 3-D extract needs
+  the table at extraction.** An uncut extract without a table runs in 3-D
+  with a matching `mesh.levels`, as before.
+- `--dry-run` makes every metadata check but reads no data, and says when
+  the last-level check was not run.
+- *2-D runs on a re-extracted region:* with a table and `max_levels: M`
+  a layer variable now has M−1 entries, so a `mode.sigma_layer: M−1` that
+  worked on a table-backed extract of the earlier extractor is out of
+  range (the largest index is M−2).
+
+**Extracts written by the earlier extractor.** Every extract records the
+tool that wrote it in its `tool` attribute: `extract_healpix_region v1.0`
+before version 1.1, `extract_healpix_region v1.1` now. The v1.0 cut kept
+M entries on every vertical axis, so a layer variable of a 3-D extract
+cut with `region.max_levels` holds one level more than the M interfaces
+of its table bound: the real layer below the deepest kept interface. The
+reader runs such an extract (a dataset with `healpix_index` whose `tool`
+is exactly `extract_healpix_region v1.0`) as earlier versions did, bit
+for bit: its layer variables are read as the K−1 layers the table bounds
+and the last layer is not used — the same layers as `mode.max_levels: M`
+on the whole store — and, when the extract carries no depth variable, the
+bed is placed no deeper than the deepest table entry. A `RuntimeWarning`
+says so, once per process for each store and set of variable names; it
+names the variables and the unused layer. It comes from the records the
+checks read anyway: record 0 of the dataset for u and v (the `prepare`
+hook, so `kelp info` shows it too), the start record for a sampled scalar
+or the dry mask (the probes). The per-step reads of an old extract never
+read the last level, so a variable whose last level carries data only in
+a later record is read as before, without a warning. An old extract whose
+last level is empty at the tracked columns in those records reads as a
+padded store, and an uncut old extract as any store, both without the
+warning; every other rule (w on exactly K entries, the layer lengths, one
+vertical dim) applies to old extracts as to any store. An old extract cut
+without a table runs as before with the whole `mesh.levels` of its source
+and a `mode.max_levels` of at most M, the length of its longest vertical
+axis: its table is then the first M interfaces of `mesh.levels`, and its
+bed is the one computed from the whole `mesh.levels`, which the warning
+therefore does not name; a run that keeps more than M interfaces is
+refused before any output, with a message that names M. To use the unused
+layer and the true bed, **extract the region again from the whole store**
+(the extractor refuses an extract as its input) with the current
+extractor and a `region.max_levels` of at least one more than the old
+extract's table (K + 1). The same layout without the v1.0 attribute — a
+raw store, or a v1.1 extract cut without a table — is refused.
 
 ## 5. Validation against the native FESOM twin (Phase 5, 2026-08-16)
 

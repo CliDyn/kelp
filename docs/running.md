@@ -29,8 +29,10 @@ is in the README's *Config file reference* and, with full prose, in
 - **Explicit** (`dt: 1800.0`): in discrete mode `dt` must equal the file step —
   every step reads the next record while the particles move by `dt`, so a
   different value is refused at startup. With `temporal_interp: true`, `dt` may be
-  **smaller** than the file step; a step that straddles a snapshot then runs on a
-  steady velocity, so choose a `dt` that divides it.
+  **smaller** than the file step; with `rk2`, `rk4` or `rk45` every record the
+  run reaches must fall on a step boundary (a `dt` that divides the record
+  interval, the start a whole number of steps from a record), or the run is
+  refused at startup.
 
 Mechanics of the time axis (auto-detection, `file_dt`, the time-averaging
 midpoint shift) are in [`io_and_time.md`](io_and_time.md).
@@ -39,7 +41,8 @@ midpoint shift) are in [`io_and_time.md`](io_and_time.md).
 
 By default each tracking step uses one file snapshot (discrete mode). Set
 `temporal_interp: true` to linearly blend velocity between adjacent snapshots, so
-`dt` can be smaller than the file step for smoother trajectories.
+`dt` can be smaller than the file step for smoother trajectories (with `rk2`,
+`rk4` or `rk45` a `dt` that puts every record on a step boundary, see above).
 
 Linear-in-time blending caps the time order at O(dt²) regardless of RK order. To
 let RK4 separate from RK2 at coarse file cadence, set

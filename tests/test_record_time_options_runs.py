@@ -14,9 +14,10 @@ attributes: each set key as a string, none without the keys, and the shard
 concat refusing shards with different options.  The other consumers of the
 record times: a cftime (``noleap``) axis, a backward run, PCHIP in time,
 prefetched reads, two realizations, ``time.start_date`` matched against the
-resolved instants, calendar-month windows (irregular: discrete mode and the
-cycle refused), a run resumed from a checkpoint on the resolved axis, and a
-HEALPix two-store run (``data.ncinput_eta``).
+resolved instants, calendar-month windows (irregular: discrete mode
+refused; the cycle runs with temporal interpolation), a run resumed from a
+checkpoint on the resolved axis, and a HEALPix two-store run
+(``data.ncinput_eta``).
 
 Fixture (all synthetic, ``tests/_fesom2_synth``): the 17 x 17 node grid of
 ``tests/test_depth_linear_analytic.py`` with six levels, node u, v constant
@@ -388,8 +389,12 @@ def test_calendar_months_need_temporal_interp(tmp_path):
     """Monthly means stamped at the start of their month sit at the month
     centres (15.5, 45.0, 74.5, 105.0 d: spacings 29.5, 29.5, 30.5 d): a
     discrete run is refused as irregular, an interpolated run runs from the
-    first centre, and ``time.on_exhausted: cycle`` is refused before any
-    output exists."""
+    first centre, and ``time.on_exhausted: cycle`` runs with temporal
+    interpolation (the period is the sum of the windows) and is refused in
+    discrete mode before any output exists, naming that period and the seam
+    (January-April cannot show the period by value: the legacy rule gives
+    the same 120 d; it is pinned on twelve months in
+    ``tests/test_exact_cycle_runs.py``)."""
     world = _world(tmp_path)
     months = np.array([0.0, 31.0, 59.0, 90.0]) * DAY
     opts = {"time_stamp": "start", "time_window": "calendar_month"}
@@ -403,11 +408,17 @@ def test_calendar_months_need_temporal_interp(tmp_path):
                    numerics={"dt": DAY, "n_steps": 4}, **opts)
     assert _time_of(cfg.data.output_path)[1] == \
         "seconds since 1958-01-16 12:00:00"
-    with pytest.raises(ValueError, match=r"time\.on_exhausted"):
-        _case(tmp_path, world, "mcycle", months, n_rec=4,
-              numerics={"dt": DAY, "n_steps": 4},
-              time={"on_exhausted": "cycle"}, **opts)
-    assert not (tmp_path / "mcycle.nc").exists()
+    cfg, _ = _case(tmp_path, world, "mcycle", months, n_rec=4,
+                   numerics={"dt": DAY, "n_steps": 4},
+                   time={"on_exhausted": "cycle"}, **opts)
+    assert Path(cfg.data.output_path).exists()
+    with pytest.raises(ValueError) as info:
+        _case(tmp_path, world, "mcdisc", months, n_rec=4, interp=False,
+              numerics={"dt": 30 * DAY}, time={"on_exhausted": "cycle"},
+              **opts)
+    assert "repeats after 120 d with a seam of 30.5 d" in str(info.value), \
+        str(info.value)
+    assert not (tmp_path / "mcdisc.nc").exists()
 
 
 def test_resumed_chain_on_the_resolved_axis_equals_continuous(tmp_path):

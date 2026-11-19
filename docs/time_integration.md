@@ -139,6 +139,12 @@ time and builds a velocity field blended between them. Two helpers in
   allocation. It also handles the end-of-range and cycling behaviour
   (`on_exhausted`) and the subtle case of a backward step that starts exactly on
   a snapshot, which must bracket the interval *below* it rather than degenerate.
+  Under `cycle` the period and the seam (the bracket from the last snapshot to
+  the first one of the next pass) come from its `cycle` argument where the
+  records' averaging windows are known and differ in length — the sum of the
+  windows, e.g. 365 days and a 31-day seam for twelve monthly means — and are
+  otherwise the span of the snapshots plus the last interval, with that interval
+  as the seam (`io_and_time.md` §3).
 - `_build_vel_payload` turns that bracket into the actual payload. It reads the
   two snapshots through the snapshot cache, computes the blend fraction `alpha`
   from where the query time sits in the interval, and returns the blended
@@ -195,7 +201,29 @@ itself refuses a step that would (`ValueError` from the time-aware helpers);
 the tracking loop never sends one: when the step would pass the bracket (a start
 between snapshots, the end of the range) it **downgrades** that step to steady
 mode (every stage reuses the start field) and emits one `RuntimeWarning` per
-realization rather than extrapolating beyond the bracket. Euler accepts
+realization rather than extrapolating beyond the bracket. A step that crosses
+a snapshot without ending on it would lose the time interpolation this way, so
+for RK2, RK4 and RK45 the run refuses, when it starts, a `dt` that does not put
+the snapshots on the step grid (`tracking._check_step_grid`, in `run_tracking`
+before any output and in `run_single_realization` for direct callers): every
+snapshot the run reaches must be a whole number of steps from the run's start
+(under `cycle` the snapshots of every pass, so the seam too); counted from the
+start, so the output's record times, start + n·dt, stay on the snapshots. For hourly records
+that admits 1800, 1200, 900, 720 or 600 s but not 698.66 s (M2/64); for monthly
+means stamped at the window centres (29.5 to 31 days apart) any divisor of half
+a day. With a step that crossed an hourly record every fifth step, a particle
+in a tidal current of 0.5 m/s drifted up to 49 m off its interpolated path.
+Euler, with its single stage, is not checked; the downgrade remains for the end
+of the range. The snapshot band (`_snapshot_band`, `1e-5·max(dt, 1 s)`)
+absorbs the roundoff of the run clock (with a `dt` that is not a whole number
+of seconds, `sim_time += dt` carries rounding error) and of decoded stamps
+(up to a microsecond): a step that reaches the snapshot ahead to within it ends
+exactly on it — its length is `dt_to_next`, so its last stage takes `vel_next`
+and a PCHIP stage time stays inside its interval — and the clock is set to the
+snapshot after the step, so the roundoff never accumulates past a snapshot; a
+query that close below a snapshot starts on it (`_resolve_time_bracket`'s
+`snap`). Before 2026-11-18 the tolerance was an absolute 1 ns, below the
+clock's resolution, and such steps fell back about half the time. Euler accepts
 `vel_next`/`dt_to_next` but its velocity ignores them, since it has only the
 single `c_0 = 0` stage (on sigma meshes they still give the column's surface at
 the end of the step).
