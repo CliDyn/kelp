@@ -42,7 +42,7 @@ coordinate_frame:
   - src/kelp/tracking.py:_validate_restart_frame
   - src/kelp/readers/healpix.py:_apply_rotation
   doc: docs/coordinate_frame.md
-  verified_at: f858d2e
+  verified_at: f4d3bef
 dev_config:
   code:
   - src/kelp/core/config.py:load_config
@@ -124,7 +124,7 @@ dev_readers:
   - src/kelp/readers/nemo/_layout.py:detect_nemo_cgrid_layout
   - src/kelp/readers/nemo/reader.py:_read_raster
   doc: docs/dev/readers.md
-  verified_at: f858d2e
+  verified_at: f4d3bef
 dev_tracking:
   code:
   - src/kelp/tracking.py:run_tracking
@@ -191,7 +191,7 @@ healpix:
   - src/kelp/readers/__init__.py:apply_time_options
   - src/kelp/readers/__init__.py:exact_cycle
   doc: docs/healpix.md
-  verified_at: f858d2e
+  verified_at: f4d3bef
 interpolation:
   code:
   - src/kelp/numerics/interpolate.py:_interp_leastsq_core
