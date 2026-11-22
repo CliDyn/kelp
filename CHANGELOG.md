@@ -36,6 +36,8 @@ the tracker was developed privately from 2026-06.
 - `utils/fetch_nemo_test_data.py` builds the data directory of the data-gated
   NEMO tests (`KELP_TEST_NEMO_DATA`) from public ORCA05, eORCA025 and ORCA2
   sources.
+- The C-grid path was implemented by Willi Rath (@willirath) and contributed
+  in #6.
 
 ### Added — record-time options for every reader
 
