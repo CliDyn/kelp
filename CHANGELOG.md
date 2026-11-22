@@ -25,7 +25,9 @@ the tracker was developed privately from 2026-06.
 - Inputs: `mesh_mask.nc` or `domain_cfg.nc`; a file, glob or list per grid
   (`data.ncinput`, new `ncinput_u`, `ncinput_v`; `ncinput_w` is refused: W comes from continuity); XIOS calendar
   spellings (`360d`, ...). New `mesh.nemo_partial_cells: shrunk | porous`.
-  `mode.sample_vars` return the T-cell value.
+  `mode.sample_vars` return the T-cell value, and NaN at or below the floor of
+  the column. A 2-D run on a 3-D `mesh_mask` or `domain_cfg` uses the surface
+  faces only and gives the same trajectories as with the 2-D form of the file.
 - Refused at startup: s-coordinates, ice-shelf cavities, non-T `sample_vars`,
   rk45, PCHIP, em/m1 diffusion, diffusion in 3-D, beaching, `elem_search: walk`
   in 3-D. z*/vvl output warns and uses the fixed reference thicknesses.
@@ -202,25 +204,6 @@ the tracker was developed privately from 2026-06.
   so the rounding error never builds up beyond one interval between records,
   however long the run. Runs whose time step is a whole number of seconds, on
   records stamped at whole seconds, are unchanged.
-
-- NEMO C-grid, 3-D: a particle at or below the floor of its column (below a
-  partial bottom cell's own thickness, or below the deepest interface) sampled
-  the bottom-water value of `mode.sample_vars`; it now samples NaN, like the zero
-  velocity it has there. The depth is converted to the fractional level of the
-  containing cell, as the step does.
-- NEMO C-grid, 3-D: a particle that crossed a side face without changing its
-  fractional level (no vertical velocity) kept its old depth in metres. With
-  `mesh.nemo_partial_cells: shrunk`, a crossing into a column with a thinner
-  partial bottom cell left that depth below the new column's floor, and the
-  particle stopped there at the next step while the same run with `porous` went
-  on. The depth is now measured again in the cell where the step ends, so both
-  settings give the same horizontal paths.
-- NEMO C-grid, 2-D: a 2-D run on a standard 3-D `mesh_mask` or `domain_cfg`
-  weighted its surface fluxes by the 3-D partial-cell thicknesses, which slowed
-  the flow next to a shallow one-level column (0.17 instead of 0.5 m/s in a
-  synthetic case). A 2-D run now uses the surface faces only and gives the same
-  trajectories with the 3-D mesh file as with its 2-D form; its output no longer
-  carries the 3-D attribute `nemo_partial_cells`.
 
 ## [1.1.0] - 2026-11-16
 
