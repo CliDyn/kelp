@@ -46,12 +46,10 @@ the tracker was developed privately from 2026-06.
   `time_window` is `calendar_day`, `calendar_month`, `calendar_year` or a fixed
   duration such as `"5 d"`, and the optional `time_offset` first shifts the raw
   stamps by a fixed amount such as `"+45 min"`. They are meant for output that
-  is not stamped at the end of its window. `data.time_averaging: mean` assumes
-  window-end stamps, so a daily mean stamped at 00:00 of its own day, as in a
-  store written from GRIB with the reference time, was placed 24 h early under
-  `mean` and 12 h early under `instant`, without any warning. With
-  `time_stamp: start` and `time_window: calendar_day` the same record sits at
-  12:00 of its day.
+  is not stamped at the end of its window, which `data.time_averaging: mean`
+  assumes. A store written from GRIB with the reference time, for example,
+  stamps a daily mean at 00:00 of its own day; with `time_stamp: start` and
+  `time_window: calendar_day` that record sits at 12:00 of its day.
 - For every reader other than FESOM 1.4 the keys take the place of
   `data.time_averaging`. The time axis of the opened dataset, with all its files
   joined, is resolved once when it is opened: each record is placed at the
@@ -96,12 +94,10 @@ the tracker was developed privately from 2026-06.
   exactly K entries, and u, v and every scalar read in 3-D (sampled variables
   and the beaching dry mask) must have K−1 entries, or K entries whose last
   level holds no data at the tracked columns; velocities located on the
-  interfaces are not supported. Until now the reader only checked that an axis
-  was long enough and read its first entries, so a table one interface short,
-  such as the layer mid-depths given in place of the interface depths, paired
-  each w level with the depth of another interface and dropped the deepest
-  layer of u and v without any message. Such a run is now refused, and the
-  message gives the lengths found and the table they were checked against. The
+  interfaces are not supported. A configuration that does not fit, for example
+  a `mesh.levels` that lists the layer mid-depths in place of the interface
+  depths, is refused, and the message gives the lengths found and the table
+  they were checked against. The
   checks of u, v and w are made at the first record, before any output file
   exists, and `kelp info` refuses the same configurations; sampled scalars and
   the dry mask are checked in the probes a run makes before it writes, and
@@ -165,11 +161,9 @@ the tracker was developed privately from 2026-06.
 - A run with `temporal_interp: true` and the RK2, RK4 or RK45 integrator is
   refused when it starts unless every record it reaches is a whole number of
   time steps from its start. A time-interpolated
-  RK step takes the velocity at its start and at the record ahead, so a step
-  that crossed a record without ending on it ran on the steady velocity of its
-  start, with a single warning per run. With hourly records and a step of
-  698.66 s, a 64th of the M2 period, every fifth step did so, and a particle in
-  a tidal current of 0.5 m/s drifted up to 49 m off its interpolated path. The
+  RK step takes the velocity at its start and at the next record, so its end
+  has to fall on that record; until now a step that crossed a record was taken
+  with the velocity of its start and a warning. The
   message names time steps that fit: for hourly records 1800, 1200, 900, 720 or
   600 s; for monthly means stamped at the centres of their windows, which lie
   29.5 to 31 days apart, any divisor of half a day, so a daily step is refused
@@ -193,13 +187,10 @@ the tracker was developed privately from 2026-06.
 
 ### Fixed
 
-- With a time step that is not a whole number of seconds, the run clock carries
-  rounding errors, and an RK2 or RK4 step that should end exactly on a record
-  ended slightly before or after it. If it ended after the record, the step ran
-  on the steady velocity of its start instead of the velocity interpolated in
-  time; if it ended before, the next step did. Each such step moved a particle
-  several metres off its interpolated path (17 m for a step of 2.4 days at a
-  few millimetres per second). A step that reaches a record to within 10⁻⁵ of
+- With a time step that is not a whole number of seconds, rounding in the run
+  clock could make an RK2 or RK4 step that should end exactly on a record end
+  slightly before or after it, and that step was then not interpolated in
+  time. A step that reaches a record to within 10⁻⁵ of
   the time step now ends exactly on it, and the run clock is set to the record,
   so the rounding error never builds up beyond one interval between records,
   however long the run. Runs whose time step is a whole number of seconds, on
