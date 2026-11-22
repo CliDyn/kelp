@@ -5,7 +5,7 @@ All notable changes to KELP are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Public history starts with 0.9.0;
 the tracker was developed privately from 2026-06.
 
-## [Unreleased]
+## [1.2.0] - 2026-11-22
 
 ### Added — NEMO exact C-grid path (`mesh.nemo_grid: cgrid`)
 
@@ -25,7 +25,9 @@ the tracker was developed privately from 2026-06.
 - Inputs: `mesh_mask.nc` or `domain_cfg.nc`; a file, glob or list per grid
   (`data.ncinput`, new `ncinput_u`, `ncinput_v`; `ncinput_w` is refused: W comes from continuity); XIOS calendar
   spellings (`360d`, ...). New `mesh.nemo_partial_cells: shrunk | porous`.
-  `mode.sample_vars` return the T-cell value.
+  `mode.sample_vars` return the T-cell value, and NaN at or below the floor of
+  the column. A 2-D run on a 3-D `mesh_mask` or `domain_cfg` uses the surface
+  faces only and gives the same trajectories as with the 2-D form of the file.
 - Refused at startup: s-coordinates, ice-shelf cavities, non-T `sample_vars`,
   rk45, PCHIP, em/m1 diffusion, diffusion in 3-D, beaching, `elem_search: walk`
   in 3-D. z*/vvl output warns and uses the fixed reference thicknesses.
@@ -34,6 +36,8 @@ the tracker was developed privately from 2026-06.
 - `utils/fetch_nemo_test_data.py` builds the data directory of the data-gated
   NEMO tests (`KELP_TEST_NEMO_DATA`) from public ORCA05, eORCA025 and ORCA2
   sources.
+- The C-grid path was implemented by Willi Rath (@willirath) and contributed
+  in #6.
 
 ### Added — record-time options for every reader
 
@@ -44,12 +48,10 @@ the tracker was developed privately from 2026-06.
   `time_window` is `calendar_day`, `calendar_month`, `calendar_year` or a fixed
   duration such as `"5 d"`, and the optional `time_offset` first shifts the raw
   stamps by a fixed amount such as `"+45 min"`. They are meant for output that
-  is not stamped at the end of its window. `data.time_averaging: mean` assumes
-  window-end stamps, so a daily mean stamped at 00:00 of its own day, as in a
-  store written from GRIB with the reference time, was placed 24 h early under
-  `mean` and 12 h early under `instant`, without any warning. With
-  `time_stamp: start` and `time_window: calendar_day` the same record sits at
-  12:00 of its day.
+  is not stamped at the end of its window, which `data.time_averaging: mean`
+  assumes. A store written from GRIB with the reference time, for example,
+  stamps a daily mean at 00:00 of its own day; with `time_stamp: start` and
+  `time_window: calendar_day` that record sits at 12:00 of its day.
 - For every reader other than FESOM 1.4 the keys take the place of
   `data.time_averaging`. The time axis of the opened dataset, with all its files
   joined, is resolved once when it is opened: each record is placed at the
@@ -94,12 +96,10 @@ the tracker was developed privately from 2026-06.
   exactly K entries, and u, v and every scalar read in 3-D (sampled variables
   and the beaching dry mask) must have K−1 entries, or K entries whose last
   level holds no data at the tracked columns; velocities located on the
-  interfaces are not supported. Until now the reader only checked that an axis
-  was long enough and read its first entries, so a table one interface short,
-  such as the layer mid-depths given in place of the interface depths, paired
-  each w level with the depth of another interface and dropped the deepest
-  layer of u and v without any message. Such a run is now refused, and the
-  message gives the lengths found and the table they were checked against. The
+  interfaces are not supported. A configuration that does not fit, for example
+  a `mesh.levels` that lists the layer mid-depths in place of the interface
+  depths, is refused, and the message gives the lengths found and the table
+  they were checked against. The
   checks of u, v and w are made at the first record, before any output file
   exists, and `kelp info` refuses the same configurations; sampled scalars and
   the dry mask are checked in the probes a run makes before it writes, and
@@ -163,11 +163,9 @@ the tracker was developed privately from 2026-06.
 - A run with `temporal_interp: true` and the RK2, RK4 or RK45 integrator is
   refused when it starts unless every record it reaches is a whole number of
   time steps from its start. A time-interpolated
-  RK step takes the velocity at its start and at the record ahead, so a step
-  that crossed a record without ending on it ran on the steady velocity of its
-  start, with a single warning per run. With hourly records and a step of
-  698.66 s, a 64th of the M2 period, every fifth step did so, and a particle in
-  a tidal current of 0.5 m/s drifted up to 49 m off its interpolated path. The
+  RK step takes the velocity at its start and at the next record, so its end
+  has to fall on that record; until now a step that crossed a record was taken
+  with the velocity of its start and a warning. The
   message names time steps that fit: for hourly records 1800, 1200, 900, 720 or
   600 s; for monthly means stamped at the centres of their windows, which lie
   29.5 to 31 days apart, any divisor of half a day, so a daily step is refused
@@ -191,36 +189,14 @@ the tracker was developed privately from 2026-06.
 
 ### Fixed
 
-- With a time step that is not a whole number of seconds, the run clock carries
-  rounding errors, and an RK2 or RK4 step that should end exactly on a record
-  ended slightly before or after it. If it ended after the record, the step ran
-  on the steady velocity of its start instead of the velocity interpolated in
-  time; if it ended before, the next step did. Each such step moved a particle
-  several metres off its interpolated path (17 m for a step of 2.4 days at a
-  few millimetres per second). A step that reaches a record to within 10⁻⁵ of
+- With a time step that is not a whole number of seconds, rounding in the run
+  clock could make an RK2 or RK4 step that should end exactly on a record end
+  slightly before or after it, and that step was then not interpolated in
+  time. A step that reaches a record to within 10⁻⁵ of
   the time step now ends exactly on it, and the run clock is set to the record,
   so the rounding error never builds up beyond one interval between records,
   however long the run. Runs whose time step is a whole number of seconds, on
   records stamped at whole seconds, are unchanged.
-
-- NEMO C-grid, 3-D: a particle at or below the floor of its column (below a
-  partial bottom cell's own thickness, or below the deepest interface) sampled
-  the bottom-water value of `mode.sample_vars`; it now samples NaN, like the zero
-  velocity it has there. The depth is converted to the fractional level of the
-  containing cell, as the step does.
-- NEMO C-grid, 3-D: a particle that crossed a side face without changing its
-  fractional level (no vertical velocity) kept its old depth in metres. With
-  `mesh.nemo_partial_cells: shrunk`, a crossing into a column with a thinner
-  partial bottom cell left that depth below the new column's floor, and the
-  particle stopped there at the next step while the same run with `porous` went
-  on. The depth is now measured again in the cell where the step ends, so both
-  settings give the same horizontal paths.
-- NEMO C-grid, 2-D: a 2-D run on a standard 3-D `mesh_mask` or `domain_cfg`
-  weighted its surface fluxes by the 3-D partial-cell thicknesses, which slowed
-  the flow next to a shallow one-level column (0.17 instead of 0.5 m/s in a
-  synthetic case). A 2-D run now uses the surface faces only and gives the same
-  trajectories with the 3-D mesh file as with its 2-D form; its output no longer
-  carries the 3-D attribute `nemo_partial_cells`.
 
 ## [1.1.0] - 2026-11-16
 
