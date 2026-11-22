@@ -5,7 +5,7 @@ All notable changes to KELP are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Public history starts with 0.9.0;
 the tracker was developed privately from 2026-06.
 
-## [Unreleased]
+## [1.2.0] - 2026-11-22
 
 ### Added — NEMO exact C-grid path (`mesh.nemo_grid: cgrid`)
 
